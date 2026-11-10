@@ -23,9 +23,22 @@
       "WebFetch(domain:doc.rust-lang.org)",
       "WebFetch(domain:crates.io)"
     ],
-    "deny": [
+    "ask": [
       "Bash(git push *)",
       "Bash(git push)",
+      "Bash(gh pr create *)"
+    ],
+    "deny": [
+      "Bash(git push origin main)",
+      "Bash(git push origin main *)",
+      "Bash(git push * origin main)",
+      "Bash(git push * main:main*)",
+      "Bash(git push * HEAD:main*)",
+      "Bash(git push --force*)",
+      "Bash(git push -f*)",
+      "Bash(git push * --force*)",
+      "Bash(git push * -f *)",
+      "Bash(gh pr merge *)",
       "Bash(cargo publish *)",
       "Bash(rm -rf *)",
       "Read(./.env)",
