@@ -1,0 +1,18 @@
+.DS_Store
+.env
+.env.*
+!.env.example
+
+# Rust
+/target/
+
+# Claude Code: personal settings and worktrees stay local
+.claude/settings.local.json
+.claude/worktrees/
+
+# Local scratch files (handoffs, notes)
+.scratch/
+
+# Editors
+/.idea/
+.vscode/
