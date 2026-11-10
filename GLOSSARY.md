@@ -15,6 +15,22 @@ by login, such as "Claude Max private" or "Claude Team work", or an API key.
 A provider can have several.
 _Avoid_: abo, account, plan, credential
 
+**Agent CLI**:
+An existing coding agent program from a provider that the harness runs,
+such as Claude Code or Codex.
+_Avoid_: backend, engine, runner, adapter
+
+**Chat**:
+One conversation of the developer with agents about one task. It keeps going
+when the model, provider or agent CLI changes, and consists of one or more
+agent sessions.
+_Avoid_: thread, conversation, session
+
+**Agent session**:
+One conversation inside one agent CLI. A chat that changes agent CLI
+continues in another agent session.
+_Avoid_: session (on its own), run
+
 **Git host**:
 A service that hosts repositories, such as GitHub or GitLab.
 _Avoid_: remote, forge, platform
