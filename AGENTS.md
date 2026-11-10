@@ -25,9 +25,18 @@ ask.
 - Add a dependency only after you check its maintenance and license against
   `deny.toml`.
 - Never put secrets, tokens or real user data in code, tests, logs or issues.
-- Never commit to `main`. Each ticket gets its own short-lived branch from
-  `main` (`<type>/<short-name>`, e.g. `feat/tool-registry`). Open a pull
-  request with `/pr`. Only the user merges.
+- Never commit to `development` or `main`. Each ticket gets its own
+  short-lived branch from `origin/development` (`<type>/<short-name>`, e.g.
+  `feat/tool-registry`). Open a pull request to `development` with `/pr`.
+  Only the user merges.
+- `development` is staging (beta builds), `main` is production (stable
+  releases). Pull requests are squash-merged into `development`. A release is
+  a pull request `development` -> `main`, merged with a merge commit, never
+  squashed. A hotfix branches from `main` as `hotfix/<name>`; after release it
+  returns through a new branch `sync/main-<date>` from `main` with a pull
+  request to `development`.
+- Auto-merge into `development` is allowed only once the automated agent
+  review is a required check. Until then the user merges by hand.
 - One pull request per ticket, not per commit. Small follow-up changes
   (docs, glossary, config) go into the pull request that is already open.
 - Never add AI attribution (`Co-Authored-By: Claude`/`Codex`, "Generated
