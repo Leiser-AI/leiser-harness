@@ -18,27 +18,13 @@ ask.
 
 - Always write to the user in German. Code, comments, commit messages and
   repository docs stay in English.
-- Ask before you implement when the goal, scope or acceptance criteria are
-  unclear.
-- Keep each change small and testable. One ticket, one reviewable change.
-- Reuse existing modules before you add new ones. Search first.
 - Add a dependency only after you check its maintenance and license against
   `deny.toml`.
 - Never put secrets, tokens or real user data in code, tests, logs or issues.
-- Never commit to `development` or `main`. Each ticket gets its own
-  short-lived branch from `origin/development` (`<type>/<short-name>`, e.g.
-  `feat/tool-registry`). Open a pull request to `development` with `/pr`.
-  Only the user merges.
-- `development` is staging (beta builds), `main` is production (stable
-  releases). Pull requests are squash-merged into `development`. A release is
-  a pull request `development` -> `main`, merged with a merge commit, never
-  squashed. A hotfix branches from `main` as `hotfix/<name>`; after release it
-  returns through a new branch `sync/main-<date>` from `main` with a pull
-  request to `development`.
-- Auto-merge into `development` is allowed only once the automated agent
-  review is a required check. Until then the user merges by hand.
-- One pull request per ticket, not per commit. Small follow-up changes
-  (docs, glossary, config) go into the pull request that is already open.
+- Never commit to `development` or `main`; work on a branch from
+  `origin/development` and open a pull request to `development`. Only the
+  user merges. Before you branch, push or open a pull request, read
+  `docs/agents/workflow.md`.
 - Never add AI attribution (`Co-Authored-By: Claude`/`Codex`, "Generated
   with ...") to commits or pull requests.
 - Commit, push, tag and release only when the user asks.
