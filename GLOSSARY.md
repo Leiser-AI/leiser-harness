@@ -37,6 +37,16 @@ One conversation inside one agent CLI. A chat that changes agent CLI
 continues in another agent session.
 _Avoid_: session (on its own), run
 
+**Handoff**:
+The part of a chat that the harness gives a new agent session so it can
+continue: a selection of the chat's real messages, not a summary.
+_Avoid_: summary, context transfer, migration
+
+**Harness service**:
+The part of the harness that runs in the background and keeps agent
+sessions running while the desktop app is closed or updated.
+_Avoid_: daemon, server, backend
+
 **Git host**:
 A service that hosts repositories, such as GitHub or GitLab.
 _Avoid_: remote, forge, platform
