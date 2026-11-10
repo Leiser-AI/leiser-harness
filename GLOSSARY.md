@@ -1,7 +1,7 @@
 # leiser-harness
 
 An agent harness for one developer's daily work: it runs coding agents on
-the developer's own subscriptions and is extended through plugins.
+the developer's own subscriptions.
 
 ## Language
 
@@ -19,6 +19,12 @@ _Avoid_: abo, account, plan, credential
 An existing coding agent program from a provider that the harness runs,
 such as Claude Code or Codex.
 _Avoid_: backend, engine, runner, adapter
+
+**CLI extension**:
+A skill, MCP server, hook or instruction file (such as `AGENTS.md`) that an
+agent CLI loads by itself. The harness can show and edit it, but it is not
+part of the harness.
+_Avoid_: plugin, add-on
 
 **Chat**:
 One conversation of the developer with agents about one task. It keeps going
