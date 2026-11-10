@@ -37,6 +37,11 @@ One conversation inside one agent CLI. A chat that changes agent CLI
 continues in another agent session.
 _Avoid_: session (on its own), run
 
+**Permission mode**:
+How much an agent session may do without the developer's approval:
+Supervised, Auto-accept edits, Auto or Full access. Set per chat.
+_Avoid_: runtime mode, approval policy, trust level
+
 **Handoff**:
 The part of a chat that the harness gives a new agent session so it can
 continue: a selection of the chat's real messages, not a summary.
