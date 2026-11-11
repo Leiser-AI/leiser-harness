@@ -18,23 +18,45 @@
 //! is installed or updated while the harness service runs is found, and a
 //! bundled copy that an update removed is not used.
 //!
-//! The agent CLI runs with its own directory first on `PATH`: an agent CLI
-//! installed with npm, such as Codex from Homebrew, is a Node.js script that
-//! needs the `node` installed next to it.
+//! `PATH` here is the developer's: the harness service asks the login shell
+//! (`SHELL`) once, as `$SHELL -l -i -c`, so the profile files that set up
+//! Homebrew, `cargo` or a version manager such as nvm run. Then come the
+//! directories of the service's inherited `PATH` that the login shell's
+//! lacks. The agent CLI runs with this `PATH`, so its shell tool finds the
+//! developer's tools, with its own directory first: an agent CLI installed
+//! with npm, such as Codex from Homebrew, is a Node.js script that needs
+//! the `node` installed next to it.
 //!
-//! Not done: asking the login shell for its `PATH`. That runs the
-//! developer's shell profile, which can be slow or wait for input. Add it
-//! if agent CLIs installed by a version manager such as nvm are not found.
+//! Asking the login shell runs the developer's profile, which can be slow,
+//! broken or wait for input. So the shell gets no input, its `PATH` is read
+//! between markers that the profile's own output cannot be mistaken for,
+//! and it gets [`LOGIN_SHELL_TIMEOUT`]; when it does not answer in time it
+//! is stopped with everything it started. On any failure the service uses
+//! its inherited `PATH`, as before. [`Environment::current`] starts asking
+//! in the background, so the first agent session usually need not wait.
+//! The answer is kept for the life of the service: a changed profile takes
+//! effect after a restart of the harness service.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use crate::{DriverError, Version};
 
 /// The variables an installed driver reads.
-const VARIABLES: [&str; 4] = ["PATH", "HOME", CLAUDE_CODE.variable, CODEX.variable];
+const VARIABLES: [&str; 5] = [
+    "PATH",
+    "HOME",
+    "SHELL",
+    CLAUDE_CODE.variable,
+    CODEX.variable,
+];
+
+/// How long the harness service waits for the login shell's `PATH`.
+const LOGIN_SHELL_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// System-wide install directories, searched after `PATH`.
 const SYSTEM_DIRECTORIES: &[&str] = if cfg!(unix) {
@@ -46,27 +68,47 @@ const SYSTEM_DIRECTORIES: &[&str] = if cfg!(unix) {
 /// Install directories under the home directory, searched after `PATH`.
 const HOME_DIRECTORIES: &[&str] = if cfg!(unix) { &[".local/bin"] } else { &[] };
 
-/// What an installed driver searches: a few environment variables and the
-/// system-wide install directories.
+/// What an installed driver searches: a few environment variables, the
+/// system-wide install directories and, if asked for, the login shell's
+/// `PATH`.
 #[derive(Debug, Clone, Default)]
 pub struct Environment {
     variables: HashMap<OsString, OsString>,
     system_directories: Vec<PathBuf>,
+    /// Shared by the environment's clones, so the login shell is asked
+    /// once.
+    login_shell: Option<Arc<LoginShell>>,
 }
 
 impl Environment {
-    /// The harness service's own environment and the system's install
-    /// directories.
+    /// The harness service's own environment, the system's install
+    /// directories and the login shell's `PATH`, asked once per harness
+    /// service and starting now.
     #[must_use]
     pub fn current() -> Self {
+        static LOGIN_SHELL: OnceLock<Arc<LoginShell>> = OnceLock::new();
         let variables = VARIABLES
             .into_iter()
             .filter_map(|name| Some((name.into(), std::env::var_os(name)?)))
             .collect();
-        Self {
+        let mut first = false;
+        let login_shell = LOGIN_SHELL.get_or_init(|| {
+            first = true;
+            Arc::new(LoginShell::new(LOGIN_SHELL_TIMEOUT))
+        });
+        let environment = Self {
             variables,
             system_directories: SYSTEM_DIRECTORIES.iter().map(PathBuf::from).collect(),
+            login_shell: Some(Arc::clone(login_shell)),
+        };
+        if first {
+            let asking = environment.clone();
+            // Without the thread the first agent session asks.
+            let _ = std::thread::Builder::new()
+                .name("login-shell-path".to_owned())
+                .spawn(move || asking.path());
         }
+        environment
     }
 
     /// This environment with the variable `name` set to `value`.
@@ -76,11 +118,72 @@ impl Environment {
         self
     }
 
+    /// This environment with `PATH` from the login shell its `SHELL` names,
+    /// asked the first time a driver needs it and given up after
+    /// `timeout`. The directories of its own `PATH` follow the login
+    /// shell's.
+    #[must_use]
+    pub fn with_login_shell_path(mut self, timeout: Duration) -> Self {
+        self.login_shell = Some(Arc::new(LoginShell::new(timeout)));
+        self
+    }
+
     fn variable(&self, name: &str) -> Option<&OsStr> {
         self.variables
             .get(OsStr::new(name))
             .map(OsString::as_os_str)
     }
+
+    /// The `PATH` agent CLIs are looked up on and run with.
+    fn path(&self) -> Option<OsString> {
+        let inherited = self.variable("PATH");
+        let Some(login) = self
+            .login_shell
+            .as_ref()
+            .and_then(|login_shell| login_shell.path(self.variable("SHELL")))
+        else {
+            return inherited.map(OsStr::to_os_string);
+        };
+        let inherited = inherited.map(std::env::split_paths).into_iter().flatten();
+        join_unique(std::env::split_paths(&login).chain(inherited))
+    }
+}
+
+/// The login shell's `PATH`, once asked.
+#[derive(Debug)]
+struct LoginShell {
+    timeout: Duration,
+    /// `None` when the login shell gave none.
+    path: OnceLock<Option<OsString>>,
+}
+
+impl LoginShell {
+    fn new(timeout: Duration) -> Self {
+        Self {
+            timeout,
+            path: OnceLock::new(),
+        }
+    }
+
+    /// Asks `shell` the first time; later calls, and calls while it is
+    /// being asked, get the same answer.
+    fn path(&self, shell: Option<&OsStr>) -> Option<OsString> {
+        self.path
+            .get_or_init(|| {
+                let shell = Path::new(shell?);
+                login_shell::ask(shell, self.timeout)
+            })
+            .clone()
+    }
+}
+
+/// `directories` as a `PATH`, each once and without empty ones.
+fn join_unique(directories: impl Iterator<Item = PathBuf>) -> Option<OsString> {
+    let mut seen = HashSet::new();
+    let directories = directories
+        .filter(|directory| !directory.as_os_str().is_empty())
+        .filter(|directory| seen.insert(directory.clone()));
+    std::env::join_paths(directories).ok()
 }
 
 /// How to find one agent CLI.
@@ -133,7 +236,8 @@ pub(crate) const CODEX: Install = Install {
 /// The program a driver runs.
 #[derive(Debug, Clone)]
 pub(crate) enum Program {
-    /// A path, or a name the operating system looks up on `PATH`.
+    /// A path, or a name the operating system looks up on `PATH`. Runs with
+    /// the harness service's own `PATH`.
     Given(PathBuf),
     /// Looked up whenever an agent session starts.
     Installed {
@@ -142,27 +246,53 @@ pub(crate) enum Program {
     },
 }
 
+/// A program to run now, and the `PATH` to run it with.
+#[derive(Debug)]
+pub(crate) struct Found {
+    pub(crate) program: PathBuf,
+    path: Option<OsString>,
+}
+
+impl Found {
+    /// A command that runs the program with its `PATH`.
+    pub(crate) fn command(&self) -> std::process::Command {
+        let mut command = std::process::Command::new(&self.program);
+        if let Some(path) = &self.path {
+            command.env("PATH", path);
+        }
+        command
+    }
+}
+
 impl Program {
     /// The program to run now.
-    pub(crate) fn resolve(&self) -> Result<PathBuf, DriverError> {
-        match self {
-            Self::Given(program) => Ok(program.clone()),
+    pub(crate) fn resolve(&self) -> Result<Found, DriverError> {
+        let (program, path) = match self {
+            Self::Given(program) => (program.clone(), std::env::var_os("PATH")),
             Self::Installed {
                 install,
                 environment,
-            } => install.find(environment),
-        }
+            } => {
+                let path = environment.path();
+                (install.find(environment, path.as_deref())?, path)
+            }
+        };
+        let path = path_for(&program, path.as_deref());
+        Ok(Found { program, path })
     }
 }
 
 impl Install {
-    fn find(&self, environment: &Environment) -> Result<PathBuf, DriverError> {
+    fn find(
+        &self,
+        environment: &Environment,
+        path: Option<&OsStr>,
+    ) -> Result<PathBuf, DriverError> {
         if let Some(program) = environment.variable(self.variable) {
             return Ok(program.into());
         }
         let file_name = format!("{}{}", self.program, std::env::consts::EXE_SUFFIX);
-        let on_path = environment
-            .variable("PATH")
+        let on_path = path
             .map(|path| std::env::split_paths(path).collect::<Vec<_>>())
             .unwrap_or_default();
         let home = environment.variable("HOME").map(Path::new);
@@ -248,15 +378,112 @@ fn is_program(path: &Path) -> bool {
     }
 }
 
-/// The `PATH` to run `program` with: the harness service's own, after the
-/// program's directory. `None` for a bare name, which is looked up on the
-/// service's own `PATH`.
-pub(crate) fn path_for(program: &Path) -> Option<OsString> {
+/// The `PATH` to run `program` with: `path`, after the program's
+/// directory.
+fn path_for(program: &Path, path: Option<&OsStr>) -> Option<OsString> {
     let directory = program
         .parent()
-        .filter(|directory| !directory.as_os_str().is_empty())?;
-    let inherited = std::env::var_os("PATH").unwrap_or_default();
-    let directories =
-        std::iter::once(directory.to_path_buf()).chain(std::env::split_paths(&inherited));
-    std::env::join_paths(directories).ok()
+        .filter(|directory| !directory.as_os_str().is_empty());
+    if directory.is_none() && path.is_none() {
+        return None;
+    }
+    let path = path.map(std::env::split_paths).into_iter().flatten();
+    join_unique(directory.map(Path::to_path_buf).into_iter().chain(path))
+}
+
+/// Asking the login shell for its `PATH`.
+mod login_shell {
+    use std::ffi::OsString;
+    use std::path::Path;
+    use std::time::Duration;
+
+    /// Printed before and after the `PATH`, so the profile's own output is
+    /// not taken for it.
+    #[cfg(unix)]
+    const MARKER: &str = "__LEISER_HARNESS_LOGIN_SHELL_PATH__";
+
+    /// The `PATH` of `shell` started as an interactive login shell, or
+    /// `None` when it gives none within `timeout`.
+    #[cfg(unix)]
+    pub(super) fn ask(shell: &Path, timeout: Duration) -> Option<OsString> {
+        use std::io::BufReader;
+        use std::os::unix::process::CommandExt;
+        use std::process::{Command, Stdio};
+        use std::sync::mpsc;
+
+        // `printenv` prints the exported `PATH` joined with `:` in every
+        // shell, also in fish, whose own `$PATH` is a list.
+        let script = format!("echo {MARKER}; printenv PATH; echo {MARKER}");
+        let spawned = Command::new(shell)
+            .args(["-l", "-i", "-c", &script])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            // Its own process group, to stop what the profile started too,
+            // and so the shell does not take over the terminal the harness
+            // service may run in.
+            .process_group(0)
+            .spawn();
+        let mut child = match spawned {
+            Ok(child) => child,
+            Err(error) => {
+                tracing::warn!(%error, shell = %shell.display(), "could not start the login shell; agent CLIs get the harness service's PATH");
+                return None;
+            }
+        };
+        let stdout = child.stdout.take()?;
+        let (sender, receiver) = mpsc::channel();
+        // Reads until the second marker, not to the end: something the
+        // profile started in the background may keep the output open.
+        std::thread::spawn(move || {
+            let _ = sender.send(read_path(BufReader::new(stdout)));
+        });
+        let path = match receiver.recv_timeout(timeout) {
+            Ok(Some(path)) => Some(path),
+            Ok(None) => {
+                tracing::warn!(shell = %shell.display(), "the login shell printed no PATH; agent CLIs get the harness service's PATH");
+                None
+            }
+            Err(_) => {
+                tracing::warn!(shell = %shell.display(), ?timeout, "the login shell did not print its PATH in time; agent CLIs get the harness service's PATH");
+                stop_group(child.id());
+                let _ = child.kill();
+                None
+            }
+        };
+        // Reaps the shell without waiting for it.
+        std::thread::spawn(move || child.wait());
+        path
+    }
+
+    #[cfg(not(unix))]
+    pub(super) fn ask(_shell: &Path, _timeout: Duration) -> Option<OsString> {
+        None
+    }
+
+    /// The line between the first two marker lines of `output`.
+    #[cfg(unix)]
+    fn read_path(output: impl std::io::BufRead) -> Option<OsString> {
+        use std::os::unix::ffi::OsStringExt;
+
+        let mut lines = output.split(b'\n');
+        lines
+            .by_ref()
+            .map_while(Result::ok)
+            .find(|line| line == MARKER.as_bytes())?;
+        let path = lines.next()?.ok()?;
+        let end = lines.next()?.ok()?;
+        (end == MARKER.as_bytes() && !path.is_empty()).then(|| OsString::from_vec(path))
+    }
+
+    /// Stops the process group `group` and everything in it.
+    #[cfg(unix)]
+    fn stop_group(group: u32) {
+        let _ = std::process::Command::new("kill")
+            .args(["-KILL", &format!("-{group}")])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
 }
