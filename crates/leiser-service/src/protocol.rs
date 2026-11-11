@@ -404,6 +404,13 @@ pub enum Command {
     /// the worktree is marked done and stays readable, but takes no more
     /// messages.
     RemoveWorktree { chat: ChatId },
+    /// Switches auto-fix on or off for the chat (on by default). While it
+    /// is on and the chat's pull request is open, the harness service
+    /// polls the git host and, when a check fails, the branch conflicts
+    /// with the base branch or a review comment comes in, wakes the chat's
+    /// agent to fix it and pushes the fix. Switching it on again after it
+    /// stopped by itself ([`AutoFix::Stopped`]) starts over.
+    SetAutoFix { chat: ChatId, on: bool },
     /// After the chat's last turn stopped at a usage limit: changes the
     /// subscription of the chat's agent CLI to `subscription`, as
     /// [`Command::ChangeSubscription`] does, and continues the chat there in
@@ -643,6 +650,8 @@ pub enum Response {
         /// The chat's pull request, as the harness last saw it. Boxed to
         /// keep [`Response`] small.
         pull_request: Option<Box<PullRequest>>,
+        /// Whether the harness fixes the chat's pull request by itself.
+        auto_fix: AutoFix,
         transcript: Vec<TranscriptEntry>,
     },
     SubscriptionAdded {
@@ -682,6 +691,10 @@ pub enum Response {
     },
     /// The chat's worktree and local branch are gone.
     WorktreeRemoved,
+    /// Auto-fix of the chat is on or off as asked.
+    AutoFixSet {
+        auto_fix: AutoFix,
+    },
     InterchangeableSet,
     /// The chat continues on the new subscription in a new turn.
     ContinuedOnSubscription,
@@ -919,6 +932,94 @@ pub enum PullRequestState {
     Closed,
 }
 
+/// Whether the harness watches a chat's open pull request and wakes the
+/// chat's agent to fix it (see [`Command::SetAutoFix`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AutoFix {
+    /// It watches the pull request while it is open.
+    On,
+    /// The developer switched it off.
+    Off,
+    /// It stopped by itself and handed over to the developer.
+    Stopped { reason: AutoFixStop },
+}
+
+/// Why auto-fix stopped by itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AutoFixStop {
+    /// `attempts` attempts in a row at failing checks or a conflict left
+    /// the pull request's head commit as it was.
+    NoProgress { attempts: u32 },
+    /// The check failed again on the commit auto-fix pushed to fix it.
+    CheckFailedAgain { name: String },
+    /// The branch conflicts with the same base commit again on the commit
+    /// auto-fix pushed to resolve it.
+    ConflictAgain,
+    /// The harness could not push the agent's fix.
+    PushFailed { reason: String },
+    /// The git host could not be asked about the pull request, several
+    /// times in a row.
+    PollFailed { reason: String },
+}
+
+/// What woke a chat's agent to fix its pull request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AutoFixTrigger {
+    /// A check on the pull request's head commit failed.
+    CheckFailed {
+        name: String,
+        /// Where the git host shows the check.
+        url: String,
+    },
+    /// The branch conflicts with the base branch.
+    Conflict { base: String },
+    /// A review comment, a review that is not an approval, or a comment on
+    /// the pull request.
+    Comment {
+        author: String,
+        body: String,
+        /// The file and line it is on; `None` for the whole pull request.
+        location: Option<CommentLocation>,
+    },
+}
+
+impl std::fmt::Display for AutoFixTrigger {
+    /// One line on what happened, such as "The check `test` failed.".
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::CheckFailed { name, .. } => write!(f, "The check `{name}` failed."),
+            Self::Conflict { base } => write!(f, "The branch conflicts with `{base}`."),
+            Self::Comment {
+                author,
+                body,
+                location: Some(location),
+            } => write!(f, "{author} on {location}: {body}"),
+            Self::Comment { author, body, .. } => write!(f, "{author}: {body}"),
+        }
+    }
+}
+
+/// Where in a pull request's files a comment is.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommentLocation {
+    pub path: String,
+    /// `None` for a comment on the whole file.
+    pub line: Option<u64>,
+}
+
+impl std::fmt::Display for CommentLocation {
+    /// `path:line`, or the path alone.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.line {
+            Some(line) => write!(f, "{}:{line}", self.path),
+            None => f.write_str(&self.path),
+        }
+    }
+}
+
 /// What is checked out in a working directory.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -980,6 +1081,15 @@ pub enum TranscriptEntry {
         /// interchangeable subscriptions.
         automatic: bool,
     },
+    /// Auto-fix woke the chat's agent; the turn that fixes the pull
+    /// request follows.
+    AutoFixTriggered {
+        /// The pull request's number.
+        pull_request: u64,
+        triggers: Vec<AutoFixTrigger>,
+    },
+    /// Auto-fix stopped by itself and hands over to the developer.
+    AutoFixStopped { reason: AutoFixStop },
 }
 
 /// The developer's answer to an approval request or a question.
@@ -1418,6 +1528,16 @@ pub enum Event {
     /// The chat's worktree and local branch were removed
     /// ([`Command::RemoveWorktree`]).
     WorktreeRemoved { chat: ChatId },
+    /// Auto-fix of the chat was switched on or off, or stopped by itself;
+    /// a stop is also stored in the chat's transcript.
+    AutoFixChanged { chat: ChatId, auto_fix: AutoFix },
+    /// Auto-fix woke the chat's agent; also stored in the chat's
+    /// transcript. The turn's events follow.
+    AutoFixTriggered {
+        chat: ChatId,
+        pull_request: u64,
+        triggers: Vec<AutoFixTrigger>,
+    },
     /// An update of the harness service waits until no turn runs. Then the
     /// service restarts on the new version and resumes every agent session.
     ServiceUpdateWaiting,
@@ -1441,6 +1561,8 @@ impl Event {
             | Self::TodosChanged { chat, .. }
             | Self::CheckpointRestored { chat, .. }
             | Self::PullRequestChanged { chat, .. }
+            | Self::AutoFixChanged { chat, .. }
+            | Self::AutoFixTriggered { chat, .. }
             | Self::WorktreeRemoved { chat } => Some(*chat),
             Self::LoginOutput { .. }
             | Self::LoginFinished { .. }

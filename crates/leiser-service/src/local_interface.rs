@@ -73,8 +73,7 @@ enum ServiceFrame {
     },
     Reply {
         id: u64,
-        /// Boxed: a chat's answer is much larger than the other frames.
-        result: Box<Outcome>,
+        result: Outcome,
     },
     Event {
         event: Event,
@@ -85,7 +84,9 @@ enum ServiceFrame {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum Outcome {
-    Ok(Response),
+    /// Boxed: a chat's answer is much larger than an error or the other
+    /// frames.
+    Ok(Box<Response>),
     Err(CommandError),
 }
 
@@ -289,13 +290,13 @@ async fn read_requests(
                     let frames = frames.clone();
                     running.spawn(async move {
                         let result = match service.execute(command).await {
-                            Ok(response) => Outcome::Ok(response),
+                            Ok(response) => Outcome::Ok(Box::new(response)),
                             Err(error) => Outcome::Err(error),
                         };
                         let _ = frames
                             .send(ServiceFrame::Reply {
                                 id,
-                                result: Box::new(result),
+                                result,
                             })
                             .await;
                     });
@@ -501,8 +502,8 @@ async fn read_frames(
                     .ok()
                     .and_then(|mut pending| pending.as_mut()?.remove(&id));
                 if let Some(reply) = reply {
-                    let _ = reply.send(match *result {
-                        Outcome::Ok(response) => Ok(response),
+                    let _ = reply.send(match result {
+                        Outcome::Ok(response) => Ok(*response),
                         Outcome::Err(error) => Err(error),
                     });
                 }

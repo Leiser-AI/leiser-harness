@@ -763,6 +763,25 @@ body {
   min-width: 0;
 }
 
+/* What woke the agent for auto-fix. */
+.entry.notice.auto-fix .icon,
+.entry.notice.auto-fix .entry-label {
+  color: var(--color-accent);
+}
+
+.auto-fix-triggers {
+  margin: var(--space-1) 0 0;
+  padding-left: var(--space-4);
+  color: var(--color-text);
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+/* Auto-fix stopped and waits for the developer. */
+.top-bar-action.warning {
+  color: var(--color-warning);
+}
+
 /* The end of a turn: a thin rule with a word in it. */
 .turn-ended {
   display: flex;

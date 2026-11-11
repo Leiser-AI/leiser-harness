@@ -9,6 +9,7 @@
 //! so tests never touch the developer's real keychain or config.
 
 mod fake_driver;
+mod fake_gh;
 mod gate;
 mod git_host;
 mod harness_mcp_client;
@@ -21,10 +22,13 @@ mod turn;
 pub use fake_driver::{
     FAKE_LOGIN_FILE, FAKE_USAGE_LIMIT_FILE, FakeDriver, FakeLogin, FakeUsageLimit, UNSET,
 };
+pub use fake_gh::{
+    FAKE_GH_ANSWERS_FILE, FAKE_GH_REQUESTS_FILE, FakeGh, FakeGhAnswer, FakeGhRequest,
+};
 pub use gate::Gate;
 pub use git_host::{
-    FAKE_CREDENTIAL_HELPER, FAKE_GIT_HOST_LOGIN_FILE, FAKE_GIT_HOST_MERGED_FILE, FakeGitHost,
-    FakePullRequest,
+    FAKE_CREDENTIAL_HELPER, FAKE_GIT_HOST_ACTIVITY_FILE, FAKE_GIT_HOST_LOGIN_FILE,
+    FAKE_GIT_HOST_MERGED_FILE, FakeGitHost, FakePoll, FakePullRequest,
 };
 pub use harness_mcp_client::{HarnessMcpClient, McpClientError, ToolOutput};
 pub use keychain::MemoryKeychain;

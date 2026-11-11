@@ -10,7 +10,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
-use crate::{AgentCli, AgentEvent, HARNESS_MCP_SERVER, TranscriptEntry};
+use crate::{AgentCli, AgentEvent, AutoFixTrigger, HARNESS_MCP_SERVER, TranscriptEntry};
 
 /// The token budget of a handoff, and of one read-chat answer.
 pub(crate) const BUDGET_TOKENS: usize = 16_000;
@@ -53,6 +53,8 @@ enum Entry<'a> {
     ToolCall(AgentCli, &'a str, &'a str),
     ToolResult(AgentCli, &'a str, &'a str),
     Command(AgentCli, &'a str, Option<i32>, &'a str),
+    /// Auto-fix woke the agent.
+    AutoFix(&'a [AutoFixTrigger]),
 }
 
 fn quoted(transcript: &[TranscriptEntry]) -> Vec<Quoted<'_>> {
@@ -86,9 +88,11 @@ fn quoted(transcript: &[TranscriptEntry]) -> Vec<Quoted<'_>> {
                 // The agent session that asked has its answer already, and
                 // the harness's own scripts and subscription changes were
                 // not the agent's doing.
+                TranscriptEntry::AutoFixTriggered { triggers, .. } => Entry::AutoFix(triggers),
                 TranscriptEntry::Answer { .. }
                 | TranscriptEntry::ScriptFinished { .. }
-                | TranscriptEntry::ContinuedOnSubscription { .. } => {
+                | TranscriptEntry::ContinuedOnSubscription { .. }
+                | TranscriptEntry::AutoFixStopped { .. } => {
                     return None;
                 }
             };
@@ -120,6 +124,15 @@ impl Quoted<'_> {
                 "{}{output}\n\n",
                 command_heading(number, cli, command, exit_code)
             ),
+            Entry::AutoFix(triggers) => {
+                let mut text = format!("## {number}. Auto-fix woke the agent\n");
+                for trigger in triggers {
+                    // Writing to a `String` cannot fail.
+                    let _ = writeln!(text, "- {trigger}");
+                }
+                text.push('\n');
+                text
+            }
         }
     }
 
@@ -135,7 +148,9 @@ impl Quoted<'_> {
                 command_heading(self.number, cli, command, exit_code),
                 output,
             ),
-            Entry::Developer(_) | Entry::Agent(..) | Entry::ToolCall(..) => return None,
+            Entry::Developer(_) | Entry::Agent(..) | Entry::ToolCall(..) | Entry::AutoFix(_) => {
+                return None;
+            }
         };
         Some(format!("{heading}{}\n\n", tail(output, OUTCOME_TAIL_BYTES)))
     }

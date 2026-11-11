@@ -29,15 +29,17 @@
 //! [`TranscriptEntry`] and the `repo-check` report. A change that old data no longer parses with bumps
 //! [`VERSION`] and migrates the older version in [`Store::open`].
 
+use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::git_host::CommitId;
 use crate::repo_check::Outcome;
 use crate::{
-    AgentCli, AgentEvent, PermissionMode, Provider, PullRequestState, SubscriptionKind,
+    AgentCli, AgentEvent, AutoFix, PermissionMode, Provider, PullRequestState, SubscriptionKind,
     TranscriptEntry, TurnCheckpoints,
 };
 
@@ -182,6 +184,66 @@ pub(crate) struct ChatV3 {
     /// The chat's pull request, once it is open.
     #[serde(default)]
     pub pull_request: Option<PullRequestV3>,
+    /// The chat's auto-fix; on for chats stored before it existed.
+    #[serde(default)]
+    pub auto_fix: AutoFixV3,
+}
+
+/// A chat's auto-fix: its setting and what it remembers between polls.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct AutoFixV3 {
+    pub setting: AutoFix,
+    /// The ids of the comments it has handled; `None` takes the next
+    /// poll's comments as handled.
+    pub seen_comments: Option<Vec<String>>,
+    /// The checks attempts tried to fix, by name.
+    pub checks: BTreeMap<String, TriedV3>,
+    pub conflict: Option<ConflictV3>,
+    pub attempts: Option<AttemptsV3>,
+    pub awaiting_push: Option<AwaitingPushV3>,
+}
+
+impl Default for AutoFixV3 {
+    fn default() -> Self {
+        Self {
+            setting: AutoFix::On,
+            seen_comments: None,
+            checks: BTreeMap::new(),
+            conflict: None,
+            attempts: None,
+            awaiting_push: None,
+        }
+    }
+}
+
+/// An attempt at a problem: the head commit it was tried on, and the
+/// commit auto-fix pushed with the fix.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct TriedV3 {
+    pub on: CommitId,
+    pub fixed_in: Option<CommitId>,
+}
+
+/// A conflict with base commit `base` an attempt tried to resolve.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ConflictV3 {
+    pub base: CommitId,
+    pub tried: TriedV3,
+}
+
+/// How many attempts auto-fix made on one head commit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct AttemptsV3 {
+    pub head: CommitId,
+    pub count: u32,
+}
+
+/// A pushed fix the git host had not reported yet.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct AwaitingPushV3 {
+    pub head_before: CommitId,
+    pub polls: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -453,6 +515,7 @@ impl Store {
                     held: Vec::new(),
                     worktree_removed: false,
                     pull_request: None,
+                    auto_fix: AutoFixV3::default(),
                 })
                 .collect(),
         };

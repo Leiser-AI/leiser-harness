@@ -6,6 +6,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   AgentCli,
   Answer,
+  AutoFix,
   Branch,
   ChatId,
   Checkout,
@@ -62,6 +63,8 @@ export interface ChatView {
   place: ChatPlace;
   /** The chat's pull request, as the harness last saw it. */
   pullRequest: PullRequest | null;
+  /** Whether the harness fixes the chat's pull request by itself. */
+  autoFix: AutoFix;
   transcript: TranscriptEntry[];
 }
 
@@ -313,6 +316,7 @@ export async function readChat(chat: ChatId): Promise<ChatView> {
         usageLimit: response.usage_limit,
         place: response.place ?? "worktree",
         pullRequest: response.pull_request ?? null,
+        autoFix: response.auto_fix ?? { type: "off" },
         transcript: response.transcript,
       }
     : unexpected(response);
@@ -399,6 +403,12 @@ export async function openPullRequest(chat: ChatId, title: string, body: string)
 export async function checkPullRequest(chat: ChatId): Promise<PullRequest> {
   const response = await execute({ type: "check_pull_request", chat });
   return response.type === "pull_request" ? response.pull_request : unexpected(response);
+}
+
+/** Switches auto-fix of the chat's pull request on or off. */
+export async function setAutoFix(chat: ChatId, on: boolean): Promise<AutoFix> {
+  const response = await execute({ type: "set_auto_fix", chat, on });
+  return response.type === "auto_fix_set" ? response.auto_fix : unexpected(response);
 }
 
 /** Removes the chat's worktree and local branch after its pull request was merged. */

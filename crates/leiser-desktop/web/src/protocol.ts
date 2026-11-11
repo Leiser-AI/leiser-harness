@@ -63,6 +63,7 @@ export type Command =
   | { type: "push"; chat: ChatId }
   | { type: "open_pull_request"; chat: ChatId; title: string; body: string }
   | { type: "check_pull_request"; chat: ChatId }
+  | { type: "set_auto_fix"; chat: ChatId; on: boolean }
   | { type: "remove_worktree"; chat: ChatId }
   | { type: "run_repo_check"; repository: RepositoryId }
   | { type: "read_repo_check"; repository: RepositoryId }
@@ -152,6 +153,8 @@ export type Response =
       /** Missing from services older than pull requests. */
       place?: ChatPlace;
       pull_request?: PullRequest | null;
+      /** Missing from services older than auto-fix. */
+      auto_fix?: AutoFix;
       transcript: TranscriptEntry[];
     }
   | { type: "subscription_added"; subscription: SubscriptionId }
@@ -169,6 +172,7 @@ export type Response =
   | { type: "pull_request_opened"; pull_request: PullRequest }
   | { type: "pull_request"; pull_request: PullRequest }
   | { type: "worktree_removed" }
+  | { type: "auto_fix_set"; auto_fix: AutoFix }
   | { type: "interchangeable_set" }
   | { type: "continued_on_subscription" }
   | { type: "repo_check_started" }
@@ -340,6 +344,27 @@ export interface PullRequest {
   state: PullRequestState;
 }
 
+/** Whether the harness watches the chat's open pull request and fixes it. */
+export type AutoFix = { type: "on" } | { type: "off" } | { type: "stopped"; reason: AutoFixStop };
+
+export type AutoFixStop =
+  | { type: "no_progress"; attempts: number }
+  | { type: "check_failed_again"; name: string }
+  | { type: "conflict_again" }
+  | { type: "push_failed"; reason: string }
+  | { type: "poll_failed"; reason: string };
+
+export type AutoFixTrigger =
+  | { type: "check_failed"; name: string; url: string }
+  | { type: "conflict"; base: string }
+  | { type: "comment"; author: string; body: string; location: CommentLocation | null };
+
+/** Where in a pull request's files a comment is. */
+export interface CommentLocation {
+  path: string;
+  line: number | null;
+}
+
 export interface ChatOverview {
   chat: ChatId;
   repository: RepositoryId;
@@ -394,7 +419,9 @@ export type TranscriptEntry =
       provider: Provider;
       subscription: SubscriptionId | null;
       automatic: boolean;
-    };
+    }
+  | { type: "auto_fix_triggered"; pull_request: number; triggers: AutoFixTrigger[] }
+  | { type: "auto_fix_stopped"; reason: AutoFixStop };
 
 export type Answer =
   | { type: "approve" }
@@ -459,6 +486,13 @@ export type ServiceEvent =
   | { type: "checkpoint_restored"; chat: ChatId; turn: number; moment: CheckpointMoment }
   | { type: "pull_request_changed"; chat: ChatId; pull_request: PullRequest }
   | { type: "worktree_removed"; chat: ChatId }
+  | { type: "auto_fix_changed"; chat: ChatId; auto_fix: AutoFix }
+  | {
+      type: "auto_fix_triggered";
+      chat: ChatId;
+      pull_request: number;
+      triggers: AutoFixTrigger[];
+    }
   | { type: "service_update_waiting" };
 
 /** The app's connection to the harness service (not part of the service's protocol). */

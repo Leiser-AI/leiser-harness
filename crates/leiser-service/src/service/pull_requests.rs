@@ -346,7 +346,7 @@ impl State {
     }
 
     /// Stores the chat's pull request and tells the desktop app.
-    fn keep_pull_request(&self, id: ChatId, pull_request: &PullRequest) {
+    pub(super) fn keep_pull_request(&self, id: ChatId, pull_request: &PullRequest) {
         if let Err(error) = self.save() {
             tracing::error!(chat = ?id, %error, "could not store the pull request");
         }

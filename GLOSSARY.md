@@ -79,3 +79,10 @@ _Avoid_: remote, forge, platform
 One user account on a git host, such as a private and a business GitHub
 account. Every repository is bound to exactly one host account.
 _Avoid_: GitHub account, profile, login, identity
+
+**Auto-fix**:
+The harness watching a chat's open pull request and waking the chat's
+agent when a check fails, the branch conflicts with the base branch or a
+review comment comes in, then pushing the agent's fix. On by default, set
+per chat; merging stays with the developer.
+_Avoid_: autopilot, PR bot, watcher
