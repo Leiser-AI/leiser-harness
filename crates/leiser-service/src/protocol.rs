@@ -6,15 +6,15 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 /// A repository added to the harness.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct RepositoryId(pub(crate) u64);
 
 /// A chat: one conversation of the developer with agents about one task.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ChatId(pub(crate) u64);
 
 /// An agent CLI the harness service can run a chat on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentCli {
     ClaudeCode,
@@ -50,26 +50,110 @@ pub enum Command {
         checkout: Checkout,
     },
     /// Sends the developer's message to the chat's agent session, starting
-    /// the agent session if the chat has none yet.
+    /// the agent session if the chat has none yet. Fails while a turn runs;
+    /// queue or steer the message instead.
     ///
-    /// When the chat changed agent CLI since its last message, the message
-    /// goes to that agent CLI's earlier agent session if it still runs,
-    /// with a handoff of the chat's messages since; otherwise to a new
-    /// agent session with a handoff of the chat so far.
+    /// The first message after [`Command::ChangeAgentCli`] goes to that
+    /// agent CLI's earlier agent session, resumed, with a handoff of the
+    /// chat's entries since; without one, to a new agent session with a
+    /// handoff of the chat so far.
     SendMessage { chat: ChatId, text: String },
-    /// Changes the agent CLI that the chat's next message goes to. A new
-    /// chat starts on the service's default agent CLI.
+    /// Changes the agent CLI that the chat's next message goes to, and
+    /// ends the chat's agent session on the agent CLI it leaves. A new chat
+    /// starts on the service's default agent CLI. Fails while a turn runs.
     ChangeAgentCli { chat: ChatId, agent_cli: AgentCli },
+    /// Sends the message when the running turn ends, as the next turn.
+    /// Queued messages are sent in order, one turn each. Without a running
+    /// turn the message is sent at once.
+    QueueMessage { chat: ChatId, text: String },
+    /// Delivers the message into the running turn when the agent CLI can
+    /// take it mid-turn, and queues it otherwise. Without a running turn
+    /// the message is sent at once.
+    SteerMessage { chat: ChatId, text: String },
+    /// Asks the agent CLI to stop the running turn. The turn ends with
+    /// [`AgentEvent::TurnInterrupted`]; queued messages are sent after it.
+    InterruptTurn { chat: ChatId },
+    /// Lists every chat with its current status.
+    ListChats,
+    /// Reads a chat's status and transcript.
+    ReadChat { chat: ChatId },
 }
 
 /// The answer to a successful [`Command`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Response {
-    RepositoryAdded { repository: RepositoryId },
-    ChatStarted { chat: ChatId },
+    RepositoryAdded {
+        repository: RepositoryId,
+    },
+    ChatStarted {
+        chat: ChatId,
+    },
+    /// The message was sent and starts a turn.
     MessageSent,
+    /// The message waits for the running turn to end.
+    MessageQueued {
+        reason: QueueReason,
+    },
+    /// The message was delivered into the running turn.
+    MessageSteered,
+    /// The agent CLI was asked to stop the running turn.
+    InterruptRequested,
+    /// The chat's next message goes to the new agent CLI.
     AgentCliChanged,
+    Chats {
+        chats: Vec<ChatOverview>,
+    },
+    Chat {
+        status: ChatStatus,
+        transcript: Vec<TranscriptEntry>,
+    },
+}
+
+/// A chat as the sidebar lists it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatOverview {
+    pub chat: ChatId,
+    pub repository: RepositoryId,
+    pub status: ChatStatus,
+}
+
+/// What a chat is doing right now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatStatus {
+    /// No turn is running.
+    Idle,
+    /// A turn is running.
+    Working,
+}
+
+/// One entry of a chat's transcript, in the order it happened.
+///
+/// The harness service stores these on disk, so a change that breaks
+/// reading old entries needs a storage migration (see `store.rs`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum TranscriptEntry {
+    /// A message the developer sent to the agent session, also a queued
+    /// one once it was sent, or one steered into the running turn.
+    UserMessage { text: String },
+    /// An event from one of the chat's agent sessions.
+    Agent {
+        agent_cli: AgentCli,
+        event: AgentEvent,
+    },
+}
+
+/// Why a message was queued instead of being delivered now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QueueReason {
+    /// The developer queued it.
+    Requested,
+    /// The developer steered it, but the agent CLI cannot take a message
+    /// mid-turn.
+    SteerUnsupported,
 }
 
 /// Why a [`Command`] failed.
@@ -82,10 +166,16 @@ pub enum CommandError {
     UnknownRepository(RepositoryId),
     #[error("unknown chat {0:?}")]
     UnknownChat(ChatId),
+    #[error("a turn is running in chat {0:?}; queue or steer the message")]
+    TurnRunning(ChatId),
+    #[error("no turn is running in chat {0:?}")]
+    NoTurnRunning(ChatId),
     #[error("no driver is configured for {0}")]
     AgentCliNotConfigured(AgentCli),
     #[error("the agent CLI failed: {reason}")]
     AgentCli { reason: String },
+    #[error("the harness service could not store the chat: {reason}")]
+    Storage { reason: String },
     #[error("the harness service has stopped")]
     ServiceStopped,
 }
@@ -96,9 +186,34 @@ pub enum CommandError {
 pub enum Event {
     /// An event from a chat's agent session.
     Agent { chat: ChatId, event: AgentEvent },
+    /// The developer's message waits for the running turn to end.
+    MessageQueued {
+        chat: ChatId,
+        text: String,
+        reason: QueueReason,
+    },
+    /// The developer's message was delivered into the running turn.
+    MessageSteered { chat: ChatId, text: String },
+    /// A queued message was sent and starts the next turn.
+    QueuedMessageSent { chat: ChatId, text: String },
+}
+
+impl Event {
+    /// The chat the event belongs to.
+    #[must_use]
+    pub fn chat(&self) -> ChatId {
+        match self {
+            Self::Agent { chat, .. }
+            | Self::MessageQueued { chat, .. }
+            | Self::MessageSteered { chat, .. }
+            | Self::QueuedMessageSent { chat, .. } => *chat,
+        }
+    }
 }
 
 /// An event from an agent session, the same for every agent CLI.
+///
+/// Stored in chat transcripts; see [`TranscriptEntry`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEvent {
@@ -106,7 +221,11 @@ pub enum AgentEvent {
     Message { text: String },
     /// The agent called a tool.
     ToolCall { name: String, detail: String },
-    /// A command the agent ran has finished.
+    /// A tool the agent called returned. Shell commands end with
+    /// [`AgentEvent::CommandFinished`] instead where the agent CLI reports
+    /// their exit code.
+    ToolResult { name: String, output: String },
+    /// A shell command the agent ran has finished.
     CommandFinished {
         command: String,
         /// `None` when the command was stopped before it exited.
@@ -125,6 +244,8 @@ pub enum AgentEvent {
     },
     /// The agent finished its turn.
     TurnEnded,
+    /// The turn ended early because the developer interrupted it.
+    TurnInterrupted,
     /// The agent session ended; the agent CLI exited or broke its protocol.
     SessionEnded,
 }

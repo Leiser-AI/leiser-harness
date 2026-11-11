@@ -2,24 +2,18 @@
 
 use std::error::Error;
 use std::path::Path;
-use std::sync::Arc;
 
 use leiser_service::{
-    AgentCli, AgentEvent, ChatId, Checkout, Command, CommandError, Response, ServiceConfig,
-    ServiceHandle,
+    AgentEvent, ChatId, Checkout, Command, CommandError, Response, ServiceHandle,
 };
-use leiser_testkit::{FakeDriver, Script, Step, TestRepo, collect_turn};
+use leiser_testkit::{Script, Step, TestRepo, TestService, collect_turn};
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
 const FAKE_AGENT_CLI: &str = env!("CARGO_BIN_EXE_fake-agent-cli");
 
-fn start_service(script: &Script) -> TestResult<ServiceHandle> {
-    let driver = FakeDriver::new(Path::new(FAKE_AGENT_CLI), script)?;
-    Ok(leiser_service::start(ServiceConfig::new(
-        AgentCli::ClaudeCode,
-        Arc::new(driver),
-    ))?)
+fn start_service(script: &Script) -> TestResult<TestService> {
+    Ok(TestService::start(Path::new(FAKE_AGENT_CLI), script)?)
 }
 
 async fn start_chat(service: &ServiceHandle, repo: &TestRepo) -> TestResult<ChatId> {
@@ -72,7 +66,8 @@ async fn a_message_reaches_the_agent_cli_and_its_events_come_back() -> TestResul
             event: tool_call.clone(),
         },
     ]);
-    let service = start_service(&script)?;
+    let harness = start_service(&script)?;
+    let service = harness.connect();
     let repo = TestRepo::new()?;
     let chat = start_chat(&service, &repo).await?;
     let mut events = service.subscribe();
@@ -88,7 +83,8 @@ async fn a_message_reaches_the_agent_cli_and_its_events_come_back() -> TestResul
 
 #[tokio::test]
 async fn a_chat_in_the_main_checkout_runs_the_agent_cli_in_the_repository() -> TestResult {
-    let service = start_service(&Script::new().turn([Step::ReportWorkingDirectory]))?;
+    let harness = start_service(&Script::new().turn([Step::ReportWorkingDirectory]))?;
+    let service = harness.connect();
     let repo = TestRepo::new()?;
     let chat = start_chat(&service, &repo).await?;
     let mut events = service.subscribe();
@@ -121,7 +117,8 @@ async fn approval_requests_and_usage_limits_come_back_as_events() -> TestResult 
             event: limit.clone(),
         },
     ]);
-    let service = start_service(&script)?;
+    let harness = start_service(&script)?;
+    let service = harness.connect();
     let repo = TestRepo::new()?;
     let chat = start_chat(&service, &repo).await?;
     let mut events = service.subscribe();
@@ -140,7 +137,8 @@ async fn the_next_message_continues_the_same_agent_session() -> TestResult {
     let script = Script::new()
         .turn([Step::message("first answer")])
         .turn([Step::EchoUserMessage]);
-    let service = start_service(&script)?;
+    let harness = start_service(&script)?;
+    let service = harness.connect();
     let repo = TestRepo::new()?;
     let chat = start_chat(&service, &repo).await?;
     let mut events = service.subscribe();
@@ -160,7 +158,8 @@ async fn the_next_message_continues_the_same_agent_session() -> TestResult {
 
 #[tokio::test]
 async fn adding_a_directory_that_is_not_a_git_repository_fails() -> TestResult {
-    let service = start_service(&Script::new())?;
+    let harness = start_service(&Script::new())?;
+    let service = harness.connect();
     let dir = tempfile::tempdir()?;
 
     let result = service
@@ -180,7 +179,8 @@ async fn adding_a_directory_that_is_not_a_git_repository_fails() -> TestResult {
 
 #[tokio::test]
 async fn sending_to_an_unknown_chat_fails() -> TestResult {
-    let service = start_service(&Script::new())?;
+    let harness = start_service(&Script::new())?;
+    let service = harness.connect();
     // Chat ids arrive from the desktop app over the local interface, so an
     // unknown one can only be made by deserializing it.
     let unknown: ChatId = serde_json::from_str("42")?;

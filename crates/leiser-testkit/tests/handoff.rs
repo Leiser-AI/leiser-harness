@@ -7,10 +7,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use leiser_service::{
-    AgentCli, AgentEvent, ChatId, Checkout, Command, CommandError, Event, Response, ServiceConfig,
-    ServiceHandle,
+    AgentCli, AgentEvent, ChatId, Checkout, Command, CommandError, Event, Response, ServiceHandle,
 };
-use leiser_testkit::{FakeDriver, Script, Step, TestRepo, collect_turn};
+use leiser_testkit::{FakeDriver, Script, Step, TestRepo, TestService, collect_turn};
 use serde_json::json;
 use tokio::sync::broadcast;
 
@@ -30,10 +29,11 @@ fn driver(script: &Script) -> TestResult<Arc<FakeDriver>> {
 
 /// A service whose chats start on Claude Code and can change to Codex,
 /// both played by the fake agent CLI.
-fn start_service(claude_code: &Script, codex: &Script) -> TestResult<ServiceHandle> {
-    let config = ServiceConfig::new(AgentCli::ClaudeCode, driver(claude_code)?)
-        .with_driver(AgentCli::Codex, driver(codex)?);
-    Ok(leiser_service::start(config)?)
+fn start_service(claude_code: &Script, codex: &Script) -> TestResult<TestService> {
+    Ok(TestService::with_drivers(
+        (AgentCli::ClaudeCode, driver(claude_code)?),
+        vec![(AgentCli::Codex, driver(codex)?)],
+    )?)
 }
 
 async fn start_chat(service: &ServiceHandle, repo: &TestRepo) -> TestResult<ChatId> {
@@ -106,8 +106,10 @@ async fn answer(
 async fn wait_for_session_end(events: &mut broadcast::Receiver<Event>, chat: ChatId) -> TestResult {
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            let Event::Agent { chat: from, event } = events.recv().await?;
-            if from == chat && event == AgentEvent::SessionEnded {
+            if let Event::Agent { chat: from, event } = events.recv().await?
+                && from == chat
+                && event == AgentEvent::SessionEnded
+            {
                 return Ok(());
             }
         }
@@ -130,7 +132,8 @@ async fn changing_agent_cli_continues_the_chat_in_a_new_agent_session_with_a_han
 {
     let claude_code = Script::new().turn([Step::message("Plan: parse the config with serde.")]);
     let codex = Script::new().turn([Step::EchoUserMessage]);
-    let service = start_service(&claude_code, &codex)?;
+    let harness = start_service(&claude_code, &codex)?;
+    let service = harness.connect();
     let repo = TestRepo::new()?;
     let chat = start_chat(&service, &repo).await?;
     let mut events = service.subscribe();
@@ -168,7 +171,8 @@ async fn the_handoff_keeps_the_first_request_recent_messages_and_command_outcome
         claude_code = claude_code.turn([Step::EchoUserMessage]);
     }
     let codex = Script::new().turn([Step::EchoUserMessage]);
-    let service = start_service(&claude_code, &codex)?;
+    let harness = start_service(&claude_code, &codex)?;
+    let service = harness.connect();
     let repo = TestRepo::new()?;
     let chat = start_chat(&service, &repo).await?;
     let mut events = service.subscribe();
@@ -223,7 +227,8 @@ async fn read_chat_returns_the_entries_the_handoff_left_out() -> TestResult {
             arguments: json!({ "from": 3, "to": 3 }),
         },
     ]);
-    let service = start_service(&claude_code, &codex)?;
+    let harness = start_service(&claude_code, &codex)?;
+    let service = harness.connect();
     let repo = TestRepo::new()?;
     let chat = start_chat(&service, &repo).await?;
     let mut events = service.subscribe();
@@ -250,7 +255,8 @@ async fn read_chat_reports_an_entry_that_does_not_exist() -> TestResult {
         name: "read_chat".to_owned(),
         arguments: json!({ "from": 99 }),
     };
-    let service = start_service(&Script::new().turn([read]), &Script::new())?;
+    let harness = start_service(&Script::new().turn([read]), &Script::new())?;
+    let service = harness.connect();
     let repo = TestRepo::new()?;
     let chat = start_chat(&service, &repo).await?;
     let mut events = service.subscribe();
@@ -264,7 +270,8 @@ async fn read_chat_reports_an_entry_that_does_not_exist() -> TestResult {
 #[tokio::test]
 async fn every_agent_session_gets_the_read_chat_tool() -> TestResult {
     let script = Script::new().turn([Step::ListHarnessTools]);
-    let service = start_service(&script, &script)?;
+    let harness = start_service(&script, &script)?;
+    let service = harness.connect();
     let repo = TestRepo::new()?;
     let chat = start_chat(&service, &repo).await?;
     let mut events = service.subscribe();
@@ -284,7 +291,8 @@ async fn changing_back_resumes_the_earlier_agent_session_with_the_messages_since
         .turn([Step::message("Claude Code's first answer")])
         .turn([Step::EchoUserMessage]);
     let codex = Script::new().turn([Step::message("Codex's answer")]);
-    let service = start_service(&claude_code, &codex)?;
+    let harness = start_service(&claude_code, &codex)?;
+    let service = harness.connect();
     let repo = TestRepo::new()?;
     let chat = start_chat(&service, &repo).await?;
     let mut events = service.subscribe();
@@ -306,11 +314,41 @@ async fn changing_back_resumes_the_earlier_agent_session_with_the_messages_since
 }
 
 #[tokio::test]
-async fn changing_back_after_the_earlier_agent_session_ended_starts_a_new_one_with_a_handoff()
+async fn changing_back_after_a_restart_resumes_the_earlier_agent_session_with_the_entries_since()
 -> TestResult {
-    let claude_code = Script::new().turn([Step::EchoUserMessage, Step::EndSession]);
+    let claude_code = Script::new()
+        .turn([Step::message("Claude Code's first answer")])
+        .turn([Step::EchoUserMessage]);
     let codex = Script::new().turn([Step::message("Codex's answer")]);
-    let service = start_service(&claude_code, &codex)?;
+    let harness = start_service(&claude_code, &codex)?;
+    let service = harness.connect();
+    let repo = TestRepo::new()?;
+    let chat = start_chat(&service, &repo).await?;
+    let mut events = service.subscribe();
+    answer(&service, &mut events, chat, "The first request.").await?;
+    change(&service, chat, AgentCli::Codex).await?;
+    answer(&service, &mut events, chat, "The second request.").await?;
+
+    let harness = harness.restart().await?;
+    let service = harness.connect();
+    let mut events = service.subscribe();
+    change(&service, chat, AgentCli::ClaudeCode).await?;
+    let echo = answer(&service, &mut events, chat, "The third request.").await?;
+
+    let handoff = split_echo(&echo, "The third request.")?;
+    assert!(handoff.contains("The second request."), "{handoff}");
+    assert!(handoff.contains("Codex's answer"), "{handoff}");
+    assert!(!handoff.contains("The first request."), "{handoff}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn changing_back_to_an_agent_session_that_cannot_be_resumed_starts_a_new_one_with_a_handoff()
+-> TestResult {
+    let claude_code = Script::new().turn([Step::EchoUserMessage, Step::ForgetSession]);
+    let codex = Script::new().turn([Step::message("Codex's answer")]);
+    let harness = start_service(&claude_code, &codex)?;
+    let service = harness.connect();
     let repo = TestRepo::new()?;
     let chat = start_chat(&service, &repo).await?;
     let mut events = service.subscribe();
@@ -323,6 +361,8 @@ async fn changing_back_after_the_earlier_agent_session_ended_starts_a_new_one_wi
     let echo = answer(&service, &mut events, chat, "The third request.").await?;
 
     assert_eq!(first, "The first request.", "no handoff into an empty chat");
+    // Claude Code forgot its agent session, so a new one plays the first
+    // turn again and gets the whole chat.
     let handoff = split_echo(&echo, "The third request.")?;
     assert!(handoff.contains("The first request."), "{handoff}");
     assert!(handoff.contains("Codex's answer"), "{handoff}");
@@ -334,7 +374,8 @@ async fn staying_on_the_same_agent_cli_sends_no_handoff() -> TestResult {
     let claude_code = Script::new()
         .turn([Step::message("first answer")])
         .turn([Step::EchoUserMessage]);
-    let service = start_service(&claude_code, &Script::new())?;
+    let harness = start_service(&claude_code, &Script::new())?;
+    let service = harness.connect();
     let repo = TestRepo::new()?;
     let chat = start_chat(&service, &repo).await?;
     let mut events = service.subscribe();
@@ -349,8 +390,8 @@ async fn staying_on_the_same_agent_cli_sends_no_handoff() -> TestResult {
 
 #[tokio::test]
 async fn changing_to_an_agent_cli_without_a_driver_fails() -> TestResult {
-    let driver = driver(&Script::new())?;
-    let service = leiser_service::start(ServiceConfig::new(AgentCli::ClaudeCode, driver))?;
+    let harness = TestService::with_driver(AgentCli::ClaudeCode, driver(&Script::new())?)?;
+    let service = harness.connect();
     let repo = TestRepo::new()?;
     let chat = start_chat(&service, &repo).await?;
 

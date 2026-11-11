@@ -3,7 +3,8 @@
 //! A small MCP server over streamable HTTP on localhost, without server
 //! streams or sessions: every POST carries one JSON-RPC message and gets a
 //! JSON answer. Each agent session gets its own address with an
-//! unguessable token, which also names the chat it may read.
+//! unguessable token, which also names the chat it may read. The chat is
+//! read through the service's command loop, which owns the transcripts.
 //!
 //! v1 exposes one tool, always on: `read_chat`.
 
@@ -22,9 +23,10 @@ use hyper_util::rt::TokioIo;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
+use tokio::sync::{mpsc, oneshot};
 
-use crate::handoff;
-use crate::transcript::{SharedTranscript, lock};
+use crate::ChatId;
+use crate::handoff::{self, ReadError};
 
 /// Protocol versions this server speaks, newest first.
 const PROTOCOL_VERSIONS: [&str; 3] = ["2025-11-25", "2025-06-18", "2025-03-26"];
@@ -45,7 +47,24 @@ pub enum HarnessMcpError {
     Token(getrandom::Error),
 }
 
-type Chats = Arc<Mutex<HashMap<String, SharedTranscript>>>;
+/// A read-chat call, for the command loop to answer.
+#[derive(Debug)]
+pub(crate) struct ChatRead {
+    pub chat: ChatId,
+    pub from: usize,
+    pub to: Option<usize>,
+    pub reply: oneshot::Sender<Result<String, ReadError>>,
+}
+
+/// What every connection shares: which token reads which chat, and where
+/// reads go.
+#[derive(Debug)]
+struct Shared {
+    chats: Mutex<HashMap<String, ChatId>>,
+    reads: mpsc::Sender<ChatRead>,
+}
+
+type Chats = Arc<Shared>;
 
 /// A running harness MCP server.
 #[derive(Debug)]
@@ -55,9 +74,9 @@ pub(crate) struct HarnessMcp {
 }
 
 impl HarnessMcp {
-    /// Listens on a free localhost port. Must be called inside a Tokio
-    /// runtime.
-    pub(crate) fn start() -> Result<Self, HarnessMcpError> {
+    /// Listens on a free localhost port; read-chat calls go to `reads`.
+    /// Must be called inside a Tokio runtime.
+    pub(crate) fn start(reads: mpsc::Sender<ChatRead>) -> Result<Self, HarnessMcpError> {
         let listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .and_then(|listener| {
                 listener.set_nonblocking(true)?;
@@ -66,14 +85,17 @@ impl HarnessMcp {
             .and_then(TcpListener::from_std)
             .map_err(HarnessMcpError::Listen)?;
         let address = listener.local_addr().map_err(HarnessMcpError::Listen)?;
-        let chats = Chats::default();
+        let chats = Arc::new(Shared {
+            chats: Mutex::default(),
+            reads,
+        });
         tokio::spawn(accept(listener, chats.clone()));
         Ok(Self { address, chats })
     }
 
     /// Gives an agent session its own address, through which it reads
-    /// `transcript`.
-    pub(crate) fn register(&self, transcript: SharedTranscript) -> Result<String, HarnessMcpError> {
+    /// `chat`.
+    pub(crate) fn register(&self, chat: ChatId) -> Result<String, HarnessMcpError> {
         let mut bytes = [0_u8; 16];
         getrandom::fill(&mut bytes).map_err(HarnessMcpError::Token)?;
         let token = bytes.iter().fold(String::new(), |mut token, byte| {
@@ -82,9 +104,10 @@ impl HarnessMcp {
         });
         let url = format!("http://{}/mcp/{token}", self.address);
         self.chats
+            .chats
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(token, transcript);
+            .insert(token, chat);
         Ok(url)
     }
 }
@@ -117,18 +140,19 @@ async fn handle(request: Request<Incoming>, chats: &Chats) -> Response<Full<Byte
     {
         return status(StatusCode::FORBIDDEN);
     }
-    let transcript = request
+    let chat = request
         .uri()
         .path()
         .strip_prefix("/mcp/")
         .and_then(|token| {
             chats
+                .chats
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .get(token)
-                .cloned()
+                .copied()
         });
-    let Some(transcript) = transcript else {
+    let Some(chat) = chat else {
         return status(StatusCode::NOT_FOUND);
     };
     if request.method() != Method::POST {
@@ -151,8 +175,8 @@ async fn handle(request: Request<Incoming>, chats: &Chats) -> Response<Full<Byte
         Ok(None) => return status(StatusCode::ACCEPTED),
         Err(error) => return json_response(StatusCode::BAD_REQUEST, &error),
     };
-    let reply = match message.request.map(|request| answer(request, &transcript)) {
-        Ok(result) => Reply::result(message.id, result),
+    let reply = match message.request {
+        Ok(request) => Reply::result(message.id, answer(request, chat, &chats.reads).await),
         Err(error) => Reply::error(Some(message.id), error),
     };
     json_response(StatusCode::OK, &reply)
@@ -277,7 +301,7 @@ fn parse_request(method: &str, params: Option<Value>) -> Result<McpRequest, RpcE
     }
 }
 
-fn answer(request: McpRequest, transcript: &SharedTranscript) -> Value {
+async fn answer(request: McpRequest, chat: ChatId, reads: &mpsc::Sender<ChatRead>) -> Value {
     match request {
         McpRequest::Initialize(params) => {
             let version = PROTOCOL_VERSIONS
@@ -299,10 +323,12 @@ fn answer(request: McpRequest, transcript: &SharedTranscript) -> Value {
         McpRequest::Ping => json!({}),
         McpRequest::ListTools => json!({ "tools": [read_chat_tool()] }),
         McpRequest::CallTool(ToolCall::ReadChat(arguments)) => {
-            let text = arguments.and_then(|arguments| {
-                handoff::read(&lock(transcript), arguments.from, arguments.to)
-                    .map_err(|error| error.to_string())
-            });
+            let text = match arguments {
+                Ok(arguments) => read_chat(chat, arguments, reads)
+                    .await
+                    .map_err(|error| error.to_string()),
+                Err(error) => Err(error),
+            };
             match text {
                 Ok(text) => json!({
                     "content": [{ "type": "text", "text": text }],
@@ -315,6 +341,25 @@ fn answer(request: McpRequest, transcript: &SharedTranscript) -> Value {
             }
         }
     }
+}
+
+async fn read_chat(
+    chat: ChatId,
+    arguments: ReadChatArguments,
+    reads: &mpsc::Sender<ChatRead>,
+) -> Result<String, ReadError> {
+    let stopped = || ReadError::Unavailable("the harness service has stopped".to_owned());
+    let (reply, answer) = oneshot::channel();
+    reads
+        .send(ChatRead {
+            chat,
+            from: arguments.from,
+            to: arguments.to,
+            reply,
+        })
+        .await
+        .map_err(|_| stopped())?;
+    answer.await.map_err(|_| stopped())?
 }
 
 fn read_chat_tool() -> Value {

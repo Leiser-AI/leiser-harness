@@ -1,20 +1,38 @@
 //! What the fake agent CLI plays back, and the lines it reads.
 
+use std::path::PathBuf;
+
 use leiser_service::AgentEvent;
 use serde::{Deserialize, Serialize};
 
 /// The turns the fake agent CLI plays back, one per message it receives.
-/// Every turn ends with [`AgentEvent::TurnEnded`]; a message after the last
-/// turn gets an empty turn. A new agent session starts at the first turn.
+/// Every turn ends with [`AgentEvent::TurnEnded`], or with
+/// [`AgentEvent::TurnInterrupted`] when it is interrupted; a message after
+/// the last turn gets an empty turn. A resumed agent session continues
+/// with the turn after the last one it played.
+///
+/// The fake agent CLI exits with an error on input a real one would not
+/// get from a correct harness service: a message while a turn runs, or a
+/// steer while no turn runs or when steering is not supported.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Script {
     pub turns: Vec<Vec<Step>>,
+    /// Whether the fake agent CLI takes messages mid-turn.
+    #[serde(default)]
+    pub supports_steer: bool,
 }
 
 impl Script {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Lets the fake agent CLI take messages mid-turn.
+    #[must_use]
+    pub fn supports_steer(mut self) -> Self {
+        self.supports_steer = true;
+        self
     }
 
     /// Adds the next turn.
@@ -35,6 +53,14 @@ pub enum Step {
     EchoUserMessage,
     /// Answers with the directory the fake agent CLI runs in.
     ReportWorkingDirectory,
+    /// Waits for a steered message, unless one already came this turn;
+    /// [`Step::EchoSteer`] can answer it.
+    WaitForSteer,
+    /// Answers with the text of the last steered message of this turn.
+    EchoSteer,
+    /// Waits until the file at `gate` exists, as a long turn would; see
+    /// [`Gate`](crate::Gate).
+    WaitForGate { gate: PathBuf },
     /// Answers with the names of the harness MCP server's tools, joined
     /// by commas.
     ListHarnessTools,
@@ -44,8 +70,9 @@ pub enum Step {
         name: String,
         arguments: serde_json::Value,
     },
-    /// Ends the agent session once this turn has ended.
-    EndSession,
+    /// Ends the agent session once this turn has ended and forgets it, as
+    /// an agent CLI whose session expired would: resuming it fails.
+    ForgetSession,
 }
 
 impl Step {
@@ -66,4 +93,6 @@ impl Step {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum FakeInput {
     UserMessage { text: String },
+    Steer { text: String },
+    Interrupt,
 }
