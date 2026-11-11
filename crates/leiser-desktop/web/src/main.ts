@@ -32,6 +32,7 @@ import type {
 import * as extensions from "./extensions";
 import { icon, type IconName } from "./icons";
 import * as service from "./service";
+import * as terminal from "./terminal";
 import {
   AGENT_CLI_NAMES,
   AGENT_CLI_PROVIDERS,
@@ -111,11 +112,30 @@ function iconButton(name: IconName, label: string, className = ""): HTMLButtonEl
   return button;
 }
 
-/** The top bar's heading: what the main column shows. */
-function topBarTitle(text: string): HTMLElement {
-  const title = el("h1", "top-bar-title", text);
-  title.title = text;
-  return title;
+/**
+ * Fills the top bar: the title and the view's buttons on the first line,
+ * facts such as the repository and branch on the second.
+ */
+function renderTopBar(title: string, facts: HTMLElement[] = [], actions: HTMLElement[] = []): void {
+  const heading = el("h1", "top-bar-title", title);
+  heading.title = title;
+  const first = el("div", "top-bar-row");
+  first.append(heading, ...actions);
+  const rows: HTMLElement[] = [first];
+  if (facts.length > 0) {
+    const second = el("div", "top-bar-facts");
+    second.append(...facts);
+    rows.push(second);
+  }
+  topBar.replaceChildren(...rows);
+}
+
+/** A top bar button; in a narrow window only its icon shows. */
+function topBarAction(iconName: IconName, text: string, className = ""): HTMLButtonElement {
+  const button = el("button", `top-bar-action ${className}`.trim());
+  button.type = "button";
+  button.append(icon(iconName), el("span", "action-label", text));
+  return button;
 }
 
 function showError(error: unknown): void {
@@ -193,6 +213,7 @@ async function refresh(): Promise<void> {
     repoCheckView.hidden = true;
     renderExtensionsTopBar(shown ?? null);
     renderTodos(null, null);
+    terminal.show(null);
     return;
   }
   const checked = repositories.find((overview) => overview.repository === selectedCheck);
@@ -200,6 +221,7 @@ async function refresh(): Promise<void> {
   if (checked && check) {
     renderRepoCheck(checked, check);
     renderTodos(null, null);
+    terminal.show(null);
     return;
   }
   repoCheckView.hidden = true;
@@ -305,10 +327,7 @@ function leaveExtensions(): boolean {
 }
 
 function renderExtensionsTopBar(repository: RepositoryOverview | null): void {
-  topBar.replaceChildren(
-    topBarTitle("CLI extensions"),
-    labelled("Repository", repository?.name ?? "unknown"),
-  );
+  renderTopBar("CLI extensions", [labelled("Repository", repository?.name ?? "unknown")]);
 }
 
 function renderSidebar(
@@ -420,21 +439,26 @@ function renderChat(
   subscriptions: SubscriptionOverview[],
 ): void {
   if (view === null || overview === null) {
+    terminal.show(null);
     selectedWorking = false;
     selectedOpenRequests = [];
-    topBar.replaceChildren(topBarTitle("No chat selected"));
+    renderTopBar("No chat selected");
     transcript.replaceChildren(el("li", "empty", "Select a chat or start a new one."));
     composer.hidden = true;
     composerOptions.replaceChildren();
     return;
   }
   const chat = overview.chat;
-  topBar.replaceChildren(
-    topBarTitle(overview.title ?? "New chat"),
-    labelled("Repository", repository?.name ?? "unknown"),
-    labelled("Branch", branchName(view.branch)),
-    labelled("Checkout", overview.worktree === null ? "main checkout" : "worktree"),
-    ...chatActions(overview),
+  // The terminal panel's shell runs here.
+  const checkout = overview.worktree ?? repository?.path;
+  renderTopBar(
+    overview.title ?? "New chat",
+    [
+      labelled("Repository", repository?.name ?? "unknown"),
+      labelled("Branch", branchName(view.branch)),
+      labelled("Checkout", overview.worktree === null ? "main checkout" : "worktree"),
+    ],
+    chatActions(overview, checkout),
   );
   const agentCli = el("span", "composer-agent-cli", AGENT_CLI_NAMES[view.agentCli]);
   agentCli.title = "The agent CLI this chat runs on";
@@ -443,6 +467,7 @@ function renderChat(
     subscriptionPicker(view, subscriptions),
     permissionModePicker(overview.chat, view),
   );
+  terminal.show(chat, checkout);
   const context: ChatContext = {
     chat,
     open: new Set(view.openRequests),
@@ -510,11 +535,15 @@ function permissionModePicker(chat: ChatId, view: ChatView): HTMLElement {
 }
 
 /** The top bar's buttons for the selected chat. */
-function chatActions(overview: ChatOverview): HTMLElement[] {
+function chatActions(overview: ChatOverview, checkout: string | undefined): HTMLElement[] {
   const actions: HTMLElement[] = [];
+  const toggleTerminal = topBarAction("terminal", terminal.isOpen() ? "Hide terminal" : "Terminal", "ghost");
+  toggleTerminal.title = "A shell in the chat's checkout";
+  toggleTerminal.setAttribute("aria-pressed", String(terminal.isOpen()));
+  toggleTerminal.addEventListener("click", () => terminal.toggle(overview.chat, checkout));
+  actions.push(toggleTerminal);
   if (overview.worktree !== null) {
-    const sameWorktree = el("button", "top-bar-action ghost", "New chat in this worktree");
-    sameWorktree.type = "button";
+    const sameWorktree = topBarAction("plus", "New chat in this worktree", "ghost");
     sameWorktree.title = overview.worktree;
     sameWorktree.addEventListener("click", () =>
       act(() => startAndSelect(overview.repository, { type: "worktree", chat: overview.chat })),
@@ -522,9 +551,7 @@ function chatActions(overview: ChatOverview): HTMLElement[] {
     actions.push(sameWorktree);
   }
   if (overview.status === "waiting_for_you") {
-    const done = el("button", "top-bar-action", "Mark done");
-    done.prepend(icon("check"));
-    done.type = "button";
+    const done = topBarAction("check", "Mark done");
     done.addEventListener("click", () =>
       act(async () => {
         await service.markChatDone(overview.chat);
@@ -557,11 +584,11 @@ function renderRepoCheck(repository: RepositoryOverview, check: RepoCheck): void
   composer.hidden = true;
   transcript.hidden = true;
   repoCheckView.hidden = false;
-  const items = [topBarTitle("repo-check"), labelled("Repository", repository.name)];
+  const items = [labelled("Repository", repository.name)];
   if (check.state === "done" && check.report.commit !== null) {
     items.push(labelled("Commit", check.report.commit));
   }
-  topBar.replaceChildren(...items);
+  renderTopBar("repo-check", items);
 
   const run = el("button", "primary", check.state === "not_run" ? "Run repo-check" : "Run again");
   run.type = "button";
@@ -1126,6 +1153,7 @@ async function send(): Promise<void> {
         await service.queueMessage(chat, text);
       }
       messageInput.value = "";
+      fitMessageInput();
       await refresh();
     });
   } finally {
@@ -1166,6 +1194,14 @@ byId("add-repository").addEventListener("click", () =>
     await refresh();
   }),
 );
+
+/** Grows the message field with its text, up to the height CSS allows. */
+function fitMessageInput(): void {
+  messageInput.style.height = "auto";
+  messageInput.style.height = `${messageInput.scrollHeight}px`;
+}
+
+messageInput.addEventListener("input", fitMessageInput);
 
 composer.addEventListener("submit", (event) => {
   event.preventDefault();
@@ -1215,6 +1251,9 @@ addSubscriptionForm.addEventListener("submit", (event) => {
     await refresh();
   });
 });
+
+// The top bar's terminal button follows the panel.
+terminal.init(() => void refresh().catch(showError));
 
 void act(async () => {
   await service.subscribe(

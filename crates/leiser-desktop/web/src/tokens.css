@@ -40,6 +40,10 @@
   --color-danger-soft: rgb(196 43 43 / 9%);
   --color-danger-border: rgb(196 43 43 / 40%);
 
+  /* The terminal panel; xterm.js reads these once, so they hold plain colors. */
+  --terminal-bg: #fbfbfa;
+  --terminal-fg: #1d1d1b;
+
   /* Diffs. */
   --color-diff-added: rgb(46 160 67 / 14%);
   --color-diff-removed: rgb(248 81 73 / 14%);
@@ -133,6 +137,9 @@
     --color-danger: #f47067;
     --color-danger-soft: rgb(244 112 103 / 11%);
     --color-danger-border: rgb(244 112 103 / 40%);
+
+    --terminal-bg: #161618;
+    --terminal-fg: #e9e9eb;
 
     --color-diff-added: rgb(46 160 67 / 18%);
     --color-diff-removed: rgb(248 81 73 / 18%);

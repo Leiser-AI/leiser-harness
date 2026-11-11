@@ -36,14 +36,25 @@
         </div>
       </form>
     </main>
-    <aside id="todos" class="todos" aria-label="Todo list" hidden>
-      <h2 class="todos-header">Todos</h2>
-      <ul id="todo-list" class="todo-list"></ul>
-      <form id="todo-form" class="todo-form">
-        <input id="todo-text" type="text" placeholder="Add a todo" aria-label="New todo" />
-        <button type="submit">Add</button>
-      </form>
-    </aside>
+    <div id="side-panels" class="side-panels">
+      <aside id="todos" class="todos" aria-label="Todo list" hidden>
+        <h2 class="todos-header">Todos</h2>
+        <ul id="todo-list" class="todo-list"></ul>
+        <form id="todo-form" class="todo-form">
+          <input id="todo-text" type="text" placeholder="Add a todo" aria-label="New todo" />
+          <button type="submit">Add</button>
+        </form>
+      </aside>
+      <section id="terminal-panel" class="terminal-panel" aria-label="Terminal" hidden>
+        <header class="terminal-header">
+          <h2>Terminal</h2>
+          <span id="terminal-directory" class="terminal-directory muted"></span>
+          <button id="terminal-end" type="button" title="Ends the shell and the programs it runs">End shell</button>
+          <button id="terminal-hide" type="button" title="Hides the panel; the shell keeps running">Hide</button>
+        </header>
+        <div id="terminal-screens" class="terminal-screens"></div>
+      </section>
+    </div>
     <dialog id="subscriptions-dialog" class="subscriptions-dialog" aria-labelledby="subscriptions-title">
       <header class="dialog-header">
         <h2 id="subscriptions-title">Subscriptions</h2>

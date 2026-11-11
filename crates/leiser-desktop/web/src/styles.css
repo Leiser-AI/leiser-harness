@@ -7,24 +7,18 @@
 @import "./tokens.css";
 @import "./components.css";
 
-/* ---- Window layout: sidebar | top bar over chat | todos ---- */
+/* ---- Window layout: sidebar | top bar over chat | side panels ---- */
 
 body {
   margin: 0;
   height: 100vh;
   overflow: hidden;
   display: grid;
-  grid-template-columns: var(--sidebar-width) minmax(0, 1fr) var(--panel-width);
+  grid-template-columns: var(--sidebar-width) minmax(0, 1fr) auto;
   grid-template-rows: auto minmax(0, 1fr);
-  grid-template-areas: "side top todos" "side chat todos";
+  grid-template-areas: "side top panels" "side chat panels";
   background: var(--color-bg);
   color: var(--color-text);
-}
-
-/* Without a selected chat the chat column takes the panel's place. */
-body:has(.todos[hidden]) {
-  grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
-  grid-template-areas: "side top" "side chat";
 }
 
 @media (max-width: 1080px) {
@@ -255,43 +249,28 @@ body:has(.todos[hidden]) {
 
 .top-bar {
   grid-area: top;
+  container-type: inline-size;
   display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 0 var(--space-4);
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
+  min-width: 0;
   min-height: 48px;
   padding: var(--space-2) var(--space-4);
   border-bottom: 1px solid var(--color-border);
 }
 
-.top-bar::after {
-  content: "";
-  flex-basis: 100%;
-  order: 2;
+.top-bar-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-width: 0;
 }
 
-.top-bar > .top-bar-item {
-  order: 3;
-}
-
-.top-bar > .top-bar-action {
-  order: 1;
-}
-
-/* Only a title: center it in the bar. */
-.top-bar:has(> .top-bar-title:only-child) {
-  align-content: center;
-}
-
-/*
- * First line: the title, then the view's buttons. Second line: facts such
- * as the repository and branch. `order` and the line break keep this
- * however the items arrive.
- */
 .top-bar-title {
-  flex: 1 1 0;
-  min-width: 120px;
-  margin: 0;
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0 var(--space-2) 0 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -299,28 +278,22 @@ body:has(.todos[hidden]) {
   font-weight: var(--weight-semibold);
 }
 
+/* One line, so the bar's height never depends on wrapping; long values shorten. */
+.top-bar-facts {
+  display: flex;
+  align-items: baseline;
+  gap: 0 var(--space-4);
+  min-width: 0;
+  overflow: hidden;
+}
+
 .top-bar-item {
   display: inline-flex;
+  flex: 0 1 auto;
   align-items: baseline;
   gap: 6px;
   min-width: 0;
-  max-width: 100%;
   white-space: nowrap;
-}
-
-/* In a narrow window the values speak for themselves. */
-@media (max-width: 960px) {
-  .top-bar {
-    column-gap: var(--space-3);
-  }
-
-  .top-bar-label {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    overflow: hidden;
-    clip-path: inset(50%);
-  }
 }
 
 .top-bar-label {
@@ -339,17 +312,47 @@ body:has(.todos[hidden]) {
 }
 
 .top-bar-action {
-  margin-left: calc(var(--space-2) - var(--space-4));
+  flex: none;
   height: var(--control-height-sm);
   padding: 0 var(--space-2);
   font-size: var(--text-sm);
 }
 
+.top-bar-action[aria-pressed="true"] {
+  background: var(--color-selected);
+  color: var(--color-text);
+}
+
+/*
+ * In a narrow column (a narrow window, or the terminal open beside it) the
+ * values speak for themselves and the buttons show their icon.
+ */
+@container (max-width: 620px) {
+  .top-bar-facts {
+    column-gap: var(--space-3);
+  }
+
+  .top-bar-label,
+  .top-bar-action .action-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  .top-bar-action {
+    width: var(--control-height-sm);
+    padding: 0;
+  }
+}
 
 /* ---- Main column ---- */
 
 .chat {
   grid-area: chat;
+  container-type: inline-size;
   display: flex;
   flex-direction: column;
   min-width: 0;
@@ -762,8 +765,9 @@ body:has(.todos[hidden]) {
   border-color: var(--color-accent);
 }
 
+/* main.ts grows the field with its text up to `max-height`. */
 .composer textarea {
-  field-sizing: content;
+  height: 52px;
   min-height: 52px;
   max-height: 40vh;
   padding: var(--space-3) var(--space-3) var(--space-1);
@@ -851,7 +855,7 @@ body:has(.todos[hidden]) {
   margin-left: auto;
 }
 
-@media (max-width: 960px) {
+@container (max-width: 600px) {
   .composer-agent-cli {
     display: none;
   }
@@ -866,16 +870,103 @@ body:has(.todos[hidden]) {
   border-radius: var(--radius-lg);
 }
 
-/* ---- Todos ---- */
+/* ---- Side panels: todos, and the terminal below them ---- */
 
-.todos {
-  grid-area: todos;
+.side-panels {
+  grid-area: panels;
   display: flex;
   flex-direction: column;
+  width: var(--panel-width);
   min-height: 0;
   border-left: 1px solid var(--color-border);
   background: var(--color-bg-sidebar);
 }
+
+/* Without a panel to show the chat column takes their place. */
+.side-panels:not(:has(> :not([hidden]))) {
+  display: none;
+}
+
+.side-panels:has(> .terminal-panel:not([hidden])) {
+  width: clamp(360px, 42vw, 760px);
+}
+
+.todos {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.side-panels:has(> .terminal-panel:not([hidden])) .todos {
+  flex: 0 1 auto;
+  max-height: 35%;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.terminal-panel {
+  flex: 1 1 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.terminal-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  height: 40px;
+  padding: 0 var(--space-2) 0 var(--space-4);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.terminal-header h2 {
+  margin: 0;
+  font-size: var(--text-md);
+  font-weight: var(--weight-semibold);
+}
+
+/* The end of a long path matters most, so it keeps that end. */
+.terminal-directory {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;
+  text-align: left;
+  color: var(--color-text-faint);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+}
+
+.terminal-header button {
+  height: var(--control-height-sm);
+  padding: 0 var(--space-2);
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
+  color: var(--color-text-muted);
+  font-size: var(--text-sm);
+}
+
+.terminal-header button:hover:not(:disabled) {
+  background: var(--color-hover);
+  color: var(--color-text);
+}
+
+.terminal-screens {
+  flex: 1;
+  min-height: 0;
+  padding: var(--space-2) 0 0 var(--space-3);
+  background: var(--terminal-bg);
+}
+
+.terminal-screen {
+  height: 100%;
+}
+
+/* ---- Todos ---- */
 
 .todos-header {
   display: flex;
