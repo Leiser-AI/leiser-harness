@@ -20,6 +20,9 @@
 //! todo_list = true
 //! ```
 //!
+//! Scripts run with `sh -c` in the worktree, on Windows with the `sh` of
+//! Git for Windows, so one script serves every platform.
+//!
 //! A repository without the file uses the defaults. Sections other
 //! features read may be present; unknown keys inside `[worktree]` and
 //! `[agent_access]` are refused, so a typo does not go unnoticed.
