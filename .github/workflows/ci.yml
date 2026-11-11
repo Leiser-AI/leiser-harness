@@ -23,7 +23,9 @@ env:
 jobs:
   lint:
     name: fmt + clippy
-    runs-on: ubuntu-latest
+    # ubuntu-24.04, not ubuntu-latest (26.04): on 26.04, apt-get stalled on
+    # every amd64v3 package of the Azure mirror (November 2026).
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
@@ -49,8 +51,10 @@ jobs:
       matrix:
         # The repository is public, so GitHub's runners cost nothing: every
         # pull request and push tests on all three systems.
+        # "test (ubuntu-latest)" is a required check, so the name stays;
+        # the job runs on ubuntu-24.04 for the reason given at `lint`.
         os: [ubuntu-latest, macos-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.os == 'ubuntu-latest' && 'ubuntu-24.04' || matrix.os }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
