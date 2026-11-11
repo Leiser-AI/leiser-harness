@@ -44,6 +44,7 @@ export type Command =
       provider: Provider;
       subscription: SubscriptionId | null;
     }
+  | { type: "read_service_status" }
   | { type: "list_todos"; chat: ChatId }
   | { type: "add_todo"; chat: ChatId; text: string }
   | { type: "set_todo_done"; chat: ChatId; todo: TodoId; done: boolean }
@@ -84,6 +85,7 @@ export type Response =
   | { type: "login_answered" }
   | { type: "subscriptions"; subscriptions: SubscriptionOverview[] }
   | { type: "subscription_changed" }
+  | { type: "service_status"; version: string; update_waiting: boolean }
   | { type: "todos"; todos: Todo[] }
   | { type: "todo_added"; todo: TodoId }
   | { type: "todo_updated" }
@@ -217,4 +219,11 @@ export type ServiceEvent =
   | { type: "status_changed"; chat: ChatId; status: ChatStatus }
   | { type: "login_output"; subscription: SubscriptionId; text: string }
   | { type: "login_finished"; subscription: SubscriptionId; outcome: LoginOutcome }
-  | { type: "todos_changed"; chat: ChatId; todos: Todo[] };
+  | { type: "todos_changed"; chat: ChatId; todos: Todo[] }
+  | { type: "service_update_waiting" };
+
+/** The app's connection to the harness service (not part of the service's protocol). */
+export type ServiceConnection =
+  | { state: "connecting" }
+  | { state: "connected"; service_version: string }
+  | { state: "unavailable"; reason: string };

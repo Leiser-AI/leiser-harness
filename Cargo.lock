@@ -1703,13 +1703,25 @@ name = "leiser-desktop"
 version = "0.1.0"
 dependencies = [
  "leiser-service",
- "leiser-testkit",
- "serde_json",
+ "serde",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
  "thiserror 2.0.21",
  "tokio",
+]
+
+[[package]]
+name = "leiser-harness-service"
+version = "0.1.0"
+dependencies = [
+ "leiser-service",
+ "leiser-testkit",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

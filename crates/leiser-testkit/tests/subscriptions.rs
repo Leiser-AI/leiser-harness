@@ -440,7 +440,7 @@ async fn an_api_key_is_kept_in_the_keychain_and_never_in_a_file() -> TestResult 
         .map(|key| key.expose().to_owned())
         .collect();
     assert_eq!(stored, vec![API_KEY.to_owned()]);
-    for file in files(&harness.data_dir())? {
+    for file in files(harness.data_dir())? {
         let contents = std::fs::read(&file)?;
         assert!(
             !contents

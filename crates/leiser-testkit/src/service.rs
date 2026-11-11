@@ -97,12 +97,6 @@ impl TestService {
         &self.keychain
     }
 
-    /// The harness service's data directory.
-    #[must_use]
-    pub fn data_dir(&self) -> PathBuf {
-        self.data.path().to_path_buf()
-    }
-
     /// The shared Codex home that Codex subscriptions' shadow homes link to.
     #[must_use]
     pub fn codex_home(&self) -> PathBuf {
@@ -138,6 +132,40 @@ impl TestService {
             keychain,
             codex_home,
         })
+    }
+}
+
+impl TestService {
+    /// Updates the harness service as a new version would: waits until no
+    /// turn runs ([`Service::stop_for_update`]), then starts the service
+    /// again on the same data directory and agent CLIs.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`StartError`] when the service cannot start again.
+    pub async fn update(self) -> Result<Self, StartError> {
+        let Self {
+            service,
+            drivers,
+            data,
+            keychain,
+            codex_home,
+        } = self;
+        service.stop_for_update().await;
+        let service = start(&drivers, &data, &keychain, &codex_home)?;
+        Ok(Self {
+            service,
+            drivers,
+            data,
+            keychain,
+            codex_home,
+        })
+    }
+
+    /// The harness service's data directory.
+    #[must_use]
+    pub fn data_dir(&self) -> &Path {
+        self.data.path()
     }
 }
 
