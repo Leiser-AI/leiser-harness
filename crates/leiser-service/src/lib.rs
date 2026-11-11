@@ -76,6 +76,7 @@ pub use driver::{
 };
 pub use git_host::{
     GH_CONFIG_DIR, GhGitHost, GitHost, GitHostError, GitHostFuture, HostAccountAccess,
+    NewPullRequest, OpenedPullRequest,
 };
 pub use harness_mcp::HarnessMcpError;
 pub use installed::Environment;
@@ -86,14 +87,14 @@ pub use local_interface::{
 };
 pub use program::{ArgsError, SERVICE_LOG_FILE, ServiceProgram};
 pub use protocol::{
-    AgentCli, AgentEvent, Answer, ApiKey, Branch, ChatId, ChatOverview, ChatStatus, CheckId,
-    Checkout, CheckpointMoment, CliExtension, CliExtensionKind, Command, CommandError,
+    AgentCli, AgentEvent, Answer, ApiKey, Branch, ChatId, ChatOverview, ChatPlace, ChatStatus,
+    CheckId, Checkout, CheckpointMoment, CliExtension, CliExtensionKind, Command, CommandError,
     CommitAuthor, DiffLine, DiffRange, Event, FileChange, FileDiff, Finding, HostAccountBinding,
     HostAccountId, HostAccountOverview, Hunk, InvalidCheckId, LoginAnswer, LoginOutcome, OptOuts,
-    Patch, PermissionMode, Provider, Question, QuestionOption, QueueReason, RepoCheck,
-    RepoCheckReport, RepositoryId, RepositoryOverview, RepositoryScript, Response, SignIn,
-    SubscriptionId, SubscriptionKind, SubscriptionOverview, SwitchedOffCheck, Todo, TodoId,
-    TranscriptEntry, TurnCheckpoints, UnreadableCliExtensionFile, UsageLimit,
+    Patch, PermissionMode, Provider, PullRequest, PullRequestState, Question, QuestionOption,
+    QueueReason, RepoCheck, RepoCheckReport, RepositoryId, RepositoryOverview, RepositoryScript,
+    Response, SignIn, SubscriptionId, SubscriptionKind, SubscriptionOverview, SwitchedOffCheck,
+    Todo, TodoId, TranscriptEntry, TurnCheckpoints, UnreadableCliExtensionFile, UsageLimit,
 };
 pub use service::{Service, ServiceConfig, ServiceHandle, StartError, start};
 pub use store::StorageError;

@@ -27,6 +27,9 @@ use crate::store::{
 use crate::subscriptions::{SubscriptionError, Subscriptions};
 use crate::todos::{TodoChange, TodoError, TodoList};
 use crate::worktree::{self, WorktreeError};
+
+mod pull_requests;
+
 use crate::{
     Access, AgentCli, AgentEvent, AgentSessionId, Answer, Branch, ChatId, ChatOverview, ChatStatus,
     Checkout, CheckpointMoment, Command, CommandError, CommitAuthor, DiffRange, Driver, Event,
@@ -35,6 +38,7 @@ use crate::{
     RepositoryScript, Response, SessionInput, SessionSpec, SignIn, SubscriptionAccess,
     SubscriptionId, SubscriptionKind, TodoId, TranscriptEntry, TurnCheckpoints, UsageLimit, script,
 };
+use pull_requests::{ChatPullRequest, PullRequestWork};
 
 /// Commands waiting for the command loop. Small, so callers feel back
 /// pressure instead of queueing without bound.
@@ -316,6 +320,8 @@ struct Chat {
     /// Messages queued when the usage limit was hit, held back so they do
     /// not hit it too. The chat's next turn queues them.
     held: VecDeque<String>,
+    /// The chat's pull request, once the developer has asked for one.
+    pull_request: Option<ChatPullRequest>,
 }
 
 /// A usage limit an agent session reported.
@@ -375,6 +381,9 @@ enum Place {
     MainCheckout,
     /// A worktree the harness created, for this chat or another one.
     Worktree,
+    /// A worktree the harness created and removed after the chat's pull
+    /// request was merged. The chat is read-only.
+    RemovedWorktree,
 }
 
 /// Whether the repository's setup script still runs in the chat's new
@@ -517,6 +526,7 @@ enum Background {
         result: Result<Response, CommandError>,
         reply: Reply,
     },
+    PullRequest(PullRequestWork),
 }
 
 /// A repository's `repo-check`, once it has run or runs.
@@ -845,19 +855,20 @@ impl State {
             | Command::RemoveHostAccount { .. }
             | Command::LogInHostAccount { .. }
             | Command::ListHostAccounts) => self.execute_host_account(command),
-            Command::Push { chat } => return self.push(chat, reply).await,
+            command @ (Command::Push { .. }
+            | Command::OpenPullRequest { .. }
+            | Command::CheckPullRequest { .. }
+            | Command::RemoveWorktree { .. }) => {
+                return self.execute_pull_request(command, reply).await;
+            }
             Command::RunRepoCheck { repository } => self
                 .start_repo_check(repository)
                 .map(|()| Response::RepoCheckStarted),
             Command::ReadRepoCheck { repository } => self.read_repo_check(repository),
-            Command::ListTodos { chat } => self.list_todos(chat),
-            Command::AddTodo { chat, text } => self.add_todo(chat, text),
-            Command::SetTodoDone { chat, todo, done } => self
-                .change_todos(chat, TodoChange::SetDone { todo, done })
-                .map(|_| Response::TodoUpdated),
-            Command::RemoveTodo { chat, todo } => self
-                .change_todos(chat, TodoChange::Remove { todo })
-                .map(|_| Response::TodoRemoved),
+            command @ (Command::ListTodos { .. }
+            | Command::AddTodo { .. }
+            | Command::SetTodoDone { .. }
+            | Command::RemoveTodo { .. }) => self.execute_todo(command),
             Command::ReadServiceStatus => Ok(self.service_status()),
             Command::ListCliExtensions { repository } => self.list_cli_extensions(repository).await,
             Command::ReadCliExtensionFile { repository, file } => {
@@ -880,6 +891,21 @@ impl State {
         };
         // The caller may have stopped waiting; nothing to do then.
         let _ = reply.send(result);
+    }
+
+    fn execute_todo(&mut self, command: Command) -> Result<Response, CommandError> {
+        match command {
+            Command::ListTodos { chat } => self.list_todos(chat),
+            Command::AddTodo { chat, text } => self.add_todo(chat, text),
+            Command::SetTodoDone { chat, todo, done } => self
+                .change_todos(chat, TodoChange::SetDone { todo, done })
+                .map(|_| Response::TodoUpdated),
+            Command::RemoveTodo { chat, todo } => self
+                .change_todos(chat, TodoChange::Remove { todo })
+                .map(|_| Response::TodoRemoved),
+            // `execute` sends only the commands above here.
+            _ => Err(CommandError::ServiceStopped),
+        }
     }
 
     /// Starts a chat; `reply` gets the answer, for a new worktree once it
@@ -1103,8 +1129,14 @@ impl State {
                 if other_chat.repository != repository {
                     return Err(CommandError::ChatInAnotherRepository { chat: other });
                 }
-                if other_chat.place == Place::MainCheckout {
-                    return Err(CommandError::NotInAWorktree { chat: other });
+                match other_chat.place {
+                    Place::MainCheckout => {
+                        return Err(CommandError::NotInAWorktree { chat: other });
+                    }
+                    Place::RemovedWorktree => {
+                        return Err(CommandError::WorktreeRemoved { chat: other });
+                    }
+                    Place::Worktree => {}
                 }
                 if let Setup::Running { .. } = other_chat.setup {
                     return Err(CommandError::SettingUp { chat: other });
@@ -1164,6 +1196,7 @@ impl State {
             todos: TodoList::default(),
             usage_limit: None,
             held: VecDeque::new(),
+            pull_request: None,
         };
         self.chats.insert(chat, new);
         if let Err(error) = self.save() {
@@ -1231,6 +1264,7 @@ impl State {
             Background::Pushed { result, reply } => {
                 let _ = reply.send(result);
             }
+            Background::PullRequest(work) => self.pull_request_finished(work),
         }
     }
 
@@ -1478,6 +1512,7 @@ impl State {
     /// checkpoint before it. The checkpoint comes before the agent session
     /// opens: an agent CLI may start working, or end, as soon as it runs.
     async fn start_turn(&mut self, id: ChatId, opening: Opening) -> Result<(), CommandError> {
+        self.check_not_removed(id)?;
         let title = match &opening {
             Opening::Message(text) => text.clone(),
             Opening::Continue => "Continue after a usage limit".to_owned(),
@@ -1781,9 +1816,18 @@ impl State {
             Some(repository) => self.host_account_binding(repository),
             None => HostAccountBinding::Unbound,
         };
+        let removed = chat.place == Place::RemovedWorktree;
+        let (branch, commit_author) = if removed {
+            (Branch::Unknown, None)
+        } else {
+            (
+                crate::git::current_branch(&chat.working_directory).await,
+                crate::git::commit_author(&chat.working_directory).await,
+            )
+        };
         Ok(Response::Chat {
             status: chat.status(),
-            branch: crate::git::current_branch(&chat.working_directory).await,
+            branch,
             agent_cli: chat.agent_cli,
             subscription: chat.subscription(),
             permission_mode: chat.permission_mode,
@@ -1795,8 +1839,15 @@ impl State {
                 .map(|request| request.id.clone())
                 .collect(),
             host_account,
-            commit_author: crate::git::commit_author(&chat.working_directory).await,
+            commit_author,
             usage_limit: chat.usage_limit.as_ref().map(LimitHit::shown),
+            place: chat.place.shown(),
+            pull_request: chat
+                .pull_request
+                .as_ref()
+                .and_then(ChatPullRequest::opened)
+                .cloned()
+                .map(Box::new),
             transcript,
         })
     }
@@ -2265,7 +2316,8 @@ impl State {
                 &name,
                 &access,
             )
-            .await;
+            .await
+            .map(|_| Response::Pushed { branch });
             // The service has stopped; the caller learns that from `reply`.
             let _ = background.send(Background::Pushed { result, reply }).await;
         });
@@ -2281,6 +2333,9 @@ impl State {
             .ok_or(CommandError::UnknownChat { chat: id })?;
         if let Setup::Running { .. } = chat.setup {
             return Err(CommandError::SettingUp { chat: id });
+        }
+        if chat.place == Place::RemovedWorktree {
+            return Err(CommandError::WorktreeRemoved { chat: id });
         }
         let repository = chat.repository;
         let working_directory = chat.working_directory.clone();
@@ -2573,6 +2628,13 @@ impl State {
                 let _ = reply.send(Err("This chat works in the developer's main checkout; \
                      its branch is the developer's to name."
                     .to_owned()));
+                return;
+            }
+            Some((Place::RemovedWorktree, ..)) => {
+                let _ = reply.send(Err(
+                    "This chat's worktree was removed after its pull request was merged."
+                        .to_owned(),
+                ));
                 return;
             }
             None => {
@@ -3170,6 +3232,9 @@ impl State {
         if let Setup::Running { .. } = chat.setup {
             return Err(CommandError::SettingUp { chat: id });
         }
+        if chat.place == Place::RemovedWorktree {
+            return Err(CommandError::WorktreeRemoved { chat: id });
+        }
         let checkpoints = self.turn_checkpoints(id, turn, moment)?;
         let commit = match moment {
             CheckpointMoment::Before => checkpoints.before.clone(),
@@ -3257,7 +3322,13 @@ impl State {
                             subscription: subscription.0,
                         })
                         .collect(),
-                    worktree: chat.place == Place::Worktree,
+                    worktree: chat.place != Place::MainCheckout,
+                    worktree_removed: chat.place == Place::RemovedWorktree,
+                    pull_request: chat
+                        .pull_request
+                        .as_ref()
+                        .and_then(ChatPullRequest::opened)
+                        .map(pull_requests::stored),
                     done: chat.done,
                     status_changed: chat.shown.1,
                     usage_limit: chat.usage_limit.as_ref().map(|limit| UsageLimitV3 {
@@ -3468,11 +3539,12 @@ fn stored_chat(store: &Store, chat: ChatV3) -> Result<(ChatId, Chat), StorageErr
         Chat {
             repository: RepositoryId(chat.repository),
             working_directory: chat.working_directory,
-            place: if chat.worktree {
-                Place::Worktree
-            } else {
-                Place::MainCheckout
+            place: match (chat.worktree, chat.worktree_removed) {
+                (true, true) => Place::RemovedWorktree,
+                (true, false) => Place::Worktree,
+                (false, _) => Place::MainCheckout,
             },
+            pull_request: chat.pull_request.map(pull_requests::restored),
             done: chat.done,
             // A setup cut short by a restart is not run again.
             setup: Setup::Done,
@@ -3548,13 +3620,14 @@ fn stored_title(store: &Store, chat: u64) -> Option<String> {
 
 /// Asks the git host who a push from `working_directory` to `origin` signs
 /// in as, and pushes `branch` only when that is the host account's login.
+/// Returns `origin`'s URL.
 async fn verify_and_push(
     git_host: &dyn GitHost,
     working_directory: &Path,
     branch: &str,
     name: &str,
     access: &crate::git_host::HostAccountAccess,
-) -> Result<Response, CommandError> {
+) -> Result<String, CommandError> {
     let remote = crate::git::origin_url(working_directory)
         .await
         .ok_or_else(|| CommandError::PushFailed {
@@ -3584,9 +3657,7 @@ async fn verify_and_push(
     .map_err(|error| CommandError::PushFailed {
         reason: error.to_string(),
     })?;
-    Ok(Response::Pushed {
-        branch: branch.to_owned(),
-    })
+    Ok(remote)
 }
 
 impl From<HostAccountError> for CommandError {

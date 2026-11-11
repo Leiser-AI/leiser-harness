@@ -36,6 +36,16 @@ credentials in the repository's local git config only and checks the
 account before every push. On the fake agent CLI, host accounts sign in
 to a fake git host instead.
 
+The top bar's "Open pull request" checks the host account, pushes the
+chat's branch and opens a pull request into the repository's base branch
+(`base_branch` in `.leiser/config.toml`, else `origin`'s default branch);
+a chat has at most one, and "Push" updates it. Selecting a chat checks its
+open pull request once; the "PR #N" button checks it again. Once it is
+merged, the chat offers to remove its worktree and local branch; the chat
+stays readable. On the fake git host, write the pull request's number to
+`fake-git-host-merged` in the host account's `gh` config directory
+(`host-accounts/<id>/gh` in the data directory) to have it reported merged.
+
 The top bar's Terminal button opens a terminal panel on the right with a
 shell in the chat's checkout (its worktree, or the main checkout): the login
 shell on macOS, PowerShell on Windows. Each chat keeps its own shell while

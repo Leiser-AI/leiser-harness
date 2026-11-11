@@ -10,6 +10,7 @@ import type {
   ChatId,
   Checkout,
   ChatOverview,
+  ChatPlace,
   ChatStatus,
   CheckpointMoment,
   CliExtension,
@@ -23,6 +24,7 @@ import type {
   FileDiff,
   PermissionMode,
   Provider,
+  PullRequest,
   QueueReason,
   RepoCheck,
   RepositoryId,
@@ -57,6 +59,9 @@ export interface ChatView {
   commitAuthor: CommitAuthor | null;
   /** The usage limit the last turn stopped at, until the next turn. */
   usageLimit: UsageLimit | null;
+  place: ChatPlace;
+  /** The chat's pull request, as the harness last saw it. */
+  pullRequest: PullRequest | null;
   transcript: TranscriptEntry[];
 }
 
@@ -148,6 +153,26 @@ function describe(error: CommandError): string {
       return "No branch is checked out to push.";
     case "push_failed":
       return `The push failed: ${error.reason}`;
+    case "pull_request_exists":
+      return `This chat already has pull request #${error.number}. Push to update it.`;
+    case "pull_request_opening":
+      return "The pull request is being opened.";
+    case "empty_pull_request_title":
+      return "A pull request needs a title.";
+    case "no_pull_request":
+      return "This chat has no pull request.";
+    case "pull_request_not_merged":
+      return `Pull request #${error.number} is not merged yet.`;
+    case "pull_request_failed":
+      return `The pull request failed: ${error.reason}`;
+    case "no_base_branch":
+      return "The repository has no base branch for a pull request. Set base_branch in its .leiser/config.toml.";
+    case "worktree_removed":
+      return "This chat's worktree was removed; the chat is read-only.";
+    case "worktree_has_changes":
+      return "The worktree has uncommitted changes. Commit or discard them first.";
+    case "worktree_has_unpushed_commits":
+      return "The worktree has commits that were never pushed. Push them first.";
     case "repo_check_not_configured":
       return "repo-check is not set up in the harness service.";
     case "repo_check_running":
@@ -280,6 +305,8 @@ export async function readChat(chat: ChatId): Promise<ChatView> {
         hostAccount: response.host_account,
         commitAuthor: response.commit_author,
         usageLimit: response.usage_limit,
+        place: response.place ?? "worktree",
+        pullRequest: response.pull_request ?? null,
         transcript: response.transcript,
       }
     : unexpected(response);
@@ -354,6 +381,24 @@ export async function removeHostAccount(hostAccount: HostAccountId): Promise<voi
 export async function logInHostAccount(hostAccount: HostAccountId): Promise<void> {
   const response = await execute({ type: "log_in_host_account", host_account: hostAccount });
   if (response.type !== "host_account_login_started") unexpected(response);
+}
+
+/** Pushes the chat's branch and opens its pull request, after the host account check. */
+export async function openPullRequest(chat: ChatId, title: string, body: string): Promise<PullRequest> {
+  const response = await execute({ type: "open_pull_request", chat, title, body });
+  return response.type === "pull_request_opened" ? response.pull_request : unexpected(response);
+}
+
+/** Asks the git host for the state of the chat's pull request. */
+export async function checkPullRequest(chat: ChatId): Promise<PullRequest> {
+  const response = await execute({ type: "check_pull_request", chat });
+  return response.type === "pull_request" ? response.pull_request : unexpected(response);
+}
+
+/** Removes the chat's worktree and local branch after its pull request was merged. */
+export async function removeWorktree(chat: ChatId): Promise<void> {
+  const response = await execute({ type: "remove_worktree", chat });
+  if (response.type !== "worktree_removed") unexpected(response);
 }
 
 /** Pushes the chat's branch once the host account checks out; returns the branch. */

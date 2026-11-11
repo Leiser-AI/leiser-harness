@@ -636,7 +636,8 @@ body {
 }
 
 .card.question .card-body > .entry-text,
-.card.limit .card-body > .entry-text {
+.card.limit .card-body > .entry-text,
+.card.cleanup .card-body > .entry-text {
   font-family: inherit;
   font-size: var(--text-md);
 }
@@ -1780,4 +1781,30 @@ body {
 
 .diff-line.removed {
   background: var(--color-diff-removed);
+}
+
+/* Open a pull request (#36) */
+.pull-request-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin-top: var(--space-4);
+}
+
+.pull-request-form label {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  color: var(--color-text-muted);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+}
+
+.pull-request-form button {
+  align-self: flex-start;
+}
+
+.pull-request-target {
+  margin: 0;
+  font-size: var(--text-sm);
 }

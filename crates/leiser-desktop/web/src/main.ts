@@ -11,6 +11,7 @@ import type {
   Branch,
   ChatId,
   ChatOverview,
+  ChatPlace,
   PermissionMode,
   Question,
   ChatStatus,
@@ -18,6 +19,7 @@ import type {
   HostAccountBinding,
   HostAccountOverview,
   Provider,
+  PullRequestState,
   Finding,
   OptOuts,
   RepoCheck,
@@ -76,6 +78,18 @@ const loginOutput = byId("login-output");
 const loginAnswer = byId<HTMLFormElement>("login-answer");
 const loginAnswerText = byId<HTMLInputElement>("login-answer-text");
 const hostAccountsDialog = byId<HTMLDialogElement>("host-accounts-dialog");
+const pullRequestDialog = byId<HTMLDialogElement>("pull-request-dialog");
+const pullRequestError = byId("pull-request-error");
+const pullRequestForm = byId<HTMLFormElement>("pull-request-form");
+const pullRequestTarget = byId("pull-request-target");
+const pullRequestTitle = byId<HTMLInputElement>("pull-request-title-input");
+const pullRequestBody = byId<HTMLTextAreaElement>("pull-request-body");
+const pullRequestSubmit = byId<HTMLButtonElement>("pull-request-submit");
+// The chat the pull request dialog opens a pull request for.
+let pullRequestChat: ChatId | null = null;
+// The chat whose open pull request was last checked on the git host, so
+// selecting a chat checks it once rather than on every refresh.
+let checkedPullRequestOf: ChatId | null = null;
 const hostAccountsError = byId("host-accounts-error");
 const hostAccountList = byId("host-account-list");
 const addHostAccountForm = byId<HTMLFormElement>("add-host-account");
@@ -482,12 +496,17 @@ function renderChat(
     overview.title ?? "New chat",
     [
       labelled("Repository", repository?.name ?? "unknown"),
-      labelled("Branch", branchName(view.branch)),
+      labelled(
+        "Branch",
+        view.place === "removed_worktree" && view.pullRequest !== null
+          ? `${view.pullRequest.head} (removed)`
+          : branchName(view.branch),
+      ),
       hostAccountItem(view.hostAccount),
       commitAuthorItem(view),
-      labelled("Checkout", overview.worktree === null ? "main checkout" : "worktree"),
+      labelled("Checkout", CHECKOUT_LABELS[view.place]),
     ],
-    chatActions(overview, checkout),
+    chatActions(overview, view, checkout),
   );
   const agentCli = el("span", "composer-agent-cli", AGENT_CLI_NAMES[view.agentCli]);
   agentCli.title = "The agent CLI this chat runs on";
@@ -496,7 +515,9 @@ function renderChat(
     subscriptionPicker(view, subscriptions),
     permissionModePicker(overview.chat, view),
   );
-  terminal.show(chat, checkout);
+  const removed = view.place === "removed_worktree";
+  terminal.show(removed ? null : chat, checkout);
+  checkPullRequestOnce(chat, view);
   const context: ChatContext = {
     chat,
     open: new Set(view.openRequests),
@@ -515,6 +536,8 @@ function renderChat(
   if (view.usageLimit !== null) {
     entries.push(limitCard(view, view.usageLimit, subscriptions, context));
   }
+  const cleanup = cleanupCard(chat, view);
+  if (cleanup !== null) entries.push(cleanup);
   if (entries.length === 0) {
     entries.push(el("li", "empty", "Send a message to start the agent."));
   }
@@ -532,7 +555,78 @@ function renderChat(
       ? "Reply instead of approving: the agent gets your text (Enter sends)"
       : "Message the agent (Enter sends or queues, Shift+Enter adds a line)";
   interruptButton.hidden = !selectedWorking;
-  composer.hidden = false;
+  // A chat whose worktree is gone takes no more messages.
+  composer.hidden = removed;
+}
+
+const CHECKOUT_LABELS: Record<ChatPlace, string> = {
+  main_checkout: "main checkout",
+  worktree: "worktree",
+  removed_worktree: "worktree removed",
+};
+
+const PULL_REQUEST_STATES: Record<PullRequestState, string> = {
+  open: "open",
+  merged: "merged",
+  closed: "closed",
+};
+
+/** Checks the selected chat's open pull request on the git host once. */
+function checkPullRequestOnce(chat: ChatId, view: ChatView): void {
+  if (view.pullRequest?.state !== "open" || checkedPullRequestOf === chat) return;
+  checkedPullRequestOf = chat;
+  // A git host that cannot be reached leaves the last known state.
+  void service.checkPullRequest(chat).catch(() => undefined);
+}
+
+/** After the merge: the offer to remove the worktree and local branch. */
+function cleanupCard(chat: ChatId, view: ChatView): HTMLElement | null {
+  const pullRequest = view.pullRequest;
+  if (pullRequest === null) return null;
+  if (view.place === "removed_worktree") {
+    return notice(
+      "",
+      "check",
+      `The worktree and branch ${pullRequest.head} are removed. This chat is read-only.`,
+      `Pull request #${pullRequest.number} was merged`,
+    );
+  }
+  if (pullRequest.state !== "merged" || view.place !== "worktree") return null;
+  const [item, body] = card("cleanup open", "branch", `Pull request #${pullRequest.number} is merged`);
+  body.append(
+    el(
+      "div",
+      "entry-text",
+      `Remove this chat's worktree and its local branch ${pullRequest.head}? The chat stays readable.`,
+    ),
+  );
+  const remove = el("button", "primary", "Remove worktree and branch");
+  remove.type = "button";
+  remove.addEventListener("click", () =>
+    act(async () => {
+      remove.disabled = true;
+      try {
+        await service.removeWorktree(chat);
+      } finally {
+        await refresh();
+      }
+    }),
+  );
+  const actions = el("div", "card-actions");
+  actions.append(remove);
+  body.append(actions);
+  return item;
+}
+
+function openPullRequestDialog(overview: ChatOverview, view: ChatView): void {
+  pullRequestChat = overview.chat;
+  pullRequestError.hidden = true;
+  pullRequestTarget.textContent = `From ${branchName(view.branch)} into the repository's base branch.`;
+  pullRequestTitle.value = overview.title ?? "";
+  pullRequestBody.value = "";
+  pullRequestSubmit.disabled = false;
+  pullRequestDialog.showModal();
+  pullRequestTitle.focus();
 }
 
 const PERMISSION_MODES: PermissionMode[] = ["supervised", "auto_accept_edits", "auto", "full_access"];
@@ -599,10 +693,44 @@ function hostAccountItem(binding: HostAccountBinding): HTMLElement {
 }
 
 /** The top bar's buttons for the selected chat. */
-function chatActions(overview: ChatOverview, checkout: string | undefined): HTMLElement[] {
+function chatActions(
+  overview: ChatOverview,
+  view: ChatView,
+  checkout: string | undefined,
+): HTMLElement[] {
   const actions: HTMLElement[] = [];
+  const pullRequest = view.pullRequest;
+  if (pullRequest !== null) {
+    const check = topBarAction(
+      "branch",
+      `PR #${pullRequest.number} · ${PULL_REQUEST_STATES[pullRequest.state]}`,
+      "ghost",
+    );
+    check.title = `${pullRequest.url}\nCheck its state on the git host again`;
+    check.addEventListener("click", () =>
+      act(async () => {
+        try {
+          await service.checkPullRequest(overview.chat);
+        } finally {
+          await refresh();
+        }
+      }),
+    );
+    actions.push(check);
+  }
+  // A removed worktree has nothing left to push, open or run a shell in.
+  if (view.place === "removed_worktree") return actions;
+  if (pullRequest === null) {
+    const open = topBarAction("branch", "Open pull request", "ghost");
+    open.title = "Push the chat's branch and open its pull request, after checking the host account";
+    open.addEventListener("click", () => openPullRequestDialog(overview, view));
+    actions.push(open);
+  }
   const push = topBarAction("arrowUp", "Push", "ghost");
-  push.title = "Push the chat's branch to origin, after checking the host account";
+  push.title =
+    pullRequest === null
+      ? "Push the chat's branch to origin, after checking the host account"
+      : `Push the chat's branch to origin, updating pull request #${pullRequest.number}`;
   push.addEventListener("click", () =>
     act(async () => {
       push.disabled = true;
@@ -1407,6 +1535,28 @@ byId("open-host-accounts").addEventListener("click", () =>
 );
 
 byId("close-host-accounts").addEventListener("click", () => hostAccountsDialog.close());
+
+byId("close-pull-request").addEventListener("click", () => pullRequestDialog.close());
+
+pullRequestForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  const chat = pullRequestChat;
+  if (chat === null) return;
+  pullRequestError.hidden = true;
+  pullRequestSubmit.disabled = true;
+  void (async () => {
+    try {
+      await service.openPullRequest(chat, pullRequestTitle.value, pullRequestBody.value);
+      pullRequestDialog.close();
+    } catch (error) {
+      pullRequestError.textContent = error instanceof Error ? error.message : String(error);
+      pullRequestError.hidden = false;
+    } finally {
+      pullRequestSubmit.disabled = false;
+      await refresh().catch(showError);
+    }
+  })();
+});
 
 addHostAccountForm.addEventListener("submit", (event) => {
   event.preventDefault();

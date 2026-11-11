@@ -17,8 +17,8 @@ use std::pin::Pin;
 
 use tokio::process::Command;
 
-use crate::LoginProcess;
 use crate::installed::{self, Environment, Program};
+use crate::{LoginProcess, PullRequestState};
 
 /// The variable that names the `gh` config directory.
 pub const GH_CONFIG_DIR: &str = "GH_CONFIG_DIR";
@@ -35,6 +35,24 @@ pub struct HostAccountAccess {
     pub login: String,
     /// The host account's own `gh` config directory.
     pub config_dir: PathBuf,
+}
+
+/// A pull request the harness service asks the git host to open.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewPullRequest {
+    /// The branch on the remote to merge.
+    pub head: String,
+    /// The branch to merge it into.
+    pub base: String,
+    pub title: String,
+    pub body: String,
+}
+
+/// A pull request the git host has opened.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenedPullRequest {
+    pub number: u64,
+    pub url: String,
 }
 
 /// Why the git host could not do what the harness service asked.
@@ -57,6 +75,10 @@ pub enum GitHostError {
          over HTTPS to the host account's git host {git_host}"
     )]
     UnsupportedRemote { remote: String, git_host: String },
+    #[error("the git host refused: {reason}")]
+    Refused { reason: String },
+    #[error("the git host's answer is not what the harness expects: {answer:?}")]
+    UnexpectedAnswer { answer: String },
 }
 
 /// A git host as the harness service reaches it.
@@ -84,6 +106,24 @@ pub trait GitHost: Send + Sync + std::fmt::Debug {
         access: &'a HostAccountAccess,
         remote: &'a str,
     ) -> GitHostFuture<'a, Result<String, GitHostError>>;
+
+    /// Opens a pull request in the repository at `remote` with the host
+    /// account's credentials. The harness service has pushed its head and
+    /// checked the account first.
+    fn open_pull_request<'a>(
+        &'a self,
+        access: &'a HostAccountAccess,
+        remote: &'a str,
+        request: &'a NewPullRequest,
+    ) -> GitHostFuture<'a, Result<OpenedPullRequest, GitHostError>>;
+
+    /// The state of pull request `number` in the repository at `remote`.
+    fn pull_request_state<'a>(
+        &'a self,
+        access: &'a HostAccountAccess,
+        remote: &'a str,
+        number: u64,
+    ) -> GitHostFuture<'a, Result<PullRequestState, GitHostError>>;
 }
 
 /// The GitHub CLI `gh`, found as an installed agent CLI is (see
@@ -124,6 +164,40 @@ impl GhGitHost {
             .env_remove("GITHUB_ENTERPRISE_TOKEN")
             .env("GH_PROMPT_DISABLED", "1");
         Ok(command)
+    }
+
+    /// Runs `gh api` against the repository at `remote` and returns its
+    /// standard output.
+    async fn api(
+        &self,
+        access: &HostAccountAccess,
+        remote: &str,
+        path: &str,
+        args: &[String],
+    ) -> Result<String, GitHostError> {
+        let repository = https_repository(remote, &access.git_host)?;
+        let mut command = self.command(access)?;
+        command
+            .args(["api", "--hostname", &access.git_host])
+            .arg(format!("repos/{repository}{path}"))
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .kill_on_drop(true);
+        let output = command
+            .output()
+            .await
+            .map_err(|source| GitHostError::Spawn {
+                program: "gh".to_owned(),
+                source,
+            })?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+            return Err(GitHostError::Refused {
+                reason: if stderr.is_empty() { stdout } else { stderr },
+            });
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
     }
 }
 
@@ -201,6 +275,84 @@ impl GitHost for GhGitHost {
             Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
         })
     }
+
+    fn open_pull_request<'a>(
+        &'a self,
+        access: &'a HostAccountAccess,
+        remote: &'a str,
+        request: &'a NewPullRequest,
+    ) -> GitHostFuture<'a, Result<OpenedPullRequest, GitHostError>> {
+        Box::pin(async move {
+            // `-f` sends each value as a raw string, never as a file name.
+            let args = [
+                "--method".to_owned(),
+                "POST".to_owned(),
+                "-f".to_owned(),
+                format!("title={}", request.title),
+                "-f".to_owned(),
+                format!("head={}", request.head),
+                "-f".to_owned(),
+                format!("base={}", request.base),
+                "-f".to_owned(),
+                format!("body={}", request.body),
+                "--jq".to_owned(),
+                r#""\(.number) \(.html_url)""#.to_owned(),
+            ];
+            let answer = self.api(access, remote, "/pulls", &args).await?;
+            let (number, url) = answer
+                .split_once(' ')
+                .and_then(|(number, url)| Some((number.parse().ok()?, url.to_owned())))
+                .ok_or_else(|| GitHostError::UnexpectedAnswer {
+                    answer: answer.clone(),
+                })?;
+            Ok(OpenedPullRequest { number, url })
+        })
+    }
+
+    fn pull_request_state<'a>(
+        &'a self,
+        access: &'a HostAccountAccess,
+        remote: &'a str,
+        number: u64,
+    ) -> GitHostFuture<'a, Result<PullRequestState, GitHostError>> {
+        Box::pin(async move {
+            let args = ["--jq".to_owned(), r#""\(.state) \(.merged)""#.to_owned()];
+            let answer = self
+                .api(access, remote, &format!("/pulls/{number}"), &args)
+                .await?;
+            match answer.as_str() {
+                "open false" => Ok(PullRequestState::Open),
+                "closed true" => Ok(PullRequestState::Merged),
+                "closed false" => Ok(PullRequestState::Closed),
+                _ => Err(GitHostError::UnexpectedAnswer { answer }),
+            }
+        })
+    }
+}
+
+/// `owner/name` of the repository at an `https://` remote URL on
+/// `git_host`.
+fn https_repository(remote: &str, git_host: &str) -> Result<String, GitHostError> {
+    let unsupported = || GitHostError::UnsupportedRemote {
+        remote: remote.to_owned(),
+        git_host: git_host.to_owned(),
+    };
+    if https_host(remote).as_deref() != Some(git_host) {
+        return Err(unsupported());
+    }
+    let path = remote
+        .strip_prefix("https://")
+        .and_then(|rest| rest.split_once('/'))
+        .map(|(_, path)| path.trim_end_matches('/'))
+        .ok_or_else(unsupported)?;
+    let path = path.strip_suffix(".git").unwrap_or(path);
+    let mut parts = path.split('/');
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(owner), Some(name), None) if !owner.is_empty() && !name.is_empty() => {
+            Ok(format!("{owner}/{name}"))
+        }
+        _ => Err(unsupported()),
+    }
 }
 
 /// The host of an `https://` remote URL, without user and port.
@@ -219,7 +371,7 @@ fn shell_quote(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{https_host, shell_quote};
+    use super::{https_host, https_repository, shell_quote};
 
     #[test]
     fn finds_the_host_of_https_remotes_only() {
@@ -234,6 +386,21 @@ mod tests {
         assert_eq!(https_host("git@github.com:owner/repo.git"), None);
         assert_eq!(https_host("ssh://git@github.com/owner/repo.git"), None);
         assert_eq!(https_host("/tmp/origin.git"), None);
+    }
+
+    #[test]
+    fn finds_owner_and_name_of_https_remotes_on_the_git_host() {
+        assert_eq!(
+            https_repository("https://github.com/owner/repo.git", "github.com").ok(),
+            Some("owner/repo".to_owned())
+        );
+        assert_eq!(
+            https_repository("https://someone@github.com/owner/repo/", "github.com").ok(),
+            Some("owner/repo".to_owned())
+        );
+        assert!(https_repository("https://github.com/owner", "github.com").is_err());
+        assert!(https_repository("https://gitlab.com/owner/repo", "github.com").is_err());
+        assert!(https_repository("git@github.com:owner/repo.git", "github.com").is_err());
     }
 
     #[test]
