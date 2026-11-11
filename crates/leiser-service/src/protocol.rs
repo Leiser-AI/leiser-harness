@@ -435,6 +435,125 @@ pub enum Command {
         text: String,
         previous: String,
     },
+    /// Lists the checkpoints of every turn of the chat, oldest first, and
+    /// the base its branch is compared to.
+    ListCheckpoints { chat: ChatId },
+    /// Reads the changes of one turn of the chat, or of its whole branch.
+    ReadDiff { chat: ChatId, range: DiffRange },
+    /// Puts the files of the chat's working directory back to how they
+    /// were at a checkpoint: files the checkpoint has get its contents,
+    /// other files are removed. Files git ignores stay as they are, and so
+    /// do the commits and the branch: what the restore changed shows as
+    /// changes not staged yet, and staged changes are unstaged. The next
+    /// message tells the agent. Fails while a turn runs in any chat in the
+    /// same working directory.
+    RestoreCheckpoint {
+        chat: ChatId,
+        turn: u64,
+        moment: CheckpointMoment,
+    },
+}
+
+/// Which changes [`Command::ReadDiff`] reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum DiffRange {
+    /// What one turn changed: from its checkpoint before to its checkpoint
+    /// after, or to the files now while the turn has no checkpoint after.
+    Turn { turn: u64 },
+    /// What the chat's branch changed against its base: from where the
+    /// branch left the base branch to the files now, also changes not
+    /// committed yet.
+    Branch,
+}
+
+/// One of the two checkpoints of a turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckpointMoment {
+    /// Before the agent got the turn's message.
+    Before,
+    /// After the turn ended.
+    After,
+}
+
+impl std::fmt::Display for CheckpointMoment {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Before => "before",
+            Self::After => "after",
+        })
+    }
+}
+
+/// The checkpoints of one turn of a chat: the files of its working
+/// directory before and after the turn. Each is a commit under a hidden
+/// git ref, `refs/leiser/checkpoints/<chat>/<turn>/before` and `…/after`,
+/// outside every branch, so it is never pushed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnCheckpoints {
+    /// Counted from 1 in each chat.
+    pub turn: u64,
+    /// The first line of the message that started the turn.
+    pub title: String,
+    /// The commit with the files before the turn.
+    pub before: String,
+    /// The commit with the files after the turn; `None` while it runs, or
+    /// when the harness service stopped before the turn ended.
+    pub after: Option<String>,
+}
+
+/// The changes to one file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileDiff {
+    /// Relative to the working directory, with `/` between directories.
+    pub path: String,
+    pub change: FileChange,
+    pub patch: Patch,
+}
+
+/// What happened to a file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum FileChange {
+    Added,
+    Modified,
+    Deleted,
+    /// Moved from `from`, maybe with changes.
+    Renamed {
+        from: String,
+    },
+}
+
+/// The changed lines of a file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Patch {
+    /// The changed lines with some lines around them; no hunks when only
+    /// the file mode changed.
+    Text { hunks: Vec<Hunk> },
+    /// Git sees the file as binary, so it has no lines to show.
+    Binary,
+    /// More than the diff panel shows: `lines` lines of diff.
+    TooLarge { lines: usize },
+}
+
+/// A run of changed lines with the lines around them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Hunk {
+    /// What git shows after the line numbers, such as the enclosing
+    /// function; often empty.
+    pub section: String,
+    pub lines: Vec<DiffLine>,
+}
+
+/// One line of a [`Hunk`], with its line number in the old and new file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum DiffLine {
+    Context { old: u32, new: u32, text: String },
+    Added { new: u32, text: String },
+    Removed { old: u32, text: String },
 }
 
 /// The answer to a successful [`Command`].
@@ -556,6 +675,16 @@ pub enum Response {
         text: String,
     },
     CliExtensionFileSaved,
+    Checkpoints {
+        /// What [`DiffRange::Branch`] compares to, such as `origin/main`;
+        /// `HEAD` when the chat's repository has no base branch.
+        branch_base: String,
+        turns: Vec<TurnCheckpoints>,
+    },
+    Diff {
+        files: Vec<FileDiff>,
+    },
+    CheckpointRestored,
 }
 
 /// A registered subscription.
@@ -1057,6 +1186,14 @@ pub enum CommandError {
     NoBranch { chat: ChatId },
     #[error("the push failed: {reason}")]
     PushFailed { reason: String },
+    #[error("chat {chat:?} has no checkpoint {moment} turn {turn}")]
+    UnknownCheckpoint {
+        chat: ChatId,
+        turn: u64,
+        moment: CheckpointMoment,
+    },
+    #[error("git failed on the chat's checkpoints: {reason}")]
+    Checkpoint { reason: String },
     #[error("the last turn of chat {chat:?} did not stop at a usage limit")]
     NoUsageLimit { chat: ChatId },
     #[error("the harness service has stopped")]
@@ -1139,6 +1276,13 @@ pub enum Event {
     /// The chat's todo list changed, by the developer or an agent; `todos`
     /// is the whole list after the change.
     TodosChanged { chat: ChatId, todos: Vec<Todo> },
+    /// The files of the chat's working directory were put back to a
+    /// checkpoint ([`Command::RestoreCheckpoint`]).
+    CheckpointRestored {
+        chat: ChatId,
+        turn: u64,
+        moment: CheckpointMoment,
+    },
     /// An update of the harness service waits until no turn runs. Then the
     /// service restarts on the new version and resumes every agent session.
     ServiceUpdateWaiting,
@@ -1159,7 +1303,8 @@ impl Event {
             | Self::ScriptFinished { chat, .. }
             | Self::StatusChanged { chat, .. }
             | Self::ContinuedOnSubscription { chat, .. }
-            | Self::TodosChanged { chat, .. } => Some(*chat),
+            | Self::TodosChanged { chat, .. }
+            | Self::CheckpointRestored { chat, .. } => Some(*chat),
             Self::LoginOutput { .. }
             | Self::LoginFinished { .. }
             | Self::HostAccountLoginOutput { .. }

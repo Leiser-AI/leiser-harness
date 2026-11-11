@@ -1,5 +1,6 @@
 //! Reading git state of a working directory.
 
+use std::ffi::OsStr;
 use std::path::Path;
 
 use tokio::process::Command;
@@ -71,10 +72,36 @@ pub(crate) enum GitError {
 /// Runs git in `working_directory` without prompting for credentials and
 /// returns its trimmed standard output.
 pub(crate) async fn run(working_directory: &Path, args: &[&str]) -> Result<String, GitError> {
+    run_with(working_directory, &[], args).await
+}
+
+/// [`run`] with extra environment variables, such as `GIT_INDEX_FILE`.
+pub(crate) async fn run_with(
+    working_directory: &Path,
+    env: &[(&str, &OsStr)],
+    args: &[&str],
+) -> Result<String, GitError> {
+    let output = output(working_directory, env, args).await?;
+    Ok(String::from_utf8_lossy(&output).trim().to_owned())
+}
+
+/// [`run`] without trimming, for output whose leading or trailing
+/// whitespace matters, such as a patch.
+pub(crate) async fn run_raw(working_directory: &Path, args: &[&str]) -> Result<String, GitError> {
+    let output = output(working_directory, &[], args).await?;
+    Ok(String::from_utf8_lossy(&output).into_owned())
+}
+
+async fn output(
+    working_directory: &Path,
+    env: &[(&str, &OsStr)],
+    args: &[&str],
+) -> Result<Vec<u8>, GitError> {
     let output = Command::new("git")
         .arg("-C")
         .arg(working_directory)
         .args(args)
+        .envs(env.iter().copied())
         // A background service has no terminal to ask on.
         .env("GIT_TERMINAL_PROMPT", "0")
         .stdin(std::process::Stdio::null())
@@ -88,5 +115,5 @@ pub(crate) async fn run(working_directory: &Path, args: &[&str]) -> Result<Strin
             message: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
         });
     }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    Ok(output.stdout)
 }
