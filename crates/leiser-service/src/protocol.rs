@@ -312,6 +312,16 @@ pub enum Command {
     },
     /// Lists every registered subscription.
     ListSubscriptions,
+    /// Marks a subscription as interchangeable with the provider's other
+    /// interchangeable subscriptions, or no longer. When a chat on an
+    /// interchangeable subscription hits a usage limit, the harness service
+    /// continues it on another interchangeable subscription of the same
+    /// provider by itself, as [`Command::ContinueOnSubscription`] would. It
+    /// never switches automatically from or to any other subscription.
+    SetInterchangeable {
+        subscription: SubscriptionId,
+        interchangeable: bool,
+    },
     /// Changes the subscription that the chat's next turns on `provider`
     /// use; `None` is the agent CLI's own default login. A new chat starts
     /// on its repository's default subscription per provider, set in its
@@ -322,6 +332,17 @@ pub enum Command {
     ChangeSubscription {
         chat: ChatId,
         provider: Provider,
+        subscription: Option<SubscriptionId>,
+    },
+    /// After the chat's last turn stopped at a usage limit: changes the
+    /// subscription of the chat's agent CLI to `subscription`, as
+    /// [`Command::ChangeSubscription`] does, and continues the chat there in
+    /// a new turn. Codex continues the same agent session; Claude Code
+    /// continues in a new agent session with a handoff. Messages queued when
+    /// the limit was hit are sent after this turn. Fails when the chat's
+    /// last turn did not stop at a usage limit.
+    ContinueOnSubscription {
+        chat: ChatId,
         subscription: Option<SubscriptionId>,
     },
     /// Runs `repo-check` on the repository again, read-only, on the
@@ -420,6 +441,9 @@ pub enum Response {
         /// The approval requests and questions the running turn waits for,
         /// oldest first.
         open_requests: Vec<String>,
+        /// The usage limit the chat's last turn stopped at, until the next
+        /// turn starts. See [`Command::ContinueOnSubscription`].
+        usage_limit: Option<UsageLimit>,
         transcript: Vec<TranscriptEntry>,
     },
     SubscriptionAdded {
@@ -436,6 +460,9 @@ pub enum Response {
     },
     /// The chat's next turns on the provider use the new subscription.
     SubscriptionChanged,
+    InterchangeableSet,
+    /// The chat continues on the new subscription in a new turn.
+    ContinuedOnSubscription,
     /// `repo-check` runs; [`Event::RepoCheckFinished`] follows.
     RepoCheckStarted,
     RepoCheck {
@@ -479,6 +506,23 @@ pub struct SubscriptionOverview {
     pub home: PathBuf,
     /// Whether the agent CLI's login runs right now.
     pub logging_in: bool,
+    /// Whether a chat that hits a usage limit may move to or from this
+    /// subscription by itself; see [`Command::SetInterchangeable`].
+    pub interchangeable: bool,
+}
+
+/// A usage limit that stopped a chat's turn, as far as the agent CLI
+/// reported it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UsageLimit {
+    /// Which limit, as the agent CLI words it, such as `5-hour limit`.
+    pub limit: String,
+    /// The subscription that hit it; `None` is the agent CLI's own default
+    /// login.
+    pub subscription: Option<SubscriptionId>,
+    /// How long until the limit resets, from now; `None` when the agent CLI
+    /// did not say.
+    pub resets_in_seconds: Option<u64>,
 }
 
 /// How a login ended.
@@ -624,6 +668,16 @@ pub enum TranscriptEntry {
     },
     /// The developer's answer to an approval request or a question.
     Answer { request: String, answer: Answer },
+    /// After a usage limit, the chat continued on another subscription of
+    /// the provider; the turn that continues it follows.
+    ContinuedOnSubscription {
+        provider: Provider,
+        /// `None` is the agent CLI's own default login.
+        subscription: Option<SubscriptionId>,
+        /// Whether the harness service switched by itself, between
+        /// interchangeable subscriptions.
+        automatic: bool,
+    },
 }
 
 /// The developer's answer to an approval request or a question.
@@ -874,6 +928,8 @@ pub enum CommandError {
     InvalidCliExtensionFile { file: PathBuf, reason: String },
     #[error("could not access {}: {reason}", file.display())]
     CliExtensionFileAccess { file: PathBuf, reason: String },
+    #[error("the last turn of chat {chat:?} did not stop at a usage limit")]
+    NoUsageLimit { chat: ChatId },
     #[error("the harness service has stopped")]
     ServiceStopped,
 }
@@ -906,6 +962,14 @@ pub enum Event {
         script: RepositoryScript,
         exit_code: Option<i32>,
         output: String,
+    },
+    /// After a usage limit, the chat continues on another subscription in
+    /// a new turn; also stored in the chat's transcript.
+    ContinuedOnSubscription {
+        chat: ChatId,
+        provider: Provider,
+        subscription: Option<SubscriptionId>,
+        automatic: bool,
     },
     /// The chat's status changed without an event of its own, for example
     /// when it was marked as done.
@@ -954,6 +1018,7 @@ impl Event {
             | Self::ScriptStarted { chat, .. }
             | Self::ScriptFinished { chat, .. }
             | Self::StatusChanged { chat, .. }
+            | Self::ContinuedOnSubscription { chat, .. }
             | Self::TodosChanged { chat, .. } => Some(*chat),
             Self::LoginOutput { .. }
             | Self::LoginFinished { .. }
@@ -1001,7 +1066,8 @@ pub enum AgentEvent {
         request: String,
         questions: Vec<Question>,
     },
-    /// The subscription hit a usage limit.
+    /// The subscription hit a usage limit. The turn stops; see
+    /// [`Command::ContinueOnSubscription`].
     UsageLimitReached {
         limit: String,
         resets_in_seconds: Option<u64>,

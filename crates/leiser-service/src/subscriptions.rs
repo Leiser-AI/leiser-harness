@@ -81,6 +81,7 @@ struct Registered {
     provider: Provider,
     name: String,
     kind: SubscriptionKind,
+    interchangeable: bool,
 }
 
 /// The registered subscriptions.
@@ -108,6 +109,7 @@ impl Subscriptions {
                         provider: subscription.provider,
                         name: subscription.name,
                         kind: subscription.kind,
+                        interchangeable: subscription.interchangeable,
                     },
                 )
             })
@@ -128,6 +130,7 @@ impl Subscriptions {
                 provider: registered.provider,
                 name: registered.name.clone(),
                 kind: registered.kind,
+                interchangeable: registered.interchangeable,
             })
             .collect()
     }
@@ -144,6 +147,29 @@ impl Subscriptions {
 
     pub fn kind(&self, id: SubscriptionId) -> Option<SubscriptionKind> {
         self.registered.get(&id).map(|registered| registered.kind)
+    }
+
+    /// Whether the subscription is registered and marked interchangeable.
+    pub fn interchangeable(&self, id: SubscriptionId) -> bool {
+        self.registered
+            .get(&id)
+            .is_some_and(|registered| registered.interchangeable)
+    }
+
+    pub fn set_interchangeable(&mut self, id: SubscriptionId, interchangeable: bool) {
+        if let Some(registered) = self.registered.get_mut(&id) {
+            registered.interchangeable = interchangeable;
+        }
+    }
+
+    /// The provider's interchangeable subscriptions, oldest first.
+    pub fn interchangeable_of(&self, provider: Provider) -> impl Iterator<Item = SubscriptionId> {
+        self.registered
+            .iter()
+            .filter(move |(_, registered)| {
+                registered.provider == provider && registered.interchangeable
+            })
+            .map(|(id, _)| *id)
     }
 
     /// The provider's subscription called `name`.
@@ -182,6 +208,7 @@ impl Subscriptions {
                 provider,
                 name,
                 kind,
+                interchangeable: false,
             },
         );
         Ok(())
@@ -273,6 +300,7 @@ impl Subscriptions {
                 kind: registered.kind,
                 home: self.home(*id, registered.provider),
                 logging_in: logging_in(*id),
+                interchangeable: registered.interchangeable,
             })
             .collect()
     }

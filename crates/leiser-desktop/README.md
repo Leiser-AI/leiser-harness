@@ -62,6 +62,11 @@ Its chats are kept apart from real ones (data directory
 `fake-agent-cli/fake-agent-cli-state/turn-gate` in the data directory is
 missing: delete it to hold turns open, create it again to let them finish.
 Every `repo-check` gets a made-up sample report.
+To try a usage limit, write
+`{"limit":"5-hour limit","resets_in_seconds":3600}` to
+`fake-usage-limit.json` in a subscription's config directory (its path is
+the tooltip of the subscription's kind in the Subscriptions dialog): every
+turn on that subscription then stops at the limit.
 
 ```bash
 cargo build -p leiser-testkit --bin fake-agent-cli

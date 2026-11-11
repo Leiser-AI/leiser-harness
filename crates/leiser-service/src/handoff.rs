@@ -84,8 +84,11 @@ fn quoted(transcript: &[TranscriptEntry]) -> Vec<Quoted<'_>> {
                     | AgentEvent::SessionEnded => return None,
                 },
                 // The agent session that asked has its answer already, and
-                // the harness's own scripts were not the agent's doing.
-                TranscriptEntry::Answer { .. } | TranscriptEntry::ScriptFinished { .. } => {
+                // the harness's own scripts and subscription changes were
+                // not the agent's doing.
+                TranscriptEntry::Answer { .. }
+                | TranscriptEntry::ScriptFinished { .. }
+                | TranscriptEntry::ContinuedOnSubscription { .. } => {
                     return None;
                 }
             };
