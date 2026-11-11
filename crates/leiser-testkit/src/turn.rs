@@ -20,7 +20,8 @@ pub enum TurnError {
 }
 
 /// Collects the chat's agent events up to and including
-/// [`AgentEvent::TurnEnded`] or [`AgentEvent::TurnInterrupted`]. Events of
+/// [`AgentEvent::TurnEnded`], [`AgentEvent::TurnInterrupted`] or
+/// [`AgentEvent::TurnFailed`]. Events of
 /// other chats, and events that do not come from the agent session, are
 /// skipped.
 ///
@@ -57,7 +58,9 @@ pub async fn collect_turn_within(
             }
             match event {
                 AgentEvent::SessionEnded => return Err(TurnError::SessionEnded),
-                AgentEvent::TurnEnded | AgentEvent::TurnInterrupted => {
+                AgentEvent::TurnEnded
+                | AgentEvent::TurnInterrupted
+                | AgentEvent::TurnFailed { .. } => {
                     turn.push(event);
                     return Ok(turn);
                 }

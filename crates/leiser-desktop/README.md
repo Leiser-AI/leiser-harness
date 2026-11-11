@@ -17,8 +17,12 @@ When the service program is replaced, for example by `cargo build`, the
 service shows that an update waits, applies it once no turn runs and
 resumes every chat.
 
-Chats start on the installed Claude Code (`claude` on `PATH`); Codex
-(`codex` on `PATH`) is configured as a second agent CLI.
+Chats start on the installed Claude Code; Codex is configured as a second
+agent CLI. An app started from the Finder does not get the shell's `PATH`,
+so the harness service also looks in common install directories and, for
+Claude Code, at the copy the Claude desktop app bundles (see
+`crates/leiser-service/src/installed.rs`). To run another program, set
+`LEISER_CLAUDE_CODE` or `LEISER_CODEX` to its path.
 
 ## Run it
 
