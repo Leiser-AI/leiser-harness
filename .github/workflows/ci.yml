@@ -40,10 +40,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Pull requests test on Linux only, so they never wait for the slower
-        # macOS/Windows runners. Pushes to development, main and hotfix
-        # branches test on all three.
-        os: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-latest"]' || '["ubuntu-latest","macos-latest","windows-latest"]') }}
+        # The repository is public, so GitHub's runners cost nothing: every
+        # pull request and push tests on all three systems.
+        os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
@@ -54,22 +53,6 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev librsvg2-dev libxdo-dev
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace
-
-  # Pull requests also test on the developer's own Windows PC, a
-  # self-hosted runner with the label `leiser-windows` (setup in
-  # docs/windows-runner.md). The repository is public, so this job never
-  # runs for pull requests from forks: their code must not run on that PC.
-  # It is not a required check: when the PC is off, it waits.
-  test-windows-own:
-    name: test (own Windows runner)
-    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: [self-hosted, Windows, leiser-windows]
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace
 

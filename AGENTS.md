@@ -21,6 +21,9 @@ user only what an agent cannot check (for example Windows).
 
 - Always write to the user in German. Code, comments, commit messages and
   repository docs stay in English.
+- Write to the user tersely: one line of result, then only
+  **Was du tun musst:** (numbered, with links) and **Was ich mache:** (one
+  line). Give reasons and background only when asked.
 - Add a dependency only after you check its maintenance and license against
   `deny.toml`.
 - Never put secrets, tokens or real user data in code, tests, logs or issues.
