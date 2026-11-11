@@ -276,8 +276,10 @@ pub enum Command {
         provider: Provider,
         subscription: Option<SubscriptionId>,
     },
-    /// Runs `repo-check` on the repository again, read-only. It also runs
-    /// by itself when the repository is added. Fails while it runs.
+    /// Runs `repo-check` on the repository again, read-only, on the
+    /// repository's default Anthropic subscription (or Claude Code's own
+    /// default login without one). It also runs by itself when the
+    /// repository is added. Fails while it runs.
     RunRepoCheck { repository: RepositoryId },
     /// Reads the repository's last `repo-check` result, without the checks
     /// that its `.leiser/config.toml` switches off.
