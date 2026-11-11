@@ -1,22 +1,40 @@
 //! One agent session's protocol state, without I/O: lines from Codex go
 //! in, [`AgentEvent`]s and lines for Codex come out.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 
 use super::wire::{
-    self, ClientInfo, ClientNotification, ClientRequest, ErrorResponse, Incoming, InitializeParams,
-    Item, Notification, RateLimits, Request, RequestId, RpcError, ThreadResumeParams,
-    ThreadStartParams, ThreadStarted, Turn, TurnError, TurnInterruptParams, TurnStartParams,
-    TurnStarted, TurnStatus, TurnSteerParams, UserInput, WireError,
+    self, ApprovalDecision, ApprovalResponse, ClientInfo, ClientNotification, ClientRequest,
+    ErrorResponse, Incoming, InitializeParams, Item, Notification, RateLimits, Request, RequestId,
+    RpcError, ThreadResumeParams, ThreadStartParams, ThreadStarted, Turn, TurnError,
+    TurnInterruptParams, TurnStartParams, TurnStarted, TurnStatus, TurnSteerParams, UserInput,
+    UserInputAnswer, UserInputResponse, WireError,
 };
-use crate::AgentEvent;
+use crate::{AgentEvent, Answer, PermissionMode, Question, QuestionOption};
 
-/// Supervised: Codex asks before anything it does not trust.
-const APPROVAL_POLICY: &str = "untrusted";
-/// Codex's own sandbox: writes only inside the working directory.
+/// Codex's own sandbox, in every permission mode: writes only inside the
+/// working directory, no network.
 const SANDBOX: &str = "workspace-write";
 /// Codex's own sandbox for a read-only agent session: writes nowhere.
 const READ_ONLY_SANDBOX: &str = "read-only";
+
+/// Codex's settings for a permission mode: its approval policy and who
+/// reviews approval requests (`None`: the developer).
+///
+/// Codex has no mode that accepts edits but asks about commands, so
+/// [`PermissionMode::AutoAcceptEdits`] never reaches the driver; should it,
+/// it runs Supervised.
+pub(super) fn approval_settings(mode: PermissionMode) -> (&'static str, Option<&'static str>) {
+    match mode {
+        // Asks before every command it does not trust and every file change.
+        PermissionMode::Supervised | PermissionMode::AutoAcceptEdits => ("untrusted", None),
+        // Runs in the sandbox without asking; Codex's automatic review
+        // decides what would leave it.
+        PermissionMode::Auto => ("on-request", Some("auto_review")),
+        // Never asks; what the sandbox refuses fails.
+        PermissionMode::FullAccess => ("never", None),
+    }
+}
 
 /// Why the agent session cannot go on.
 #[derive(Debug, thiserror::Error)]
@@ -100,14 +118,26 @@ enum MidTurn {
     Interrupt,
 }
 
+/// A request from Codex that waits for the developer's answer.
+#[derive(Debug)]
+enum OpenRequest {
+    /// A command or file change approval.
+    Approval,
+    /// Questions from the agent.
+    Questions,
+}
+
 /// The protocol state of one agent session.
 #[derive(Debug)]
 pub(super) struct Conversation {
     working_directory: String,
     /// The thread to resume instead of starting a new one.
     resume: Option<String>,
+    permission_mode: PermissionMode,
     /// The sandbox the thread runs in.
     sandbox: &'static str,
+    /// Requests from Codex waiting for the developer, by their id.
+    open: HashMap<String, (RequestId, OpenRequest)>,
     phase: Phase,
     /// Turns waiting for the thread to start or the running turn to end,
     /// each with its messages: the first one, then any steered into it
@@ -121,8 +151,11 @@ pub(super) struct Conversation {
 impl Conversation {
     /// Starts the handshake for a new thread. The returned lines must be
     /// written first.
-    pub fn start(working_directory: String) -> Result<(Self, Output), ProtocolError> {
-        Self::open(working_directory, None)
+    pub fn start(
+        working_directory: String,
+        permission_mode: PermissionMode,
+    ) -> Result<(Self, Output), ProtocolError> {
+        Self::open(working_directory, permission_mode, None)
     }
 
     /// Runs the thread in Codex's read-only sandbox. Must be called before
@@ -133,22 +166,37 @@ impl Conversation {
         self
     }
 
+    /// Codex's approval policy and reviewer for the thread. Nobody answers
+    /// a read-only agent session, so it never asks: what the read-only
+    /// sandbox refuses fails.
+    fn approval_settings(&self) -> (&'static str, Option<&'static str>) {
+        if self.sandbox == READ_ONLY_SANDBOX {
+            ("never", None)
+        } else {
+            approval_settings(self.permission_mode)
+        }
+    }
+
     /// Starts the handshake for resuming the thread `thread_id`.
     pub fn resume(
         working_directory: String,
+        permission_mode: PermissionMode,
         thread_id: String,
     ) -> Result<(Self, Output), ProtocolError> {
-        Self::open(working_directory, Some(thread_id))
+        Self::open(working_directory, permission_mode, Some(thread_id))
     }
 
     fn open(
         working_directory: String,
+        permission_mode: PermissionMode,
         resume: Option<String>,
     ) -> Result<(Self, Output), ProtocolError> {
         let mut conversation = Self {
             working_directory,
             resume,
+            permission_mode,
             sandbox: SANDBOX,
+            open: HashMap::new(),
             phase: Phase::Initializing,
             waiting: VecDeque::new(),
             pending: HashMap::new(),
@@ -224,12 +272,60 @@ impl Conversation {
         Ok(output)
     }
 
+    /// The developer's answer to the open request `request`. A decline's
+    /// feedback is steered into the turn, as Codex's answers carry no text.
+    /// Answers to requests that are no longer open are dropped.
+    pub fn answer(&mut self, request: &str, answer: Answer) -> Result<Output, ProtocolError> {
+        let mut output = Output::default();
+        let Some((id, open)) = self.open.remove(request) else {
+            return Ok(output);
+        };
+        let feedback = match open {
+            OpenRequest::Approval => {
+                let (decision, feedback) = match answer {
+                    Answer::Approve => (ApprovalDecision::Accept, None),
+                    Answer::Decline { feedback } => (ApprovalDecision::Decline, feedback),
+                    // The harness service sends answers only to questions.
+                    Answer::Answers { .. } => (ApprovalDecision::Decline, None),
+                };
+                output.lines.push(serde_json::to_string(&wire::Response {
+                    id,
+                    result: ApprovalResponse { decision },
+                })?);
+                feedback
+            }
+            OpenRequest::Questions => {
+                let (answers, feedback) = match answer {
+                    Answer::Answers { answers } => (answers, None),
+                    Answer::Decline { feedback } => (BTreeMap::new(), feedback),
+                    // The harness service never approves a question.
+                    Answer::Approve => (BTreeMap::new(), None),
+                };
+                let answers = answers
+                    .into_iter()
+                    .map(|(question, answers)| (question, UserInputAnswer { answers }))
+                    .collect();
+                output.lines.push(serde_json::to_string(&wire::Response {
+                    id,
+                    result: UserInputResponse { answers },
+                })?);
+                feedback
+            }
+        };
+        if let Some(feedback) = feedback {
+            let steered = self.steer(feedback)?;
+            output.lines.extend(steered.lines);
+            output.events.extend(steered.events);
+        }
+        Ok(output)
+    }
+
     /// A line Codex wrote. `now` is the Unix time in seconds.
     pub fn receive(&mut self, line: &str, now: i64) -> Result<Output, ProtocolError> {
         let mut output = Output::default();
         match wire::parse(line)? {
             Incoming::Response { id, outcome } => self.on_response(&mut output, id, outcome)?,
-            Incoming::Request { id, request } => on_request(&mut output, id, request)?,
+            Incoming::Request { id, request } => self.on_request(&mut output, id, request)?,
             Incoming::Notification(notification) => {
                 self.on_notification(&mut output, notification, now)?;
             }
@@ -336,11 +432,13 @@ impl Conversation {
                     })?);
                 self.phase = Phase::StartingThread;
                 let cwd = self.working_directory.clone();
+                let (approval_policy, approvals_reviewer) = self.approval_settings();
                 if let Some(thread_id) = self.resume.clone() {
                     let params = ThreadResumeParams {
                         thread_id,
                         cwd,
-                        approval_policy: APPROVAL_POLICY,
+                        approval_policy,
+                        approvals_reviewer,
                         sandbox: self.sandbox,
                         exclude_turns: true,
                     };
@@ -348,7 +446,8 @@ impl Conversation {
                 } else {
                     let params = ThreadStartParams {
                         cwd,
-                        approval_policy: APPROVAL_POLICY,
+                        approval_policy,
+                        approvals_reviewer,
                         sandbox: self.sandbox,
                     };
                     self.request(output, Pending::ThreadStart, params)?;
@@ -418,6 +517,8 @@ impl Conversation {
                     }
                     *turn = TurnState::Idle;
                 }
+                // Codex no longer waits for answers of an ended turn.
+                self.open.clear();
                 self.start_waiting_turn(output)?;
             }
             Notification::RateLimitsUpdated(rate_limits) => {
@@ -470,6 +571,80 @@ impl Conversation {
             resets_in_seconds: resets_at
                 .map(|resets_at| u64::try_from(resets_at.saturating_sub(now)).unwrap_or(0)),
         }
+    }
+}
+
+impl Conversation {
+    /// Approval requests and questions stay open until the developer
+    /// answers them (see [`Conversation::answer`]).
+    fn on_request(
+        &mut self,
+        output: &mut Output,
+        id: RequestId,
+        request: Request,
+    ) -> Result<(), ProtocolError> {
+        let key = id.to_string();
+        let (kind, event) = match request {
+            Request::CommandApproval(approval) => (
+                OpenRequest::Approval,
+                AgentEvent::ApprovalRequested {
+                    request: key.clone(),
+                    description: with_reason(
+                        approval.command.map_or_else(
+                            || "Run a command".to_owned(),
+                            |command| format!("Run `{command}`"),
+                        ),
+                        approval.reason,
+                    ),
+                },
+            ),
+            Request::FileChangeApproval(approval) => (
+                OpenRequest::Approval,
+                AgentEvent::ApprovalRequested {
+                    request: key.clone(),
+                    description: with_reason("Change files".to_owned(), approval.reason),
+                },
+            ),
+            Request::UserInput(input) => (
+                OpenRequest::Questions,
+                AgentEvent::QuestionAsked {
+                    request: key.clone(),
+                    questions: input.questions.into_iter().map(question).collect(),
+                },
+            ),
+            Request::Unsupported { method } => {
+                output.lines.push(serde_json::to_string(&ErrorResponse {
+                    id,
+                    error: RpcError {
+                        code: wire::METHOD_NOT_FOUND,
+                        message: format!("leiser-harness does not support `{method}`"),
+                    },
+                })?);
+                return Ok(());
+            }
+        };
+        self.open.insert(key, (id, kind));
+        output.events.push(event);
+        Ok(())
+    }
+}
+
+fn question(question: wire::UserInputQuestion) -> Question {
+    Question {
+        id: question.id,
+        header: question.header,
+        question: question.question,
+        options: question
+            .options
+            .unwrap_or_default()
+            .into_iter()
+            .map(|option| QuestionOption {
+                label: option.label,
+                description: option.description,
+            })
+            .collect(),
+        // Codex's questions take one answer each.
+        multi_select: false,
     }
 }
 
@@ -532,38 +707,6 @@ fn tool_call(item: Item) -> Option<AgentEvent> {
     Some(AgentEvent::ToolCall { name, detail })
 }
 
-fn on_request(output: &mut Output, id: RequestId, request: Request) -> Result<(), ProtocolError> {
-    // Approvals stay open until the developer answers them; the answer
-    // needs the driver's approve operation, which a later ticket adds.
-    let description = match request {
-        Request::CommandApproval(approval) => with_reason(
-            approval.command.map_or_else(
-                || "Run a command".to_owned(),
-                |command| format!("Run `{command}`"),
-            ),
-            approval.reason,
-        ),
-        Request::FileChangeApproval(approval) => {
-            with_reason("Change files".to_owned(), approval.reason)
-        }
-        Request::Unsupported { method } => {
-            output.lines.push(serde_json::to_string(&ErrorResponse {
-                id,
-                error: RpcError {
-                    code: wire::METHOD_NOT_FOUND,
-                    message: format!("leiser-harness does not support `{method}`"),
-                },
-            })?);
-            return Ok(());
-        }
-    };
-    output.events.push(AgentEvent::ApprovalRequested {
-        request: id.to_string(),
-        description,
-    });
-    Ok(())
-}
-
 fn with_reason(action: String, reason: Option<String>) -> String {
     match reason {
         Some(reason) if !reason.is_empty() => format!("{action}: {reason}"),
@@ -576,7 +719,9 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::{Conversation, Output, ProtocolError};
-    use crate::AgentEvent;
+    use std::collections::BTreeMap;
+
+    use crate::{AgentEvent, Answer, PermissionMode, Question, QuestionOption};
 
     type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
@@ -597,7 +742,8 @@ mod tests {
     /// A conversation whose handshake is done and whose thread `t1` has
     /// started.
     fn ready() -> TestResult<Conversation> {
-        let (mut conversation, _) = Conversation::start("/repo".to_owned())?;
+        let (mut conversation, _) =
+            Conversation::start("/repo".to_owned(), PermissionMode::Supervised)?;
         receive(
             &mut conversation,
             &json!({"id": 0, "result": {"userAgent": "codex"}}),
@@ -618,7 +764,8 @@ mod tests {
 
     #[test]
     fn the_handshake_initializes_then_starts_a_thread_in_the_working_directory() -> TestResult {
-        let (mut conversation, output) = Conversation::start("/repo".to_owned())?;
+        let (mut conversation, output) =
+            Conversation::start("/repo".to_owned(), PermissionMode::Supervised)?;
         let first = lines(&output)?;
         assert_eq!(first.len(), 1);
         assert_eq!(first[0]["method"], "initialize");
@@ -637,8 +784,8 @@ mod tests {
     }
 
     #[test]
-    fn a_read_only_thread_runs_in_the_read_only_sandbox() -> TestResult {
-        let (conversation, _) = Conversation::start("/repo".to_owned())?;
+    fn a_read_only_thread_runs_in_the_read_only_sandbox_and_never_asks() -> TestResult {
+        let (conversation, _) = Conversation::start("/repo".to_owned(), PermissionMode::Auto)?;
         let mut conversation = conversation.read_only();
 
         let output = receive(&mut conversation, &json!({"id": 0, "result": {}}))?;
@@ -646,12 +793,16 @@ mod tests {
         let next = lines(&output)?;
         assert_eq!(next[1]["method"], "thread/start");
         assert_eq!(next[1]["params"]["sandbox"], "read-only");
+        // Nobody answers a read-only agent session.
+        assert_eq!(next[1]["params"]["approvalPolicy"], "never");
+        assert_eq!(next[1]["params"].get("approvalsReviewer"), None);
         Ok(())
     }
 
     #[test]
     fn the_thread_id_is_reported_once_the_thread_started() -> TestResult {
-        let (mut conversation, _) = Conversation::start("/repo".to_owned())?;
+        let (mut conversation, _) =
+            Conversation::start("/repo".to_owned(), PermissionMode::Supervised)?;
         receive(&mut conversation, &json!({"id": 0, "result": {}}))?;
 
         let output = receive(
@@ -665,7 +816,11 @@ mod tests {
 
     #[test]
     fn resuming_asks_codex_for_the_earlier_thread_and_continues_in_it() -> TestResult {
-        let (mut conversation, _) = Conversation::resume("/repo".to_owned(), "t1".to_owned())?;
+        let (mut conversation, _) = Conversation::resume(
+            "/repo".to_owned(),
+            PermissionMode::Supervised,
+            "t1".to_owned(),
+        )?;
         conversation.user_message("again".to_owned())?;
 
         let output = receive(&mut conversation, &json!({"id": 0, "result": {}}))?;
@@ -689,7 +844,8 @@ mod tests {
 
     #[test]
     fn a_message_sent_before_the_thread_started_waits_for_it() -> TestResult {
-        let (mut conversation, _) = Conversation::start("/repo".to_owned())?;
+        let (mut conversation, _) =
+            Conversation::start("/repo".to_owned(), PermissionMode::Supervised)?;
         assert_eq!(
             conversation.user_message("hello".to_owned())?.lines,
             Vec::<String>::new()
@@ -997,7 +1153,7 @@ mod tests {
 
         let output = receive(
             &mut conversation,
-            &json!({"id": 8, "method": "item/tool/requestUserInput", "params": {}}),
+            &json!({"id": 8, "method": "mcpServer/elicitation/request", "params": {}}),
         )?;
 
         assert_eq!(output.events, vec![]);
@@ -1009,7 +1165,8 @@ mod tests {
 
     #[test]
     fn a_rejected_request_ends_the_conversation() -> TestResult {
-        let (mut conversation, _) = Conversation::start("/repo".to_owned())?;
+        let (mut conversation, _) =
+            Conversation::start("/repo".to_owned(), PermissionMode::Supervised)?;
 
         let result = receive(
             &mut conversation,
@@ -1049,6 +1206,153 @@ mod tests {
             &json!({"id": 2, "result": {"turn": {"id": "u1", "items": [], "status": "inProgress", "error": null}}}),
         )?;
         Ok(conversation)
+    }
+
+    /// The `thread/start` params a conversation in `mode` sends.
+    fn thread_start(mode: PermissionMode) -> TestResult<Value> {
+        let (mut conversation, _) = Conversation::start("/repo".to_owned(), mode)?;
+        let output = receive(&mut conversation, &json!({"id": 0, "result": {}}))?;
+        Ok(lines(&output)?[1]["params"].clone())
+    }
+
+    #[test]
+    fn each_permission_mode_sets_codexs_approval_policy_and_keeps_the_sandbox() -> TestResult {
+        for (mode, policy, reviewer) in [
+            (PermissionMode::Supervised, "untrusted", Value::Null),
+            (PermissionMode::Auto, "on-request", json!("auto_review")),
+            (PermissionMode::FullAccess, "never", Value::Null),
+        ] {
+            let params = thread_start(mode)?;
+
+            assert_eq!(params["approvalPolicy"], policy, "{mode:?}");
+            assert_eq!(params["approvalsReviewer"], reviewer, "{mode:?}");
+            assert_eq!(params["sandbox"], "workspace-write", "{mode:?}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_resumed_thread_gets_the_mode_too() -> TestResult {
+        let (mut conversation, _) = Conversation::resume(
+            "/repo".to_owned(),
+            PermissionMode::FullAccess,
+            "t1".to_owned(),
+        )?;
+
+        let output = receive(&mut conversation, &json!({"id": 0, "result": {}}))?;
+
+        let params = &lines(&output)?[1]["params"];
+        assert_eq!(params["approvalPolicy"], "never");
+        assert_eq!(params["sandbox"], "workspace-write");
+        Ok(())
+    }
+
+    fn command_approval(conversation: &mut Conversation, id: i64) -> TestResult {
+        receive(
+            conversation,
+            &json!({"id": id, "method": "item/commandExecution/requestApproval", "params": {
+                "threadId": "t1", "turnId": "u1", "itemId": "c1", "command": "cargo test",
+            }}),
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn approving_accepts_the_request() -> TestResult {
+        let mut conversation = running()?;
+        command_approval(&mut conversation, 7)?;
+
+        let output = conversation.answer("7", Answer::Approve)?;
+
+        assert_eq!(
+            lines(&output)?,
+            [json!({"id": 7, "result": {"decision": "accept"}})]
+        );
+        // Answered once only.
+        assert_eq!(
+            conversation.answer("7", Answer::Approve)?,
+            Output::default()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_decline_with_feedback_declines_and_steers_the_feedback_into_the_turn() -> TestResult {
+        let mut conversation = running()?;
+        command_approval(&mut conversation, 7)?;
+
+        let output = conversation.answer(
+            "7",
+            Answer::Decline {
+                feedback: Some("Use nextest.".to_owned()),
+            },
+        )?;
+
+        let lines = lines(&output)?;
+        assert_eq!(
+            lines[0],
+            json!({"id": 7, "result": {"decision": "decline"}})
+        );
+        assert_eq!(lines[1]["method"], "turn/steer");
+        assert_eq!(lines[1]["params"]["input"][0]["text"], "Use nextest.");
+        Ok(())
+    }
+
+    #[test]
+    fn questions_become_events_and_their_answers_go_back_by_question_id() -> TestResult {
+        let mut conversation = running()?;
+
+        let output = receive(
+            &mut conversation,
+            &json!({"id": 9, "method": "item/tool/requestUserInput", "params": {
+                "threadId": "t1", "turnId": "u1", "itemId": "q1", "isBlocking": true,
+                "autoResolutionMs": null,
+                "questions": [{"id": "runner", "header": "Runner", "question": "Which runner?",
+                    "isOther": true, "isSecret": false,
+                    "options": [{"label": "cargo test", "description": "Default"}]}],
+            }}),
+        )?;
+        assert_eq!(
+            output.events,
+            [AgentEvent::QuestionAsked {
+                request: "9".to_owned(),
+                questions: vec![Question {
+                    id: "runner".to_owned(),
+                    header: "Runner".to_owned(),
+                    question: "Which runner?".to_owned(),
+                    options: vec![QuestionOption {
+                        label: "cargo test".to_owned(),
+                        description: "Default".to_owned(),
+                    }],
+                    multi_select: false,
+                }],
+            }]
+        );
+
+        let answers = BTreeMap::from([("runner".to_owned(), vec!["cargo test".to_owned()])]);
+        let output = conversation.answer("9", Answer::Answers { answers })?;
+
+        assert_eq!(
+            lines(&output)?,
+            [json!({"id": 9, "result": {"answers": {"runner": {"answers": ["cargo test"]}}}})]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn requests_close_when_the_turn_ends() -> TestResult {
+        let mut conversation = running()?;
+        command_approval(&mut conversation, 7)?;
+        receive(
+            &mut conversation,
+            &turn_completed("interrupted", &Value::Null),
+        )?;
+
+        assert_eq!(
+            conversation.answer("7", Answer::Approve)?,
+            Output::default()
+        );
+        Ok(())
     }
 
     #[test]
@@ -1147,7 +1451,8 @@ mod tests {
 
     #[test]
     fn a_steer_before_the_thread_started_joins_the_waiting_turn() -> TestResult {
-        let (mut conversation, _) = Conversation::start("/repo".to_owned())?;
+        let (mut conversation, _) =
+            Conversation::start("/repo".to_owned(), PermissionMode::Supervised)?;
         conversation.user_message("one".to_owned())?;
         conversation.steer("two".to_owned())?;
         receive(&mut conversation, &json!({"id": 0, "result": {}}))?;
@@ -1166,7 +1471,8 @@ mod tests {
 
     #[test]
     fn an_interrupt_before_the_thread_started_ends_the_waiting_turn() -> TestResult {
-        let (mut conversation, _) = Conversation::start("/repo".to_owned())?;
+        let (mut conversation, _) =
+            Conversation::start("/repo".to_owned(), PermissionMode::Supervised)?;
         conversation.user_message("one".to_owned())?;
 
         let output = conversation.interrupt()?;

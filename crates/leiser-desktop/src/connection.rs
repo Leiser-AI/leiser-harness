@@ -8,9 +8,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use std::{env, io};
 
-use leiser_service::{ConnectError, LocalClient, Notification, ServiceProgram};
+use leiser_service::{AgentEvent, ConnectError, Event, LocalClient, Notification, ServiceProgram};
 use serde::Serialize;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
+use tauri_plugin_notification::NotificationExt;
 use tokio::sync::mpsc;
 
 /// When set, the app starts the harness service program at this path
@@ -190,8 +191,44 @@ async fn connect_within(
 async fn forward(app: &AppHandle, mut notifications: mpsc::Receiver<Notification>) {
     while let Some(notification) = notifications.recv().await {
         let _ = match notification {
-            Notification::Event(event) => app.emit(SERVICE_EVENT, event),
+            Notification::Event(event) => {
+                notify_if_waiting(app, &event);
+                app.emit(SERVICE_EVENT, event)
+            }
             Notification::EventsLost => app.emit(SERVICE_EVENTS_LOST, ()),
         };
+    }
+}
+
+/// Tells the developer through the OS that a chat waits for them, unless
+/// the app is in front, where the chat shows it.
+fn notify_if_waiting(app: &AppHandle, event: &Event) {
+    let Event::Agent { event, .. } = event else {
+        return;
+    };
+    let body = match event {
+        AgentEvent::ApprovalRequested { description, .. } => description.clone(),
+        AgentEvent::QuestionAsked { questions, .. } => questions.first().map_or_else(
+            || "The agent has a question.".to_owned(),
+            |question| question.question.clone(),
+        ),
+        _ => return,
+    };
+    let in_front = app
+        .webview_windows()
+        .values()
+        .any(|window| window.is_focused().unwrap_or(false));
+    if in_front {
+        return;
+    }
+    let shown = app
+        .notification()
+        .builder()
+        .title("A chat is waiting for you")
+        .body(body)
+        .show();
+    if let Err(error) = shown {
+        // The chat still shows the request; the notification is a hint.
+        tracing::warn!(%error, "could not show a notification");
     }
 }

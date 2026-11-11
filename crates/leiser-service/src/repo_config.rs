@@ -2,6 +2,10 @@
 //! its main checkout, parsed once where it is read.
 //!
 //! ```toml
+//! # The permission mode new chats start in: "supervised",
+//! # "auto_accept_edits", "auto" (the default) or "full_access".
+//! permission_mode = "supervised"
+//!
 //! [worktree]
 //! # The branch new worktrees start from. Default: the remote `origin`'s
 //! # default branch, else what the main checkout has checked out.
@@ -45,7 +49,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-use crate::{CheckId, Provider, SwitchedOffCheck};
+use crate::{CheckId, PermissionMode, Provider, SwitchedOffCheck};
 
 /// Where the file lives, relative to the main checkout.
 const CONFIG_FILE: [&str; 2] = [".leiser", "config.toml"];
@@ -66,6 +70,9 @@ pub(crate) enum ConfigError {
 /// A repository's settings.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 pub(crate) struct RepositoryConfig {
+    /// The permission mode new chats start in.
+    #[serde(default)]
+    pub permission_mode: PermissionMode,
     #[serde(default)]
     pub worktree: WorktreeConfig,
     /// The default subscription per provider, by name. Unknown providers

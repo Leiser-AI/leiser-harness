@@ -31,7 +31,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::repo_check::Outcome;
-use crate::{AgentCli, AgentEvent, Provider, SubscriptionKind, TranscriptEntry};
+use crate::{AgentCli, AgentEvent, PermissionMode, Provider, SubscriptionKind, TranscriptEntry};
 
 /// The storage version this harness service writes.
 ///
@@ -40,9 +40,12 @@ use crate::{AgentCli, AgentEvent, Provider, SubscriptionKind, TranscriptEntry};
 ///   CLI and a pending handoff, and agent entries name their agent CLI.
 ///   Later additions that version 2 data without them reads as defaults:
 ///   whether a chat works in a worktree, whether it is done and when its
-///   status last changed, and
+///   status last changed, its permission mode (Auto), and
 ///   transcript entries for finished repository scripts.
-/// - 3: subscriptions, and each chat's subscription per provider.
+/// - 3: subscriptions, and each chat's subscription per provider. Later
+///   additions that version 3 data without them reads as defaults: a
+///   chat's permission mode (Auto) and transcript entries for the
+///   developer's answers.
 const VERSION: u32 = 3;
 
 const STATE_FILE: &str = "state.json";
@@ -127,6 +130,10 @@ pub(crate) struct ChatV3 {
     /// When the chat's status last changed, in the harness service's count
     /// of status changes; the sidebar lists the latest first.
     pub status_changed: u64,
+    /// The chat's permission mode. Chats stored before permission modes
+    /// existed run in the default, Auto.
+    #[serde(default)]
+    pub permission_mode: PermissionMode,
     /// The chat's subscription per provider; a provider without one runs
     /// on the agent CLI's own default login.
     pub subscriptions: Vec<ChatSubscriptionV3>,
@@ -168,6 +175,10 @@ struct ChatV2 {
     /// the count existed.
     #[serde(default)]
     status_changed: u64,
+    /// The chat's permission mode; chats stored before permission modes
+    /// existed run in the default, Auto.
+    #[serde(default)]
+    permission_mode: PermissionMode,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -334,6 +345,7 @@ impl Store {
                     worktree: chat.worktree,
                     done: chat.done,
                     status_changed: chat.status_changed,
+                    permission_mode: chat.permission_mode,
                     subscriptions: Vec::new(),
                 })
                 .collect(),
@@ -402,6 +414,7 @@ impl Store {
                     worktree: false,
                     done: false,
                     status_changed: 0,
+                    permission_mode: PermissionMode::default(),
                 })
                 .collect(),
         };

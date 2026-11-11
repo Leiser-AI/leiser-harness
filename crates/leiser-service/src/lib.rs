@@ -69,12 +69,12 @@ pub use local_interface::{
 };
 pub use program::{ArgsError, SERVICE_LOG_FILE, ServiceProgram};
 pub use protocol::{
-    AgentCli, AgentEvent, ApiKey, Branch, ChatId, ChatOverview, ChatStatus, CheckId, Checkout,
-    CliExtension, CliExtensionKind, Command, CommandError, Event, Finding, InvalidCheckId,
-    LoginAnswer, LoginOutcome, OptOuts, Provider, QueueReason, RepoCheck, RepoCheckReport,
-    RepositoryId, RepositoryOverview, RepositoryScript, Response, SignIn, SubscriptionId,
-    SubscriptionKind, SubscriptionOverview, SwitchedOffCheck, Todo, TodoId, TranscriptEntry,
-    UnreadableCliExtensionFile,
+    AgentCli, AgentEvent, Answer, ApiKey, Branch, ChatId, ChatOverview, ChatStatus, CheckId,
+    Checkout, CliExtension, CliExtensionKind, Command, CommandError, Event, Finding,
+    InvalidCheckId, LoginAnswer, LoginOutcome, OptOuts, PermissionMode, Provider, Question,
+    QuestionOption, QueueReason, RepoCheck, RepoCheckReport, RepositoryId, RepositoryOverview,
+    RepositoryScript, Response, SignIn, SubscriptionId, SubscriptionKind, SubscriptionOverview,
+    SwitchedOffCheck, Todo, TodoId, TranscriptEntry, UnreadableCliExtensionFile,
 };
 pub use service::{Service, ServiceConfig, ServiceHandle, StartError, start};
 pub use store::StorageError;

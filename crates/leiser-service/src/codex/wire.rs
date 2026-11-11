@@ -9,6 +9,8 @@
 //! JSON. Fields this driver does not use are ignored, so newer Codex
 //! versions that add fields still parse.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 /// The id of a JSON-RPC request. Codex uses numbers, but the protocol
@@ -72,6 +74,8 @@ pub(super) enum Request {
     CommandApproval(CommandApproval),
     /// `item/fileChange/requestApproval`
     FileChangeApproval(FileChangeApproval),
+    /// `item/tool/requestUserInput`: the agent asks the developer.
+    UserInput(UserInputRequest),
     /// Any request this driver does not handle; it gets an error answer.
     Unsupported { method: String },
 }
@@ -88,6 +92,29 @@ pub(super) struct CommandApproval {
 pub(super) struct FileChangeApproval {
     #[serde(default)]
     pub reason: Option<String>,
+}
+
+/// Questions from the agent (`request_user_input`, experimental in Codex).
+#[derive(Debug, PartialEq, Eq, Deserialize)]
+pub(super) struct UserInputRequest {
+    pub questions: Vec<UserInputQuestion>,
+}
+
+#[derive(Debug, PartialEq, Eq, Deserialize)]
+pub(super) struct UserInputQuestion {
+    pub id: String,
+    #[serde(default)]
+    pub header: String,
+    pub question: String,
+    #[serde(default)]
+    pub options: Option<Vec<UserInputOption>>,
+}
+
+#[derive(Debug, PartialEq, Eq, Deserialize)]
+pub(super) struct UserInputOption {
+    pub label: String,
+    #[serde(default)]
+    pub description: String,
 }
 
 /// Notifications from Codex. Only the ones this driver acts on are typed.
@@ -315,6 +342,7 @@ fn parse_request(method: String, raw: serde_json::Value) -> Result<Request, Wire
     Ok(match method.as_str() {
         "item/commandExecution/requestApproval" => Request::CommandApproval(params(&method, raw)?),
         "item/fileChange/requestApproval" => Request::FileChangeApproval(params(&method, raw)?),
+        "item/tool/requestUserInput" => Request::UserInput(params(&method, raw)?),
         _ => Request::Unsupported { method },
     })
 }
@@ -345,6 +373,37 @@ pub(super) struct ClientNotification {
     pub method: &'static str,
 }
 
+/// The driver's answer to a request from Codex.
+#[derive(Debug, Serialize)]
+pub(super) struct Response<R> {
+    pub id: RequestId,
+    pub result: R,
+}
+
+/// The answer to a command or file change approval request.
+#[derive(Debug, Serialize)]
+pub(super) struct ApprovalResponse {
+    pub decision: ApprovalDecision,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) enum ApprovalDecision {
+    Accept,
+    Decline,
+}
+
+/// The answers to `item/tool/requestUserInput`, by question id.
+#[derive(Debug, Serialize)]
+pub(super) struct UserInputResponse {
+    pub answers: BTreeMap<String, UserInputAnswer>,
+}
+
+#[derive(Debug, Serialize)]
+pub(super) struct UserInputAnswer {
+    pub answers: Vec<String>,
+}
+
 /// The driver's error answer to a request from Codex.
 #[derive(Debug, Serialize)]
 pub(super) struct ErrorResponse {
@@ -370,6 +429,9 @@ pub(super) struct ClientInfo {
 pub(super) struct ThreadStartParams {
     pub cwd: String,
     pub approval_policy: &'static str,
+    /// Where approval requests go; Codex asks the developer when unset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approvals_reviewer: Option<&'static str>,
     pub sandbox: &'static str,
 }
 
@@ -382,6 +444,8 @@ pub(super) struct ThreadResumeParams {
     pub thread_id: String,
     pub cwd: String,
     pub approval_policy: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approvals_reviewer: Option<&'static str>,
     pub sandbox: &'static str,
     /// The chat already has the earlier turns; Codex need not send them.
     pub exclude_turns: bool,
