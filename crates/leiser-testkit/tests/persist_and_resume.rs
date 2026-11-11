@@ -8,7 +8,7 @@ use leiser_service::{
     AgentEvent, ChatId, ChatOverview, ChatStatus, Checkout, Command, Response, ServiceConfig,
     ServiceHandle, StartError, StorageError, TranscriptEntry,
 };
-use leiser_testkit::{FakeDriver, Script, Step, TestRepo, TestService, collect_turn};
+use leiser_testkit::{FakeDriver, Gate, Script, Step, TestRepo, TestService, collect_turn};
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
@@ -85,23 +85,21 @@ fn agent(event: AgentEvent) -> TranscriptEntry {
 
 #[tokio::test]
 async fn closing_the_desktop_app_does_not_stop_a_running_turn() -> TestResult {
-    let script = Script::new().turn([Step::Sleep { millis: 300 }, Step::message("done")]);
+    let gate = Gate::new()?;
+    let script = Script::new().turn([gate.step(), Step::message("done")]);
     let service = start_service(&script)?;
     let repo = TestRepo::new()?;
     let app = service.connect();
     let chat = start_chat(&app, &repo).await?;
-
     send(&app, chat, "take your time").await?;
-    drop(app);
 
+    drop(app);
     let reopened = service.connect();
     let mut events = reopened.subscribe();
-    // Subscribed before reading, so a turn still working here ends later
-    // and its end reaches `events`.
-    let (status, _) = read_chat(&reopened, chat).await?;
-    if status == ChatStatus::Working {
-        collect_turn(&mut events, chat).await?;
-    }
+    assert_eq!(read_chat(&reopened, chat).await?.0, ChatStatus::Working);
+    gate.open()?;
+    collect_turn(&mut events, chat).await?;
+
     assert_eq!(
         read_chat(&reopened, chat).await?,
         (

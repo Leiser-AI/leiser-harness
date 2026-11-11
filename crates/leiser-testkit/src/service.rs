@@ -4,7 +4,7 @@ use std::io;
 use std::path::Path;
 use std::sync::Arc;
 
-use leiser_service::{Service, ServiceConfig, ServiceHandle, StartError};
+use leiser_service::{Driver, Service, ServiceConfig, ServiceHandle, StartError};
 use tempfile::TempDir;
 
 use crate::{FakeDriver, Script};
@@ -12,18 +12,18 @@ use crate::{FakeDriver, Script};
 /// Why [`TestService`] could not start.
 #[derive(Debug, thiserror::Error)]
 pub enum TestServiceError {
-    #[error("could not set up the fake agent CLI: {0}")]
-    Driver(#[from] io::Error),
+    #[error("could not set up the test: {0}")]
+    Io(#[from] io::Error),
     #[error(transparent)]
     Start(#[from] StartError),
 }
 
-/// A harness service on a [`FakeDriver`] and a temporary data directory,
-/// both kept across [`TestService::restart`].
+/// A harness service on a driver, usually a [`FakeDriver`], and a temporary
+/// data directory, both kept across [`TestService::restart`].
 #[derive(Debug)]
 pub struct TestService {
     service: Service,
-    driver: Arc<FakeDriver>,
+    driver: Arc<dyn Driver>,
     data: TempDir,
 }
 
@@ -36,7 +36,16 @@ impl TestService {
     /// Returns a [`TestServiceError`] when the driver or the service cannot
     /// be set up.
     pub fn start(program: &Path, script: &Script) -> Result<Self, TestServiceError> {
-        let driver = Arc::new(FakeDriver::new(program, script)?);
+        Self::with_driver(Arc::new(FakeDriver::new(program, script)?))
+    }
+
+    /// A harness service on any driver, such as a real agent CLI's.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`TestServiceError`] when the data directory or the
+    /// service cannot be set up.
+    pub fn with_driver(driver: Arc<dyn Driver>) -> Result<Self, TestServiceError> {
         let data = tempfile::tempdir()?;
         let service = start(&driver, &data)?;
         Ok(Self {
@@ -74,7 +83,7 @@ impl TestService {
     }
 }
 
-fn start(driver: &Arc<FakeDriver>, data: &TempDir) -> Result<Service, StartError> {
+fn start(driver: &Arc<dyn Driver>, data: &TempDir) -> Result<Service, StartError> {
     leiser_service::start(ServiceConfig {
         driver: driver.clone(),
         data_dir: data.path().to_path_buf(),

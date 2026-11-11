@@ -7,28 +7,38 @@
 //! fake-agent-cli --script <script.json> --sessions <dir> --resume <id>
 //! ```
 //!
-//! Reads one [`FakeInput`] per line on standard input and answers each with
-//! the next scripted turn, written as one [`AgentEvent`] per line on
-//! standard output. Like a real agent CLI it keeps each agent session in its
-//! own state (`<dir>/<id>.json`), so `--resume` continues with the turn after
-//! the last one the session played. Resuming an unknown session fails.
+//! Reads one [`FakeInput`] per line on standard input and answers each
+//! message with the next scripted turn, written as one [`AgentEvent`] per
+//! line on standard output. Input keeps being read while a turn plays, so a
+//! turn can be steered or interrupted.
+//!
+//! Like a real agent CLI it keeps each agent session in its own state
+//! (`<dir>/<id>.json`), so `--resume` continues with the turn after the last
+//! one the session played. Resuming an unknown session fails.
+//!
+//! `fake-agent-cli --version` prints [`FAKE_VERSION`], older than any agent
+//! CLI the harness supports, for tests of the minimum version check.
 
 use std::ffi::OsString;
 use std::io::{self, BufRead, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, TryRecvError};
 use std::time::Duration;
 
 use leiser_service::AgentEvent;
 use leiser_testkit::{FakeInput, Script, Step};
 use serde::{Deserialize, Serialize};
 
-const USAGE: &str = "usage: fake-agent-cli --script <script.json> --sessions <dir> \
-                     (--session-id <id> | --resume <id>)";
+/// How often a turn waiting at a gate looks for the gate file.
+const GATE_POLL: Duration = Duration::from_millis(10);
 
 #[derive(Debug, thiserror::Error)]
 enum FakeError {
-    #[error("{USAGE}")]
+    #[error(
+        "usage: fake-agent-cli --script <script.json> --sessions <dir> \
+         (--session-id <id> | --resume <id>)"
+    )]
     Usage,
     #[error("unknown agent session {0}")]
     UnknownSession(String),
@@ -36,23 +46,10 @@ enum FakeError {
     Io(#[from] io::Error),
     #[error("invalid JSON: {0}")]
     Json(#[from] serde_json::Error),
-}
-
-/// What the fake agent CLI remembers about one agent session.
-#[derive(Debug, Default, Serialize, Deserialize)]
-struct SessionState {
-    turns_played: usize,
-}
-
-enum Session {
-    New(String),
-    Resume(String),
-}
-
-struct Args {
-    script: PathBuf,
-    sessions: PathBuf,
-    session: Session,
+    #[error("unexpected input: {0}")]
+    Unexpected(&'static str),
+    #[error("no steered message to echo")]
+    NoSteer,
 }
 
 fn main() -> ExitCode {
@@ -63,6 +60,26 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// The answer to `--version`, in the form Claude Code uses.
+const FAKE_VERSION: &str = "0.1.0 (fake-agent-cli)";
+
+/// What the fake agent CLI remembers about one agent session.
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct SessionState {
+    turns_played: usize,
+}
+
+enum SessionArg {
+    New(String),
+    Resume(String),
+}
+
+struct Args {
+    script: PathBuf,
+    sessions: PathBuf,
+    session: SessionArg,
 }
 
 fn parse_args() -> Result<Args, FakeError> {
@@ -76,8 +93,8 @@ fn parse_args() -> Result<Args, FakeError> {
         match flag.to_str() {
             Some("--script") => script = Some(PathBuf::from(&value)),
             Some("--sessions") => sessions = Some(PathBuf::from(&value)),
-            Some("--session-id") => session = Some(Session::New(text()?)),
-            Some("--resume") => session = Some(Session::Resume(text()?)),
+            Some("--session-id") => session = Some(SessionArg::New(text()?)),
+            Some("--resume") => session = Some(SessionArg::Resume(text()?)),
             _ => return Err(FakeError::Usage),
         }
     }
@@ -91,59 +108,234 @@ fn parse_args() -> Result<Args, FakeError> {
     }
 }
 
-fn run() -> Result<(), FakeError> {
-    let args = parse_args()?;
-    let script: Script = serde_json::from_slice(&std::fs::read(&args.script)?)?;
-    let (id, mut state) = match args.session {
-        Session::New(id) => (id, SessionState::default()),
-        Session::Resume(id) => {
-            let file = session_file(&args.sessions, &id);
-            match std::fs::read(file) {
-                Ok(bytes) => (id, serde_json::from_slice(&bytes)?),
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                    return Err(FakeError::UnknownSession(id));
+/// An agent session's state, saved after every turn.
+struct SessionFile {
+    path: PathBuf,
+    state: SessionState,
+}
+
+impl SessionFile {
+    fn open(sessions: &Path, session: SessionArg) -> Result<Self, FakeError> {
+        let file = |id: &str| {
+            let mut name = OsString::from(id);
+            name.push(".json");
+            sessions.join(name)
+        };
+        let session = match session {
+            SessionArg::New(id) => Self {
+                path: file(&id),
+                state: SessionState::default(),
+            },
+            SessionArg::Resume(id) => {
+                let path = file(&id);
+                match std::fs::read(&path) {
+                    Ok(bytes) => Self {
+                        path,
+                        state: serde_json::from_slice(&bytes)?,
+                    },
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                        return Err(FakeError::UnknownSession(id));
+                    }
+                    Err(error) => return Err(error.into()),
                 }
-                Err(error) => return Err(error.into()),
             }
-        }
-    };
-    let state_file = session_file(&args.sessions, &id);
-    std::fs::write(&state_file, serde_json::to_vec(&state)?)?;
-    let mut out = io::stdout().lock();
-    for line in io::stdin().lock().lines() {
-        let FakeInput::UserMessage { text } = serde_json::from_str(&line?)?;
+        };
+        session.save()?;
+        Ok(session)
+    }
+
+    /// Takes the next turn of `script`; an empty one after the last.
+    fn next_turn(&mut self, script: &Script) -> Vec<Step> {
         let steps = script
             .turns
-            .get(state.turns_played)
+            .get(self.state.turns_played)
             .cloned()
             .unwrap_or_default();
-        for step in steps {
-            let event = match step {
-                Step::Emit { event } => event,
-                Step::EchoUserMessage => AgentEvent::Message { text: text.clone() },
-                Step::ReportWorkingDirectory => AgentEvent::Message {
-                    text: std::env::current_dir()?.display().to_string(),
-                },
-                Step::Sleep { millis } => {
-                    std::thread::sleep(Duration::from_millis(millis));
-                    continue;
+        self.state.turns_played += 1;
+        steps
+    }
+
+    fn save(&self) -> Result<(), FakeError> {
+        std::fs::write(&self.path, serde_json::to_vec(&self.state)?)?;
+        Ok(())
+    }
+}
+
+fn run() -> Result<(), FakeError> {
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|arg| arg == "--version")
+    {
+        writeln!(io::stdout(), "{FAKE_VERSION}")?;
+        return Ok(());
+    }
+    let args = parse_args()?;
+    let script: Script = serde_json::from_slice(&std::fs::read(&args.script)?)?;
+    let mut session = SessionFile::open(&args.sessions, args.session)?;
+    let inputs = read_inputs();
+    let mut out = io::stdout().lock();
+    while let Ok(input) = inputs.recv() {
+        match input? {
+            FakeInput::UserMessage { text } => {
+                let mut turn = Turn {
+                    message: text,
+                    steer: None,
+                    supports_steer: script.supports_steer,
+                    inputs: &inputs,
+                    out: &mut out,
+                };
+                let outcome = turn.play(session.next_turn(&script))?;
+                // Saved before the turn ends: once the harness service sees
+                // the end it may restart and resume this session at once.
+                session.save()?;
+                match outcome {
+                    Outcome::Ended => emit(&mut out, &AgentEvent::TurnEnded)?,
+                    Outcome::Interrupted => emit(&mut out, &AgentEvent::TurnInterrupted)?,
+                    Outcome::InputClosed => return Ok(()),
                 }
-            };
-            emit(&mut out, &event)?;
+            }
+            FakeInput::Steer { .. } => return Err(FakeError::Unexpected("steer between turns")),
+            // An interrupt that arrives after its turn ended is harmless.
+            FakeInput::Interrupt => {}
         }
-        // Stored before the turn ends: once the harness service sees the
-        // end it may restart and resume this session at once.
-        state.turns_played += 1;
-        std::fs::write(&state_file, serde_json::to_vec(&state)?)?;
-        emit(&mut out, &AgentEvent::TurnEnded)?;
     }
     Ok(())
 }
 
-fn session_file(sessions: &std::path::Path, id: &str) -> PathBuf {
-    let mut name = OsString::from(id);
-    name.push(".json");
-    sessions.join(name)
+/// Reads standard input on its own thread, so a turn can take input while
+/// it plays. The channel closes when standard input does.
+fn read_inputs() -> Receiver<Result<FakeInput, FakeError>> {
+    let (sender, receiver) = mpsc::channel();
+    std::thread::spawn(move || {
+        for line in io::stdin().lock().lines() {
+            let input = line
+                .map_err(FakeError::from)
+                .and_then(|line| Ok(serde_json::from_str(&line)?));
+            let failed = input.is_err();
+            if sender.send(input).is_err() || failed {
+                return;
+            }
+        }
+    });
+    receiver
+}
+
+enum Outcome {
+    Ended,
+    Interrupted,
+    InputClosed,
+}
+
+/// What a turn does with input that arrives while it plays.
+enum MidTurn {
+    Steered,
+    Interrupted,
+}
+
+struct Turn<'a, W> {
+    /// The message that started the turn.
+    message: String,
+    /// The last steered message of the turn.
+    steer: Option<String>,
+    supports_steer: bool,
+    inputs: &'a Receiver<Result<FakeInput, FakeError>>,
+    out: &'a mut W,
+}
+
+impl<W: Write> Turn<'_, W> {
+    fn play(&mut self, steps: Vec<Step>) -> Result<Outcome, FakeError> {
+        for step in steps {
+            if let Some(outcome) = self.take_pending()? {
+                return Ok(outcome);
+            }
+            if let Some(outcome) = self.step(step)? {
+                return Ok(outcome);
+            }
+        }
+        Ok(self.take_pending()?.unwrap_or(Outcome::Ended))
+    }
+
+    /// Plays one step; returns an outcome when the turn ends early.
+    fn step(&mut self, step: Step) -> Result<Option<Outcome>, FakeError> {
+        let event = match step {
+            Step::Emit { event } => event,
+            Step::EchoUserMessage => AgentEvent::Message {
+                text: self.message.clone(),
+            },
+            Step::ReportWorkingDirectory => AgentEvent::Message {
+                text: std::env::current_dir()?.display().to_string(),
+            },
+            Step::EchoSteer => AgentEvent::Message {
+                text: self.steer.clone().ok_or(FakeError::NoSteer)?,
+            },
+            Step::WaitForSteer => return self.wait_for_steer(),
+            Step::WaitForGate { gate } => return self.wait_for_gate(&gate),
+        };
+        emit(self.out, &event)?;
+        Ok(None)
+    }
+
+    fn wait_for_steer(&mut self) -> Result<Option<Outcome>, FakeError> {
+        // A steer may have come before this step, as with a real agent CLI
+        // that is steered right after the turn starts.
+        if self.steer.is_some() {
+            return Ok(None);
+        }
+        let Ok(input) = self.inputs.recv() else {
+            return Ok(Some(Outcome::InputClosed));
+        };
+        Ok(match self.mid_turn(input?)? {
+            MidTurn::Steered => None,
+            MidTurn::Interrupted => Some(Outcome::Interrupted),
+        })
+    }
+
+    fn wait_for_gate(&mut self, gate: &Path) -> Result<Option<Outcome>, FakeError> {
+        while !gate.exists() {
+            match self.inputs.recv_timeout(GATE_POLL) {
+                Ok(input) => {
+                    if let MidTurn::Interrupted = self.mid_turn(input?)? {
+                        return Ok(Some(Outcome::Interrupted));
+                    }
+                }
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => return Ok(Some(Outcome::InputClosed)),
+            }
+        }
+        Ok(None)
+    }
+
+    /// Handles input that already arrived; returns an outcome when it ends
+    /// the turn.
+    fn take_pending(&mut self) -> Result<Option<Outcome>, FakeError> {
+        loop {
+            match self.inputs.try_recv() {
+                Ok(input) => {
+                    if let MidTurn::Interrupted = self.mid_turn(input?)? {
+                        return Ok(Some(Outcome::Interrupted));
+                    }
+                }
+                Err(TryRecvError::Empty) => return Ok(None),
+                Err(TryRecvError::Disconnected) => return Ok(Some(Outcome::InputClosed)),
+            }
+        }
+    }
+
+    fn mid_turn(&mut self, input: FakeInput) -> Result<MidTurn, FakeError> {
+        match input {
+            FakeInput::UserMessage { .. } => {
+                Err(FakeError::Unexpected("message while a turn runs"))
+            }
+            FakeInput::Steer { .. } if !self.supports_steer => Err(FakeError::Unexpected(
+                "steer, but steering is not supported",
+            )),
+            FakeInput::Steer { text } => {
+                self.steer = Some(text);
+                Ok(MidTurn::Steered)
+            }
+            FakeInput::Interrupt => Ok(MidTurn::Interrupted),
+        }
+    }
 }
 
 fn emit(out: &mut impl Write, event: &AgentEvent) -> Result<(), FakeError> {

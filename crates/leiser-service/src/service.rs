@@ -1,6 +1,6 @@
 //! The harness service's state and its command loop.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -10,7 +10,7 @@ use tokio::task::JoinHandle;
 use crate::store::{ChatV1, RepositoryV1, StateV1, StorageError, Store};
 use crate::{
     AgentEvent, AgentSessionId, ChatId, ChatOverview, ChatStatus, Checkout, Command, CommandError,
-    Driver, Event, RepositoryId, Response, SessionInput, SessionSpec, TranscriptEntry,
+    Driver, Event, QueueReason, RepositoryId, Response, SessionInput, SessionSpec, TranscriptEntry,
 };
 
 /// Commands waiting for the command loop. Small, so callers feel back
@@ -126,15 +126,35 @@ struct Chat {
     working_directory: PathBuf,
     /// The agent session to resume, once the chat has had one.
     agent_session: Option<AgentSessionId>,
-    status: ChatStatus,
     /// The running agent session, if any.
-    live: Option<LiveSession>,
+    session: Option<Session>,
 }
 
-struct LiveSession {
+impl Chat {
+    fn status(&self) -> ChatStatus {
+        match &self.session {
+            Some(Session {
+                turn: Turn::Running { .. },
+                ..
+            }) => ChatStatus::Working,
+            _ => ChatStatus::Idle,
+        }
+    }
+}
+
+struct Session {
     /// Tells this agent session's messages apart from an earlier one's.
     generation: u64,
     input: mpsc::Sender<SessionInput>,
+    turn: Turn,
+}
+
+enum Turn {
+    Idle,
+    /// A turn runs; `queued` messages are sent in order, one turn each.
+    Running {
+        queued: VecDeque<String>,
+    },
 }
 
 /// What an agent session's forwarding task reports to the command loop.
@@ -155,6 +175,7 @@ struct State {
     driver: Arc<dyn Driver>,
     store: Store,
     events: broadcast::Sender<Event>,
+    /// Where the agent sessions' ids and events arrive.
     sessions: mpsc::Sender<SessionMessage>,
     repositories: BTreeMap<RepositoryId, PathBuf>,
     chats: BTreeMap<ChatId, Chat>,
@@ -187,8 +208,7 @@ impl State {
                         agent_session: chat.agent_session.map(AgentSessionId::new),
                         // Agent sessions did not survive the restart, so no
                         // turn runs; resumed ones wait for the next message.
-                        status: ChatStatus::Idle,
-                        live: None,
+                        session: None,
                     },
                 )
             })
@@ -231,7 +251,8 @@ impl State {
             tokio::select! {
                 biased;
                 _ = &mut stopped => break,
-                Some(message) = sessions.recv() => self.on_session(message),
+                // Never closes: `self` holds a sender.
+                Some(message) = sessions.recv() => self.on_session(message).await,
                 Some((command, reply)) = commands.recv() => {
                     let result = self.execute(command).await;
                     // The caller may have stopped waiting; nothing to do then.
@@ -250,6 +271,11 @@ impl State {
                 checkout,
             } => self.start_chat(repository, checkout),
             Command::SendMessage { chat, text } => self.send_message(chat, text).await,
+            Command::QueueMessage { chat, text } => {
+                self.queue_message(chat, text, QueueReason::Requested).await
+            }
+            Command::SteerMessage { chat, text } => self.steer_message(chat, text).await,
+            Command::InterruptTurn { chat } => self.interrupt_turn(chat).await,
             Command::ListChats => Ok(self.list_chats()),
             Command::ReadChat { chat } => self.read_chat(chat),
         }
@@ -258,6 +284,11 @@ impl State {
     fn next_id(&mut self) -> u64 {
         self.next_id += 1;
         self.next_id
+    }
+
+    fn emit(&self, event: Event) {
+        // No subscriber is not an error: the desktop app may be closed.
+        let _ = self.events.send(event);
     }
 
     fn add_repository(&mut self, path: PathBuf) -> Result<Response, CommandError> {
@@ -293,8 +324,7 @@ impl State {
                 repository,
                 working_directory,
                 agent_session: None,
-                status: ChatStatus::Idle,
-                live: None,
+                session: None,
             },
         );
         if let Err(error) = self.save() {
@@ -304,38 +334,96 @@ impl State {
         Ok(Response::ChatStarted { chat })
     }
 
+    /// The input of the chat's agent session while a turn runs.
+    fn running_turn(&self, id: ChatId) -> Result<Option<mpsc::Sender<SessionInput>>, CommandError> {
+        let chat = self.chats.get(&id).ok_or(CommandError::UnknownChat(id))?;
+        Ok(match &chat.session {
+            Some(Session {
+                input,
+                turn: Turn::Running { .. },
+                ..
+            }) => Some(input.clone()),
+            _ => None,
+        })
+    }
+
     async fn send_message(&mut self, id: ChatId, text: String) -> Result<Response, CommandError> {
-        let live = self
-            .chats
-            .get(&id)
-            .ok_or(CommandError::UnknownChat(id))?
-            .live
-            .as_ref()
-            .map(|live| live.input.clone());
-        let input = match live {
-            Some(input) => input,
-            None => self.open_session(id)?,
-        };
+        let chat = self.chats.get(&id).ok_or(CommandError::UnknownChat(id))?;
+        if chat.status() == ChatStatus::Working {
+            return Err(CommandError::TurnRunning(id));
+        }
+        if chat.session.is_none() {
+            self.open_session(id)?;
+        }
         // Recorded first, so the developer's text is never lost.
         self.store
             .append(id.0, &TranscriptEntry::UserMessage { text: text.clone() })?;
-        if input
-            .send(SessionInput::UserMessage { text })
-            .await
-            .is_err()
-        {
-            if let Some(chat) = self.chats.get_mut(&id) {
-                // The next message resumes the agent session.
-                chat.live = None;
-            }
-            return Err(CommandError::AgentCli {
-                reason: "the agent session has ended".to_owned(),
-            });
-        }
-        if let Some(chat) = self.chats.get_mut(&id) {
-            chat.status = ChatStatus::Working;
+        let Some(Chat {
+            session: Some(session),
+            ..
+        }) = self.chats.get_mut(&id)
+        else {
+            return Err(CommandError::UnknownChat(id));
+        };
+        session.turn = Turn::Running {
+            queued: VecDeque::new(),
+        };
+        let input = session.input.clone();
+        if let Err(error) = send_input(&input, SessionInput::UserMessage { text }).await {
+            self.end_session(id);
+            return Err(error);
         }
         Ok(Response::MessageSent)
+    }
+
+    async fn queue_message(
+        &mut self,
+        id: ChatId,
+        text: String,
+        reason: QueueReason,
+    ) -> Result<Response, CommandError> {
+        let Some(Chat {
+            session:
+                Some(Session {
+                    turn: Turn::Running { queued },
+                    ..
+                }),
+            ..
+        }) = self.chats.get_mut(&id)
+        else {
+            return self.send_message(id, text).await;
+        };
+        queued.push_back(text.clone());
+        self.emit(Event::MessageQueued {
+            chat: id,
+            text,
+            reason,
+        });
+        Ok(Response::MessageQueued { reason })
+    }
+
+    async fn steer_message(&mut self, id: ChatId, text: String) -> Result<Response, CommandError> {
+        let Some(input) = self.running_turn(id)? else {
+            return self.send_message(id, text).await;
+        };
+        if !self.driver.supports_steer() {
+            return self
+                .queue_message(id, text, QueueReason::SteerUnsupported)
+                .await;
+        }
+        self.store
+            .append(id.0, &TranscriptEntry::UserMessage { text: text.clone() })?;
+        send_input(&input, SessionInput::Steer { text: text.clone() }).await?;
+        self.emit(Event::MessageSteered { chat: id, text });
+        Ok(Response::MessageSteered)
+    }
+
+    async fn interrupt_turn(&mut self, id: ChatId) -> Result<Response, CommandError> {
+        let Some(input) = self.running_turn(id)? else {
+            return Err(CommandError::NoTurnRunning(id));
+        };
+        send_input(&input, SessionInput::Interrupt).await?;
+        Ok(Response::InterruptRequested)
     }
 
     fn list_chats(&self) -> Response {
@@ -345,7 +433,7 @@ impl State {
             .map(|(id, chat)| ChatOverview {
                 chat: *id,
                 repository: chat.repository,
-                status: chat.status,
+                status: chat.status(),
             })
             .collect();
         Response::Chats { chats }
@@ -355,13 +443,13 @@ impl State {
         let chat = self.chats.get(&id).ok_or(CommandError::UnknownChat(id))?;
         let transcript = self.store.transcript(id.0)?;
         Ok(Response::Chat {
-            status: chat.status,
+            status: chat.status(),
             transcript,
         })
     }
 
     /// Resumes the chat's agent session, or starts one if it has none.
-    fn open_session(&mut self, id: ChatId) -> Result<mpsc::Sender<SessionInput>, CommandError> {
+    fn open_session(&mut self, id: ChatId) -> Result<(), CommandError> {
         let chat = self
             .chats
             .get_mut(&id)
@@ -369,7 +457,7 @@ impl State {
         let spec = SessionSpec {
             working_directory: chat.working_directory.clone(),
         };
-        let session = match &chat.agent_session {
+        let started = match &chat.agent_session {
             Some(session) => self.driver.resume(spec, session),
             None => self.driver.start(spec),
         }
@@ -381,18 +469,26 @@ impl State {
         tokio::spawn(forward(
             id,
             generation,
-            session.id,
-            session.events,
+            started.id,
+            started.events,
             self.sessions.clone(),
         ));
-        chat.live = Some(LiveSession {
+        chat.session = Some(Session {
             generation,
-            input: session.input.clone(),
+            input: started.input,
+            turn: Turn::Idle,
         });
-        Ok(session.input)
+        Ok(())
     }
 
-    fn on_session(&mut self, message: SessionMessage) {
+    /// Forgets the chat's ended agent session; the next message resumes it.
+    fn end_session(&mut self, id: ChatId) {
+        if let Some(chat) = self.chats.get_mut(&id) {
+            chat.session = None;
+        }
+    }
+
+    async fn on_session(&mut self, message: SessionMessage) {
         match message {
             SessionMessage::Id {
                 chat,
@@ -415,34 +511,71 @@ impl State {
                 generation,
                 event,
             } => {
-                let Some(state) = self.current(chat, generation) else {
-                    return;
-                };
-                match event {
-                    AgentEvent::TurnEnded => state.status = ChatStatus::Idle,
-                    AgentEvent::SessionEnded => {
-                        state.status = ChatStatus::Idle;
-                        state.live = None;
-                    }
-                    _ => {}
+                if self.current(chat, generation).is_some() {
+                    self.agent_event(chat, event).await;
                 }
-                let entry = TranscriptEntry::Agent {
-                    event: event.clone(),
-                };
-                if let Err(error) = self.store.append(chat.0, &entry) {
-                    tracing::error!(?chat, %error, "could not store an agent event");
-                }
-                // No subscriber is not an error: the desktop app may be closed.
-                let _ = self.events.send(Event::Agent { chat, event });
             }
         }
     }
 
+    /// Records and forwards an agent session's event and, when it ends the
+    /// turn, sends the next queued message.
+    async fn agent_event(&mut self, id: ChatId, event: AgentEvent) {
+        let entry = TranscriptEntry::Agent {
+            event: event.clone(),
+        };
+        if let Err(error) = self.store.append(id.0, &entry) {
+            tracing::error!(chat = ?id, %error, "could not store an agent event");
+        }
+        let session_ended = match event {
+            AgentEvent::SessionEnded => Some(true),
+            AgentEvent::TurnEnded | AgentEvent::TurnInterrupted => Some(false),
+            _ => None,
+        };
+        self.emit(Event::Agent { chat: id, event });
+        match session_ended {
+            None => {}
+            // Queued messages of the ended agent session are dropped with it.
+            Some(true) => self.end_session(id),
+            Some(false) => self.send_next_queued(id).await,
+        }
+    }
+
+    async fn send_next_queued(&mut self, id: ChatId) {
+        let Some(Chat {
+            session: Some(session),
+            ..
+        }) = self.chats.get_mut(&id)
+        else {
+            return;
+        };
+        let turn = std::mem::replace(&mut session.turn, Turn::Idle);
+        let Turn::Running { mut queued } = turn else {
+            return;
+        };
+        let Some(text) = queued.pop_front() else {
+            return;
+        };
+        session.turn = Turn::Running { queued };
+        let input = session.input.clone();
+        let entry = TranscriptEntry::UserMessage { text: text.clone() };
+        if let Err(error) = self.store.append(id.0, &entry) {
+            tracing::error!(chat = ?id, %error, "could not store a queued message");
+        }
+        self.emit(Event::QueuedMessageSent {
+            chat: id,
+            text: text.clone(),
+        });
+        // A failed send means the agent session has ended; its
+        // `SessionEnded` event follows and ends the session.
+        let _ = send_input(&input, SessionInput::UserMessage { text }).await;
+    }
+
     /// The chat, if `generation` is its running agent session.
     fn current(&mut self, chat: ChatId, generation: u64) -> Option<&mut Chat> {
-        self.chats
-            .get_mut(&chat)
-            .filter(|state| state.live.as_ref().map(|live| live.generation) == Some(generation))
+        self.chats.get_mut(&chat).filter(|state| {
+            state.session.as_ref().map(|session| session.generation) == Some(generation)
+        })
     }
 
     fn save(&self) -> Result<(), CommandError> {
@@ -483,6 +616,18 @@ impl From<StorageError> for CommandError {
             reason: error.to_string(),
         }
     }
+}
+
+async fn send_input(
+    input: &mpsc::Sender<SessionInput>,
+    message: SessionInput,
+) -> Result<(), CommandError> {
+    input
+        .send(message)
+        .await
+        .map_err(|_| CommandError::AgentCli {
+            reason: "the agent session has ended".to_owned(),
+        })
 }
 
 /// Passes an agent session's id and events to the command loop.

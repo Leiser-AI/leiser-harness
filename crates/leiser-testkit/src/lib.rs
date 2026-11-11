@@ -6,13 +6,15 @@
 //! subscription and no network are needed.
 
 mod fake_driver;
+mod gate;
 mod repo;
 mod script;
 mod service;
 mod turn;
 
 pub use fake_driver::FakeDriver;
+pub use gate::Gate;
 pub use repo::TestRepo;
 pub use script::{FakeInput, Script, Step};
 pub use service::{TestService, TestServiceError};
-pub use turn::{TurnError, collect_turn};
+pub use turn::{TurnError, collect_turn, collect_turn_within, next_event};
