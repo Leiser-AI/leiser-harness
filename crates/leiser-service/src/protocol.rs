@@ -141,6 +141,8 @@ pub enum AgentEvent {
     Message { text: String },
     /// The agent called a tool.
     ToolCall { name: String, detail: String },
+    /// A tool the agent called returned.
+    ToolResult { name: String, output: String },
     /// The agent waits for the developer's approval.
     ApprovalRequested {
         request: String,

@@ -4,6 +4,9 @@
 //! standard input and answers each message with the next scripted turn,
 //! written as one [`AgentEvent`] per line on standard output. Input keeps
 //! being read while a turn plays, so a turn can be steered or interrupted.
+//!
+//! `fake-agent-cli --version` prints [`FAKE_VERSION`], older than any agent
+//! CLI the harness supports, for tests of the minimum version check.
 
 use std::io::{self, BufRead, Write};
 use std::path::Path;
@@ -41,8 +44,15 @@ fn main() -> ExitCode {
     }
 }
 
+/// The answer to `--version`, in the form Claude Code uses.
+const FAKE_VERSION: &str = "0.1.0 (fake-agent-cli)";
+
 fn run() -> Result<(), FakeError> {
     let script_file = std::env::args_os().nth(1).ok_or(FakeError::Usage)?;
+    if script_file == "--version" {
+        writeln!(io::stdout(), "{FAKE_VERSION}")?;
+        return Ok(());
+    }
     let script: Script = serde_json::from_slice(&std::fs::read(script_file)?)?;
     let inputs = read_inputs();
     let mut turns = script.turns.into_iter();
