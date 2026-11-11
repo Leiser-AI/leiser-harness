@@ -16,9 +16,9 @@ env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
 
-# A run takes about 6 minutes. The time limits make a hung step (such as
-# apt-get waiting on a mirror) fail instead of running for GitHub's
-# default 6 hours, so Auto-fix sees the failure.
+# Every job and the apt-get step get a time limit of several times their
+# usual length, so a hung step (such as apt-get waiting on a mirror) fails
+# instead of running for GitHub's default 6 hours, and Auto-fix sees it.
 
 jobs:
   lint:
