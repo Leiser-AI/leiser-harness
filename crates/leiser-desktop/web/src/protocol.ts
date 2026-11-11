@@ -3,6 +3,7 @@
 
 export type RepositoryId = number;
 export type ChatId = number;
+export type TodoId = number;
 
 export type AgentCli = "claude_code" | "codex";
 export type Checkout = "main";
@@ -19,7 +20,11 @@ export type Command =
   | { type: "interrupt_turn"; chat: ChatId }
   | { type: "list_repositories" }
   | { type: "list_chats" }
-  | { type: "read_chat"; chat: ChatId };
+  | { type: "read_chat"; chat: ChatId }
+  | { type: "list_todos"; chat: ChatId }
+  | { type: "add_todo"; chat: ChatId; text: string }
+  | { type: "set_todo_done"; chat: ChatId; todo: TodoId; done: boolean }
+  | { type: "remove_todo"; chat: ChatId; todo: TodoId };
 
 export type Response =
   | { type: "repository_added"; repository: RepositoryId }
@@ -31,7 +36,11 @@ export type Response =
   | { type: "agent_cli_changed" }
   | { type: "repositories"; repositories: RepositoryOverview[] }
   | { type: "chats"; chats: ChatOverview[] }
-  | { type: "chat"; status: ChatStatus; branch: Branch; transcript: TranscriptEntry[] };
+  | { type: "chat"; status: ChatStatus; branch: Branch; transcript: TranscriptEntry[] }
+  | { type: "todos"; todos: Todo[] }
+  | { type: "todo_added"; todo: TodoId }
+  | { type: "todo_updated" }
+  | { type: "todo_removed" };
 
 export type CommandError =
   | { type: "not_a_git_repository"; path: string }
@@ -41,6 +50,9 @@ export type CommandError =
   | { type: "no_turn_running"; chat: ChatId }
   | { type: "agent_cli_not_configured"; agent_cli: AgentCli }
   | { type: "agent_cli"; reason: string }
+  | { type: "empty_todo" }
+  | { type: "unknown_todo"; chat: ChatId; todo: TodoId }
+  | { type: "repository_config"; path: string; reason: string }
   | { type: "storage"; reason: string }
   | { type: "service_stopped" };
 
@@ -55,6 +67,12 @@ export interface ChatOverview {
   repository: RepositoryId;
   title: string | null;
   status: ChatStatus;
+}
+
+export interface Todo {
+  id: TodoId;
+  text: string;
+  done: boolean;
 }
 
 export type Branch =
@@ -81,4 +99,5 @@ export type ServiceEvent =
   | { type: "agent"; chat: ChatId; event: AgentEvent }
   | { type: "message_queued"; chat: ChatId; text: string; reason: QueueReason }
   | { type: "message_steered"; chat: ChatId; text: string }
-  | { type: "queued_message_sent"; chat: ChatId; text: string };
+  | { type: "queued_message_sent"; chat: ChatId; text: string }
+  | { type: "todos_changed"; chat: ChatId; todos: Todo[] };

@@ -1684,6 +1684,7 @@ version = "0.1.0"
 dependencies = [
  "leiser-service",
  "leiser-testkit",
+ "serde_json",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
@@ -1703,6 +1704,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.21",
  "tokio",
+ "toml 1.2.1+spec-1.1.0",
  "tracing",
 ]
 

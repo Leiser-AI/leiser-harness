@@ -300,3 +300,73 @@ async fn queued_and_steered_messages_wait_for_the_running_turn() -> TestResult {
     assert!(messages(&third).contains("STEERED-2"), "{third:?}");
     Ok(())
 }
+
+/// Asks Claude Code to check todo 1 and add a todo through the harness MCP
+/// server, and to do nothing when the server has no todo tools. Returns
+/// the todo list after the turn.
+async fn ask_for_todo_changes(repo: &TestRepo) -> TestResult<Vec<(String, bool)>> {
+    let (_harness, service, chat) = start_chat(repo).await?;
+    service
+        .execute(Command::AddTodo {
+            chat,
+            text: "Write the failing test".to_owned(),
+        })
+        .await?;
+    let mut events = service.subscribe();
+    send(
+        &service,
+        chat,
+        "Use the tools of the MCP server named leiser: call set_todo_done with id 1 \
+         and done true, then call add_todo with the text \"Ship it\". If the server \
+         has no such tools, do nothing. Then reply with the single word done. Do not \
+         run commands or read files.",
+    )
+    .await?;
+    let turn = collect_turn(&mut events, chat).await?;
+    assert!(
+        !turn
+            .iter()
+            .any(|event| matches!(event, AgentEvent::ApprovalRequested { .. })),
+        "no approval for the todo tools: {turn:?}"
+    );
+    let Response::Todos { todos } = service.execute(Command::ListTodos { chat }).await? else {
+        return Err("expected Todos".into());
+    };
+    Ok(todos
+        .into_iter()
+        .map(|todo| (todo.text, todo.done))
+        .collect())
+}
+
+#[tokio::test]
+#[ignore = "needs Claude Code signed in to a subscription; run locally with --ignored"]
+async fn claude_code_changes_the_todo_list_when_agent_access_is_on() -> TestResult {
+    let repo = TestRepo::new()?;
+    std::fs::create_dir(repo.path().join(".leiser"))?;
+    std::fs::write(
+        repo.path().join(".leiser/config.toml"),
+        "[agent_access]\ntodo_list = true\n",
+    )?;
+
+    let todos = ask_for_todo_changes(&repo).await?;
+
+    assert_eq!(
+        todos,
+        [
+            ("Write the failing test".to_owned(), true),
+            ("Ship it".to_owned(), false)
+        ]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "needs Claude Code signed in to a subscription; run locally with --ignored"]
+async fn claude_code_gets_no_todo_tools_without_agent_access() -> TestResult {
+    let repo = TestRepo::new()?;
+
+    let todos = ask_for_todo_changes(&repo).await?;
+
+    assert_eq!(todos, [("Write the failing test".to_owned(), false)]);
+    Ok(())
+}

@@ -295,11 +295,18 @@ impl<W: Write> Turn<'_, W> {
                 text: self.harness_mcp()?.list_tools()?.join(","),
             },
             Step::CallHarnessTool { name, arguments } => {
-                let output = self.harness_mcp()?.call_tool(&name, &arguments)?;
-                let prefix = if output.is_error { "error: " } else { "" };
-                AgentEvent::Message {
-                    text: format!("{prefix}{}", output.text),
-                }
+                let text = match self.harness_mcp()?.call_tool(&name, &arguments) {
+                    Ok(output) if output.is_error => format!("error: {}", output.text),
+                    Ok(output) => output.text,
+                    // A refused call, such as one to a tool the server does
+                    // not offer, is an answer the agent sees, as with a
+                    // real agent CLI.
+                    Err(McpClientError::Rpc { code, message }) => {
+                        format!("rpc error {code}: {message}")
+                    }
+                    Err(error) => return Err(error.into()),
+                };
+                AgentEvent::Message { text }
             }
             Step::ForgetSession => {
                 self.forget_session = true;

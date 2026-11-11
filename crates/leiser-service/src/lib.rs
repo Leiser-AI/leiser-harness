@@ -10,6 +10,10 @@
 //! a handoff: real entries of the chat's transcript within a token budget,
 //! never a summary. Every agent session also gets the harness MCP server,
 //! whose `read_chat` tool reads the entries a handoff left out.
+//!
+//! Each chat has a todo list, kept on disk like its transcript. Agent
+//! sessions get tools for it only where the repository's
+//! `.leiser/config.toml` switches agent access on.
 
 mod claude_code;
 mod codex;
@@ -18,8 +22,10 @@ mod git;
 mod handoff;
 mod harness_mcp;
 mod protocol;
+mod repository_config;
 mod service;
 mod store;
+mod todos;
 mod version;
 
 pub use claude_code::ClaudeCodeDriver;
@@ -31,7 +37,8 @@ pub use driver::{
 pub use harness_mcp::HarnessMcpError;
 pub use protocol::{
     AgentCli, AgentEvent, Branch, ChatId, ChatOverview, ChatStatus, Checkout, Command,
-    CommandError, Event, QueueReason, RepositoryId, RepositoryOverview, Response, TranscriptEntry,
+    CommandError, Event, QueueReason, RepositoryId, RepositoryOverview, Response, Todo, TodoId,
+    TranscriptEntry,
 };
 pub use service::{Service, ServiceConfig, ServiceHandle, StartError, start};
 pub use store::StorageError;
