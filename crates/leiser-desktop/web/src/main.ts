@@ -61,26 +61,6 @@ let readCount = 0;
 const repositoriesNav = byId("repositories");
 const topBar = byId("top-bar");
 const transcript = byId("transcript");
-// Whether the transcript follows new entries: until the developer scrolls
-// up, and again once they scroll back to the bottom. Only scrolling up
-// stops it: renders and layout changes move the transcript too, but never
-// up. Kept while the transcript is hidden (behind the diff panel or
-// repo-check), where it has no height to measure.
-let followTranscript = true;
-let lastScrollTop = 0;
-function scrollTranscriptDown(): void {
-  if (followTranscript && !transcript.hidden) transcript.scrollTop = transcript.scrollHeight;
-}
-transcript.addEventListener("scroll", () => {
-  if (transcript.hidden) return;
-  const top = transcript.scrollTop;
-  if (transcript.scrollHeight - top - transcript.clientHeight < 40) followTranscript = true;
-  else if (top < lastScrollTop) followTranscript = false;
-  lastScrollTop = top;
-});
-// The transcript changes size after a render: when the composer appears,
-// and when it shows again after the diff panel. Follow it then too.
-new ResizeObserver(scrollTranscriptDown).observe(transcript);
 const composer = byId<HTMLFormElement>("composer");
 const messageInput = byId<HTMLTextAreaElement>("message");
 const sendButton = byId<HTMLButtonElement>("send");
@@ -496,6 +476,25 @@ function renderSidebar(
   repositoriesNav.replaceChildren(list);
 }
 
+/** How close to the end, in pixels, counts as the transcript's bottom. */
+const TRANSCRIPT_BOTTOM_SLACK = 40;
+// Whether the transcript follows new entries: until the developer scrolls
+// up, and again once they scroll back to the bottom or open another chat.
+// Only scrolling up stops it: renders and layout changes move the
+// transcript too, but never up.
+let followTranscript = true;
+// The chat the transcript last showed, to follow again in another one.
+let transcriptChat: ChatId | null = null;
+// Where the developer left the transcript. Hiding it (behind the diff
+// panel or repo-check) loses its position; showing it again restores this.
+let lastScrollTop = 0;
+
+/** Keeps the transcript at its end while it follows, else where it was. */
+function placeTranscript(): void {
+  if (transcript.hidden) return;
+  transcript.scrollTop = followTranscript ? transcript.scrollHeight : lastScrollTop;
+}
+
 function renderChat(
   view: ChatView | null,
   overview: ChatOverview | null,
@@ -564,8 +563,12 @@ function renderChat(
   if (entries.length === 0) {
     entries.push(el("li", "empty", "Send a message to start the agent."));
   }
+  if (overview.chat !== transcriptChat) {
+    transcriptChat = overview.chat;
+    followTranscript = true;
+  }
   transcript.replaceChildren(...entries);
-  scrollTranscriptDown();
+  placeTranscript();
   selectedOpenRequests = view.openRequests;
   // A turn that waits for an answer still runs and can be interrupted.
   selectedWorking = view.status === "working" || selectedOpenRequests.length > 0;
@@ -1561,6 +1564,21 @@ async function send(): Promise<void> {
     messageInput.focus();
   }
 }
+
+transcript.addEventListener("scroll", () => {
+  if (transcript.hidden) return;
+  const top = transcript.scrollTop;
+  if (transcript.scrollHeight - top - transcript.clientHeight < TRANSCRIPT_BOTTOM_SLACK) {
+    followTranscript = true;
+  } else if (top < lastScrollTop) {
+    followTranscript = false;
+  }
+  lastScrollTop = top;
+});
+
+// The transcript changes size after a render: when the composer appears,
+// and when it shows again after the diff panel.
+new ResizeObserver(placeTranscript).observe(transcript);
 
 todoForm.addEventListener("submit", (event) => {
   event.preventDefault();
