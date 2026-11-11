@@ -36,6 +36,7 @@ import type {
 } from "./protocol";
 import * as diffPanel from "./diff";
 import * as extensions from "./extensions";
+import { icon, type IconName } from "./icons";
 import * as service from "./service";
 import * as terminal from "./terminal";
 import {
@@ -61,6 +62,7 @@ const composer = byId<HTMLFormElement>("composer");
 const messageInput = byId<HTMLTextAreaElement>("message");
 const sendButton = byId<HTMLButtonElement>("send");
 const interruptButton = byId<HTMLButtonElement>("interrupt");
+const composerOptions = byId("composer-options");
 const errorBox = byId("error");
 const subscriptionsDialog = byId<HTMLDialogElement>("subscriptions-dialog");
 const subscriptionsError = byId("subscriptions-error");
@@ -130,6 +132,41 @@ function el<K extends keyof HTMLElementTagNameMap>(
   return element;
 }
 
+/** A button that shows only an icon; `label` names it for screen readers. */
+function iconButton(name: IconName, label: string, className = ""): HTMLButtonElement {
+  const button = el("button", `icon-button ${className}`.trim());
+  button.type = "button";
+  button.setAttribute("aria-label", label);
+  button.append(icon(name));
+  return button;
+}
+
+/**
+ * Fills the top bar: the title and the view's buttons on the first line,
+ * facts such as the repository and branch on the second.
+ */
+function renderTopBar(title: string, facts: HTMLElement[] = [], actions: HTMLElement[] = []): void {
+  const heading = el("h1", "top-bar-title", title);
+  heading.title = title;
+  const first = el("div", "top-bar-row");
+  first.append(heading, ...actions);
+  const rows: HTMLElement[] = [first];
+  if (facts.length > 0) {
+    const second = el("div", "top-bar-facts");
+    second.append(...facts);
+    rows.push(second);
+  }
+  topBar.replaceChildren(...rows);
+}
+
+/** A top bar button; in a narrow window only its icon shows. */
+function topBarAction(iconName: IconName, text: string, className = ""): HTMLButtonElement {
+  const button = el("button", `top-bar-action ${className}`.trim());
+  button.type = "button";
+  button.append(icon(iconName), el("span", "action-label", text));
+  return button;
+}
+
 function showError(error: unknown): void {
   errorBox.textContent = error instanceof Error ? error.message : String(error);
   errorBox.hidden = false;
@@ -161,6 +198,8 @@ interface ChatContext {
   answers: Map<string, Answer>;
   /** The name of a subscription, or of the default login for `null`. */
   subscriptionName: (subscription: SubscriptionId | null) => string;
+  /** The agent CLI of the last agent message shown; its name shows again only on a change. */
+  lastAgentCli: string | null;
 }
 
 // The connection to the harness service, as the app's Rust side reports it.
@@ -256,10 +295,8 @@ function renderTodos(chat: ChatId | null, todos: Todo[] | null): void {
       }),
     );
     label.append(check, el("span", "todo-text", todo.text));
-    const remove = el("button", "todo-remove", "×");
-    remove.type = "button";
+    const remove = iconButton("close", `Remove "${todo.text}"`, "todo-remove");
     remove.title = "Remove this todo";
-    remove.setAttribute("aria-label", `Remove "${todo.text}"`);
     remove.addEventListener("click", () =>
       act(async () => {
         await service.removeTodo(chat, todo.id);
@@ -331,10 +368,7 @@ function leaveExtensions(): boolean {
 }
 
 function renderExtensionsTopBar(repository: RepositoryOverview | null): void {
-  topBar.replaceChildren(
-    labelled("Repository", repository?.name ?? "unknown"),
-    labelled("Panel", "CLI extensions"),
-  );
+  renderTopBar("CLI extensions", [labelled("Repository", repository?.name ?? "unknown")]);
 }
 
 function renderSidebar(
@@ -351,18 +385,15 @@ function renderSidebar(
     const header = el("div", "repository-header");
     const name = el("span", "repository-name", repository.name);
     name.title = repository.path;
-    const newChat = el("button", "new-chat", "New chat");
-    newChat.type = "button";
+    const newChat = iconButton("plus", "New chat", "new-chat");
     newChat.title = `Start a chat in a new worktree of ${repository.name}`;
     newChat.addEventListener("click", () => act(() => startAndSelect(repository.repository)));
-    const inMain = el("button", "new-chat secondary", "Main");
-    inMain.type = "button";
+    const inMain = iconButton("home", "New chat in the main checkout", "new-chat secondary");
     inMain.title = `Start a chat in the main checkout of ${repository.name}`;
     inMain.addEventListener("click", () =>
       act(() => startAndSelect(repository.repository, { type: "main" })),
     );
-    const showExtensions = el("button", "new-chat", "Extensions");
-    showExtensions.type = "button";
+    const showExtensions = iconButton("blocks", "CLI extensions", "secondary");
     showExtensions.title = `Skills, MCP servers, hooks and instruction files the agent CLIs load from ${repository.name}`;
     if (repository.repository === selectedExtensions) {
       showExtensions.classList.add("selected");
@@ -391,7 +422,11 @@ function renderSidebar(
       const checkItem = el("li");
       const button = el("button", "chat-link repo-check-link");
       button.type = "button";
-      button.append(el("span", "chat-title", "repo-check"), el("span", "chat-status", checkStatus(check)));
+      button.append(
+        icon("shield"),
+        el("span", "chat-title", "repo-check"),
+        el("span", "chat-status", checkStatus(check)),
+      );
       if (repository.repository === selectedCheck) {
         button.classList.add("selected");
         button.setAttribute("aria-current", "true");
@@ -448,29 +483,37 @@ function renderChat(
     terminal.show(null);
     selectedWorking = false;
     selectedOpenRequests = [];
-    topBar.replaceChildren(el("span", "muted", "No chat selected"));
+    renderTopBar("No chat selected");
     transcript.replaceChildren(el("li", "empty", "Select a chat or start a new one."));
     composer.hidden = true;
+    composerOptions.replaceChildren();
     return;
   }
   const chat = overview.chat;
   // The terminal panel's shell runs here.
   const checkout = overview.worktree ?? repository?.path;
-  topBar.replaceChildren(
-    labelled("Repository", repository?.name ?? "unknown"),
-    labelled(
-      "Branch",
-      view.place === "removed_worktree" && view.pullRequest !== null
-        ? `${view.pullRequest.head} (removed)`
-        : branchName(view.branch),
-    ),
-    hostAccountItem(view.hostAccount),
-    commitAuthorItem(view),
-    labelled("Checkout", CHECKOUT_LABELS[view.place]),
-    labelled("Agent CLI", AGENT_CLI_NAMES[view.agentCli]),
+  renderTopBar(
+    overview.title ?? "New chat",
+    [
+      labelled("Repository", repository?.name ?? "unknown"),
+      labelled(
+        "Branch",
+        view.place === "removed_worktree" && view.pullRequest !== null
+          ? `${view.pullRequest.head} (removed)`
+          : branchName(view.branch),
+      ),
+      hostAccountItem(view.hostAccount),
+      commitAuthorItem(view),
+      labelled("Checkout", CHECKOUT_LABELS[view.place]),
+    ],
+    chatActions(overview, view, checkout),
+  );
+  const agentCli = el("span", "composer-agent-cli", AGENT_CLI_NAMES[view.agentCli]);
+  agentCli.title = "The agent CLI this chat runs on";
+  composerOptions.replaceChildren(
+    agentCli,
     subscriptionPicker(view, subscriptions),
     permissionModePicker(overview.chat, view),
-    ...chatActions(overview, view, checkout),
   );
   const removed = view.place === "removed_worktree";
   terminal.show(removed ? null : chat, checkout);
@@ -479,6 +522,7 @@ function renderChat(
     chat,
     open: new Set(view.openRequests),
     answers: new Map(),
+    lastAgentCli: null,
     subscriptionName: (subscription) =>
       subscription === null
         ? "the default login"
@@ -540,16 +584,16 @@ function cleanupCard(chat: ChatId, view: ChatView): HTMLElement | null {
   const pullRequest = view.pullRequest;
   if (pullRequest === null) return null;
   if (view.place === "removed_worktree") {
-    return el(
-      "li",
-      "entry notice",
-      `Pull request #${pullRequest.number} was merged; the worktree and branch ${pullRequest.head} are removed. This chat is read-only.`,
+    return notice(
+      "",
+      "check",
+      `The worktree and branch ${pullRequest.head} are removed. This chat is read-only.`,
+      `Pull request #${pullRequest.number} was merged`,
     );
   }
   if (pullRequest.state !== "merged" || view.place !== "worktree") return null;
-  const item = el("li", "entry card open");
-  item.append(
-    el("div", "entry-label", `Pull request #${pullRequest.number} is merged`),
+  const [item, body] = card("cleanup open", "branch", `Pull request #${pullRequest.number} is merged`);
+  body.append(
     el(
       "div",
       "entry-text",
@@ -570,7 +614,7 @@ function cleanupCard(chat: ChatId, view: ChatView): HTMLElement | null {
   );
   const actions = el("div", "card-actions");
   actions.append(remove);
-  item.append(actions);
+  body.append(actions);
   return item;
 }
 
@@ -588,8 +632,10 @@ function openPullRequestDialog(overview: ChatOverview, view: ChatView): void {
 const PERMISSION_MODES: PermissionMode[] = ["supervised", "auto_accept_edits", "auto", "full_access"];
 
 function permissionModePicker(chat: ChatId, view: ChatView): HTMLElement {
-  const item = el("label", "top-bar-item");
+  const item = el("label", "composer-option");
   const select = el("select", "permission-mode");
+  select.setAttribute("aria-label", "Permission mode");
+  select.title = "Permission mode: how much the agent may do without your approval";
   for (const mode of PERMISSION_MODES) {
     const option = el("option", "", PERMISSION_MODE_NAMES[mode]);
     option.value = mode;
@@ -602,11 +648,11 @@ function permissionModePicker(chat: ChatId, view: ChatView): HTMLElement {
       await refresh();
     }),
   );
-  item.append(el("span", "top-bar-label", "Permissions"), select);
+  item.append(icon("shield"), select);
   if (view.appliedPermissionMode !== view.permissionMode) {
     const applied = PERMISSION_MODE_NAMES[view.appliedPermissionMode];
     item.title = `The agent CLI has no such mode, so the chat runs ${applied}.`;
-    item.append(el("span", "top-bar-value muted", `runs ${applied}`));
+    item.append(el("span", "permission-applied", `runs ${applied}`));
   }
   return item;
 }
@@ -655,12 +701,11 @@ function chatActions(
   const actions: HTMLElement[] = [];
   const pullRequest = view.pullRequest;
   if (pullRequest !== null) {
-    const check = el(
-      "button",
-      "top-bar-action",
+    const check = topBarAction(
+      "branch",
       `PR #${pullRequest.number} · ${PULL_REQUEST_STATES[pullRequest.state]}`,
+      "ghost",
     );
-    check.type = "button";
     check.title = `${pullRequest.url}\nCheck its state on the git host again`;
     check.addEventListener("click", () =>
       act(async () => {
@@ -676,14 +721,12 @@ function chatActions(
   // A removed worktree has nothing left to push, open or run a shell in.
   if (view.place === "removed_worktree") return actions;
   if (pullRequest === null) {
-    const open = el("button", "top-bar-action", "Open pull request");
-    open.type = "button";
+    const open = topBarAction("branch", "Open pull request", "ghost");
     open.title = "Push the chat's branch and open its pull request, after checking the host account";
     open.addEventListener("click", () => openPullRequestDialog(overview, view));
     actions.push(open);
   }
-  const push = el("button", "top-bar-action", "Push");
-  push.type = "button";
+  const push = topBarAction("arrowUp", "Push", "ghost");
   push.title =
     pullRequest === null
       ? "Push the chat's branch to origin, after checking the host account"
@@ -702,10 +745,9 @@ function chatActions(
   );
   actions.push(push);
   if (lastPush !== null && lastPush.chat === overview.chat) {
-    actions.push(el("span", "top-bar-value muted", `pushed ${lastPush.branch}`));
+    actions.push(el("span", "top-bar-note", `pushed ${lastPush.branch}`));
   }
-  const changes = el("button", "top-bar-action", diffPanel.isOpen() ? "Show chat" : "Show changes");
-  changes.type = "button";
+  const changes = topBarAction("diff", diffPanel.isOpen() ? "Show chat" : "Show changes", "ghost");
   changes.title = "Each turn's changes, the whole branch's, and restoring a turn's checkpoint";
   changes.setAttribute("aria-pressed", String(diffPanel.isOpen()));
   changes.addEventListener("click", () =>
@@ -720,19 +762,13 @@ function chatActions(
     }),
   );
   actions.push(changes);
-  const toggleTerminal = el(
-    "button",
-    "top-bar-action",
-    terminal.isOpen() ? "Hide terminal" : "Terminal",
-  );
-  toggleTerminal.type = "button";
+  const toggleTerminal = topBarAction("terminal", terminal.isOpen() ? "Hide terminal" : "Terminal", "ghost");
   toggleTerminal.title = "A shell in the chat's checkout";
   toggleTerminal.setAttribute("aria-pressed", String(terminal.isOpen()));
   toggleTerminal.addEventListener("click", () => terminal.toggle(overview.chat, checkout));
   actions.push(toggleTerminal);
   if (overview.worktree !== null) {
-    const sameWorktree = el("button", "top-bar-action", "New chat in this worktree");
-    sameWorktree.type = "button";
+    const sameWorktree = topBarAction("plus", "New chat in this worktree", "ghost");
     sameWorktree.title = overview.worktree;
     sameWorktree.addEventListener("click", () =>
       act(() => startAndSelect(overview.repository, { type: "worktree", chat: overview.chat })),
@@ -740,8 +776,7 @@ function chatActions(
     actions.push(sameWorktree);
   }
   if (overview.status === "waiting_for_you") {
-    const done = el("button", "top-bar-action", "Mark done");
-    done.type = "button";
+    const done = topBarAction("check", "Mark done");
     done.addEventListener("click", () =>
       act(async () => {
         await service.markChatDone(overview.chat);
@@ -774,13 +809,13 @@ function renderRepoCheck(repository: RepositoryOverview, check: RepoCheck): void
   composer.hidden = true;
   transcript.hidden = true;
   repoCheckView.hidden = false;
-  const items = [labelled("Repository", repository.name), labelled("View", "repo-check")];
+  const items = [labelled("Repository", repository.name)];
   if (check.state === "done" && check.report.commit !== null) {
     items.push(labelled("Commit", check.report.commit));
   }
-  topBar.replaceChildren(...items);
+  renderTopBar("repo-check", items);
 
-  const run = el("button", "", check.state === "not_run" ? "Run repo-check" : "Run again");
+  const run = el("button", "primary", check.state === "not_run" ? "Run repo-check" : "Run again");
   run.type = "button";
   run.disabled = check.state === "running";
   run.addEventListener("click", () =>
@@ -806,11 +841,13 @@ function renderRepoCheck(repository: RepositoryOverview, check: RepoCheck): void
       );
       break;
     case "failed":
-      body.push(el("p", "repo-check-problem", `repo-check did not finish: ${check.reason}`));
+      body.push(el("p", "repo-check-problem callout danger", `repo-check did not finish: ${check.reason}`));
       break;
     case "unreadable": {
-      body.push(el("p", "repo-check-problem", `The answer is not a report the harness can read: ${check.reason}`));
-      body.push(el("pre", "repo-check-output", check.output));
+      body.push(
+        el("p", "repo-check-problem callout", `The answer is not a report the harness can read: ${check.reason}`),
+      );
+      body.push(el("pre", "repo-check-output code-block", check.output));
       break;
     }
     case "done":
@@ -826,7 +863,10 @@ function renderRepoCheck(repository: RepositoryOverview, check: RepoCheck): void
 function findingSection(rank: "Must" | "Should", meaning: string, findings: Finding[]): HTMLElement {
   const section = el("section", `findings ${rank.toLowerCase()}`);
   const heading = el("h2", "", rank);
-  heading.append(el("span", "muted findings-meaning", meaning));
+  heading.append(
+    el("span", `badge ${rank === "Must" ? "danger" : "warning"}`, String(findings.length)),
+    el("span", "findings-meaning", meaning),
+  );
   section.append(heading);
   if (findings.length === 0) {
     section.append(el("p", "empty", `No ${rank} findings.`));
@@ -846,7 +886,7 @@ function findingSection(rank: "Must" | "Should", meaning: string, findings: Find
 
 function optOuts(optOuts: OptOuts): HTMLElement[] {
   if (optOuts.type === "unreadable") {
-    return [el("p", "repo-check-problem", `Nothing is switched off: ${optOuts.reason}`)];
+    return [el("p", "repo-check-problem callout", `Nothing is switched off: ${optOuts.reason}`)];
   }
   if (optOuts.checks.length === 0) return [];
   const section = el("section", "findings switched-off");
@@ -868,15 +908,16 @@ function limitCard(
   subscriptions: SubscriptionOverview[],
   context: ChatContext,
 ): HTMLElement {
-  const item = el("li", "entry card limit open");
   const resets =
     limit.resets_in_seconds === null
       ? "The agent CLI did not say when it resets."
       : `It resets in ${formatDuration(limit.resets_in_seconds)}.`;
-  item.append(
-    el("div", "entry-label", `Usage limit reached on ${context.subscriptionName(limit.subscription)}`),
-    el("div", "entry-text", `${limit.limit}. ${resets} Wait and send a message, or continue on:`),
+  const [item, body] = card(
+    "limit open",
+    "alert",
+    `Usage limit reached on ${context.subscriptionName(limit.subscription)}`,
   );
+  body.append(el("div", "entry-text", `${limit.limit}. ${resets} Wait and send a message, or continue on:`));
   const provider = AGENT_CLI_PROVIDERS[view.agentCli];
   const choices: (SubscriptionId | null)[] = subscriptions
     .filter((overview) => overview.provider === provider)
@@ -887,6 +928,7 @@ function limitCard(
     const label = choice === null ? "Default login" : context.subscriptionName(choice);
     const button = el("button", "", label);
     button.type = "button";
+    button.title = `Continue this chat on ${label}`;
     button.addEventListener("click", () =>
       act(async () => {
         try {
@@ -898,7 +940,7 @@ function limitCard(
     );
     actions.append(button);
   }
-  item.append(actions);
+  body.append(actions);
   return item;
 }
 
@@ -906,6 +948,8 @@ function labelled(label: string, value: string | HTMLElement): HTMLElement {
   const item = el("span", "top-bar-item");
   const shown = typeof value === "string" ? el("span", "top-bar-value", value) : value;
   item.append(el("span", "top-bar-label", label), shown);
+  // The label can be hidden in a narrow column; the tooltip still names it.
+  item.title = `${label}: ${shown.textContent ?? ""}`;
   return item;
 }
 
@@ -914,8 +958,9 @@ const DEFAULT_LOGIN = "default";
 /** The chat's subscription, changeable between turns. */
 function subscriptionPicker(view: ChatView, subscriptions: SubscriptionOverview[]): HTMLElement {
   const provider = AGENT_CLI_PROVIDERS[view.agentCli];
-  const select = el("select", "top-bar-value subscription-picker");
+  const select = el("select", "subscription-picker");
   select.title = "The subscription the chat's next turns use";
+  select.setAttribute("aria-label", "Subscription");
   select.append(new Option(`${AGENT_CLI_NAMES[view.agentCli]} default login`, DEFAULT_LOGIN));
   for (const subscription of subscriptions.filter((overview) => overview.provider === provider)) {
     select.append(new Option(subscription.name, String(subscription.subscription)));
@@ -939,7 +984,9 @@ function subscriptionPicker(view: ChatView, subscriptions: SubscriptionOverview[
       }
     }),
   );
-  return labelled("Subscription", select);
+  const item = el("label", "composer-option");
+  item.append(icon("key"), select);
+  return item;
 }
 
 function renderSubscriptions(subscriptions: SubscriptionOverview[]): void {
@@ -965,9 +1012,13 @@ function subscriptionRow(subscription: SubscriptionOverview): HTMLElement {
   name.value = subscription.name;
   name.setAttribute("aria-label", "Name");
   const kind = subscription.kind === "login" ? "Login" : "API key";
-  const status = el("span", "muted", subscription.logging_in ? `${kind} · logging in…` : kind);
+  const status = el(
+    "span",
+    `badge subscription-kind${subscription.logging_in ? " accent" : ""}`,
+    subscription.logging_in ? `${kind} · logging in…` : kind,
+  );
   status.title = subscription.home;
-  const rename = el("button", "", "Rename");
+  const rename = el("button", "ghost", "Rename");
   rename.type = "button";
   rename.addEventListener("click", () =>
     actInDialog(async () => {
@@ -991,9 +1042,11 @@ function subscriptionRow(subscription: SubscriptionOverview): HTMLElement {
   interchangeable.title =
     "At a usage limit, chats move by themselves between this provider's interchangeable subscriptions";
   interchangeable.append(box, "Interchangeable");
-  row.append(name, status, interchangeable, rename);
+  const actions = el("span", "subscription-actions");
+  actions.append(rename);
+  row.append(name, status, interchangeable, actions);
   if (subscription.kind === "login") {
-    const login = el("button", "", "Log in");
+    const login = el("button", "ghost", "Log in");
     login.type = "button";
     login.title = "Run the agent CLI's login again";
     login.addEventListener("click", () =>
@@ -1002,9 +1055,9 @@ function subscriptionRow(subscription: SubscriptionOverview): HTMLElement {
         await refresh();
       }),
     );
-    row.append(login);
+    actions.append(login);
   }
-  const remove = el("button", "danger", "Remove");
+  const remove = el("button", "ghost danger", "Remove");
   remove.type = "button";
   remove.addEventListener("click", () =>
     actInDialog(async () => {
@@ -1018,7 +1071,7 @@ function subscriptionRow(subscription: SubscriptionOverview): HTMLElement {
       await refresh();
     }),
   );
-  row.append(remove);
+  actions.append(remove);
   return row;
 }
 
@@ -1033,16 +1086,16 @@ function renderHostAccounts(hostAccounts: HostAccountOverview[]): void {
 }
 
 function hostAccountRow(account: HostAccountOverview): HTMLElement {
-  const row = el("li", "subscription-row");
-  const name = el("strong", "", account.name);
+  const row = el("li", "subscription-row host-account-row");
+  const name = el("strong", "host-account-name", account.name);
   const details = el(
     "span",
-    "muted",
+    "host-account-details",
     `${account.login} on ${account.git_host} · ${account.author.name} <${account.author.email}>` +
       (account.logging_in ? " · logging in…" : ""),
   );
   details.title = account.config_dir;
-  const login = el("button", "", "Log in");
+  const login = el("button", "ghost", "Log in");
   login.type = "button";
   login.title = "Run the git host's login (gh auth login) for this account";
   login.addEventListener("click", () =>
@@ -1051,7 +1104,7 @@ function hostAccountRow(account: HostAccountOverview): HTMLElement {
       await refresh();
     }),
   );
-  const remove = el("button", "danger", "Remove");
+  const remove = el("button", "ghost danger", "Remove");
   remove.type = "button";
   remove.addEventListener("click", () =>
     actInHostDialog(async () => {
@@ -1065,7 +1118,11 @@ function hostAccountRow(account: HostAccountOverview): HTMLElement {
       await refresh();
     }),
   );
-  row.append(name, details, login, remove);
+  const text = el("span", "host-account-text");
+  text.append(name, details);
+  const actions = el("span", "subscription-actions");
+  actions.append(login, remove);
+  row.append(text, actions);
   return row;
 }
 
@@ -1139,7 +1196,7 @@ function renderEntry(entry: TranscriptEntry, context: ChatContext): HTMLElement 
   switch (entry.type) {
     case "user_message": {
       const item = el("li", "entry user");
-      item.append(el("div", "entry-label", "You"), el("div", "entry-text", entry.text));
+      item.append(el("div", "entry-label visually-hidden", "You"), el("div", "entry-text", entry.text));
       return item;
     }
     // Shown on the card of the request it answers.
@@ -1149,17 +1206,19 @@ function renderEntry(entry: TranscriptEntry, context: ChatContext): HTMLElement 
       return renderAgentEvent(entry.event, AGENT_CLI_NAMES[entry.agent_cli], context);
     case "continued_on_subscription": {
       const how = entry.automatic ? " by itself: both subscriptions are interchangeable" : "";
-      return el(
-        "li",
-        "entry notice",
-        `Continued on ${context.subscriptionName(entry.subscription)}${how}.`,
-      );
+      return notice("", "key", `Continued on ${context.subscriptionName(entry.subscription)}${how}.`);
     }
     case "script_finished": {
+      const failed = entry.exit_code !== 0;
       const exit = entry.exit_code === null ? "did not finish" : `exit ${entry.exit_code}`;
-      const item = el("li", "entry tool-result script");
-      if (entry.exit_code !== 0) item.classList.add("failed");
-      item.append(output(`${SCRIPT_NAMES[entry.script]} · ${exit}`, entry.output));
+      const item = el("li", "entry command script");
+      if (failed) item.classList.add("failed");
+      item.append(
+        output(
+          [icon("terminal"), el("span", "output-name", SCRIPT_NAMES[entry.script]), exitBadge(exit, failed)],
+          entry.output,
+        ),
+      );
       return item;
     }
   }
@@ -1173,16 +1232,44 @@ function answer(context: ChatContext, request: string, given: Answer): Promise<v
 }
 
 /** How a request ended, for a card that no longer waits. */
-function outcome(given: Answer | undefined): string {
-  if (given === undefined) return "No longer waiting: the turn ended.";
+function outcome(given: Answer | undefined): HTMLElement {
+  if (given === undefined) return el("span", "badge card-outcome", "No longer waiting: the turn ended.");
   switch (given.type) {
     case "approve":
-      return "Approved";
+      return el("span", "badge success card-outcome", "Approved");
     case "decline":
-      return given.feedback === null ? "Declined" : `Declined: ${given.feedback}`;
+      return el(
+        "span",
+        "badge danger card-outcome",
+        given.feedback === null ? "Declined" : `Declined: ${given.feedback}`,
+      );
     case "answers":
-      return `Answered: ${Object.values(given.answers).map((chosen) => chosen.join(", ")).join("; ")}`;
+      return el(
+        "span",
+        "badge card-outcome",
+        `Answered: ${Object.values(given.answers).map((chosen) => chosen.join(", ")).join("; ")}`,
+      );
   }
+}
+
+/** A transcript card with a header line; returns the card and its body. */
+function card(className: string, iconName: IconName, label: string): [HTMLElement, HTMLElement] {
+  const item = el("li", `entry card ${className}`);
+  const header = el("div", "card-header");
+  header.append(icon(iconName), el("div", "entry-label", label));
+  const body = el("div", "card-body");
+  item.append(header, body);
+  return [item, body];
+}
+
+/** A line in the transcript about something around the agent. */
+function notice(className: string, iconName: IconName, text: string, label?: string): HTMLElement {
+  const item = el("li", `entry notice ${className}`.trim());
+  const body = el("div", "notice-body");
+  if (label !== undefined) body.append(el("div", "entry-label", label));
+  body.append(el("div", "entry-text", text));
+  item.append(icon(iconName), body);
+  return item;
 }
 
 function approvalCard(
@@ -1190,13 +1277,10 @@ function approvalCard(
   agentCli: string,
   context: ChatContext,
 ): HTMLElement {
-  const item = el("li", "entry card approval");
-  item.append(
-    el("div", "entry-label", `${agentCli} asks for approval`),
-    el("div", "entry-text", event.description),
-  );
+  const [item, body] = card("approval", "shield", `${agentCli} asks for approval`);
+  body.append(el("div", "entry-text", event.description));
   if (!context.open.has(event.request)) {
-    item.append(el("div", "card-outcome", outcome(context.answers.get(event.request))));
+    body.append(outcome(context.answers.get(event.request)));
     return item;
   }
   item.classList.add("open");
@@ -1210,8 +1294,8 @@ function approvalCard(
     () => void answer(context, event.request, { type: "decline", feedback: null }),
   );
   const actions = el("div", "card-actions");
-  actions.append(approve, decline, el("span", "muted", "or reply below to decline with feedback"));
-  item.append(actions);
+  actions.append(approve, decline, el("span", "card-hint", "or reply below to decline with feedback"));
+  body.append(actions);
   return item;
 }
 
@@ -1220,8 +1304,7 @@ function questionCard(
   agentCli: string,
   context: ChatContext,
 ): HTMLElement {
-  const item = el("li", "entry card question");
-  item.append(el("div", "entry-label", `${agentCli} asks`));
+  const [item, body] = card("question", "alert", `${agentCli} asks`);
   const open = context.open.has(event.request);
   const form = el("form", "card-questions");
   event.questions.forEach((question, index) => {
@@ -1235,15 +1318,17 @@ function questionCard(
       input.name = `question-${index}`;
       input.value = option.label;
       input.disabled = !open;
-      label.append(input, el("span", "", option.label));
-      if (option.description !== "") label.append(el("span", "muted", ` — ${option.description}`));
+      const text = el("span");
+      text.append(el("span", "option-label", option.label));
+      if (option.description !== "") text.append(el("span", "option-description", ` — ${option.description}`));
+      label.append(input, text);
       fieldset.append(label);
     }
     form.append(fieldset);
   });
-  item.append(form);
+  body.append(form);
   if (!open) {
-    item.append(el("div", "card-outcome", outcome(context.answers.get(event.request))));
+    body.append(outcome(context.answers.get(event.request)));
     return item;
   }
   item.classList.add("open");
@@ -1265,40 +1350,64 @@ function questionCard(
     void answer(context, event.request, { type: "answers", answers });
   });
   const actions = el("div", "card-actions");
-  actions.append(send, decline, el("span", "muted", "or reply below in your own words"));
+  actions.append(send, decline, el("span", "card-hint", "or reply below in your own words"));
   form.append(actions);
   return item;
 }
 
-function output(label: string, text: string): HTMLElement {
-  const details = el("details");
+/** Collapsible output; open while it is short. */
+function output(summary: (Node | string)[], text: string): HTMLElement {
+  const details = el("details", "output");
   details.open = text.split("\n").length <= 8;
-  details.append(el("summary", "entry-label", label), el("pre", "", text));
+  const head = el("summary");
+  head.append(...summary);
+  details.append(head, el("pre", "", text));
   return details;
+}
+
+function exitBadge(text: string, failed: boolean): HTMLElement {
+  return el("span", `badge ${failed ? "danger" : "success"}`, text);
 }
 
 function renderAgentEvent(event: AgentEvent, agentCli: string, context: ChatContext): HTMLElement {
   switch (event.type) {
     case "message": {
       const item = el("li", "entry agent");
-      item.append(el("div", "entry-label", agentCli), el("div", "entry-text", event.text));
+      // The agent CLI's name shows when it changes, such as after a handoff.
+      const label = el("div", "entry-label", agentCli);
+      if (context.lastAgentCli === agentCli) label.classList.add("visually-hidden");
+      context.lastAgentCli = agentCli;
+      item.append(label, el("div", "entry-text", event.text));
       return item;
     }
     case "tool_call": {
       const item = el("li", "entry tool-call");
-      item.append(el("div", "entry-label", `Tool call · ${event.name}`), el("code", "", event.detail));
+      item.append(
+        icon("chevron"),
+        el("span", "visually-hidden", "Tool call"),
+        el("span", "tool-name", event.name),
+        el("code", "tool-detail", event.detail),
+      );
       return item;
     }
     case "tool_result": {
       const item = el("li", "entry tool-result");
-      item.append(output(`Result · ${event.name}`, event.output));
+      item.append(output(["Result", el("span", "output-name", event.name)], event.output));
       return item;
     }
     case "command_finished": {
+      const failed = event.exit_code !== 0;
       const exit = event.exit_code === null ? "stopped" : `exit ${event.exit_code}`;
-      const item = el("li", "entry tool-result");
-      if (event.exit_code !== 0) item.classList.add("failed");
-      item.append(el("code", "", event.command), output(`Command · ${exit}`, event.output));
+      const item = el("li", "entry command");
+      if (failed) item.classList.add("failed");
+      const command = el("code", "command-text", event.command);
+      command.title = event.command;
+      item.append(
+        output(
+          [el("span", "command-prompt", "$"), el("span", "visually-hidden", "Command"), command, exitBadge(exit, failed)],
+          event.output,
+        ),
+      );
       return item;
     }
     case "approval_requested":
@@ -1308,19 +1417,16 @@ function renderAgentEvent(event: AgentEvent, agentCli: string, context: ChatCont
     case "usage_limit_reached": {
       const resets =
         event.resets_in_seconds === null ? "" : ` · resets in ${formatDuration(event.resets_in_seconds)}`;
-      return el("li", "entry notice limit", `Usage limit reached: ${event.limit}${resets}`);
+      return notice("limit", "alert", `Usage limit reached: ${event.limit}${resets}`);
     }
     case "turn_ended":
       return el("li", "turn-ended", "Turn ended");
     case "turn_interrupted":
       return el("li", "turn-ended", "Turn interrupted");
-    case "turn_failed": {
-      const item = el("li", "entry notice failed");
-      item.append(el("div", "entry-label", "Turn failed"), el("div", "entry-text", event.reason));
-      return item;
-    }
+    case "turn_failed":
+      return notice("failed", "alert", event.reason, "Turn failed");
     case "session_ended":
-      return el("li", "entry notice", "The agent session ended.");
+      return notice("", "stop", "The agent session ended.");
   }
 }
 
@@ -1349,6 +1455,7 @@ async function send(): Promise<void> {
         await service.queueMessage(chat, text);
       }
       messageInput.value = "";
+      fitMessageInput();
       await refresh();
     });
   } finally {
@@ -1378,6 +1485,10 @@ interruptButton.addEventListener("click", () =>
   }),
 );
 
+byId("add-repository").prepend(icon("folderPlus"));
+byId("open-subscriptions").prepend(icon("key"));
+byId("open-host-accounts").prepend(icon("branch"));
+
 byId("add-repository").addEventListener("click", () =>
   act(async () => {
     const path = await service.pickFolder();
@@ -1386,6 +1497,14 @@ byId("add-repository").addEventListener("click", () =>
     await refresh();
   }),
 );
+
+/** Grows the message field with its text, up to the height CSS allows. */
+function fitMessageInput(): void {
+  messageInput.style.height = "auto";
+  messageInput.style.height = `${messageInput.scrollHeight}px`;
+}
+
+messageInput.addEventListener("input", fitMessageInput);
 
 composer.addEventListener("submit", (event) => {
   event.preventDefault();

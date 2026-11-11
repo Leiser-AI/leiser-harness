@@ -28,10 +28,13 @@
       <section id="extensions" class="extensions" aria-label="CLI extensions" hidden></section>
       <section id="diff" class="diff" aria-label="Changes" hidden></section>
       <form id="composer" class="composer" hidden>
-        <textarea id="message" rows="3" placeholder="Message the agent (Enter sends or queues, Shift+Enter adds a line)"></textarea>
-        <div class="composer-actions">
-          <button id="send" type="submit">Send</button>
-          <button id="interrupt" type="button" hidden>Interrupt</button>
+        <textarea id="message" rows="2" placeholder="Message the agent (Enter sends or queues, Shift+Enter adds a line)"></textarea>
+        <div class="composer-bar">
+          <div id="composer-options" class="composer-options"></div>
+          <div class="composer-actions">
+            <button id="interrupt" class="ghost" type="button" hidden>Interrupt</button>
+            <button id="send" class="primary" type="submit">Send</button>
+          </div>
         </div>
       </form>
     </main>
@@ -57,7 +60,7 @@
     <dialog id="subscriptions-dialog" class="subscriptions-dialog" aria-labelledby="subscriptions-title">
       <header class="dialog-header">
         <h2 id="subscriptions-title">Subscriptions</h2>
-        <button id="close-subscriptions" type="button">Close</button>
+        <button id="close-subscriptions" class="ghost" type="button">Close</button>
       </header>
       <div id="subscriptions-error" class="error" role="alert" hidden></div>
       <div id="subscription-list"></div>
@@ -73,7 +76,7 @@
             placeholder="Paste the code from the browser"
             aria-label="Code for the login"
           />
-          <button type="submit">Send to login</button>
+          <button class="primary" type="submit">Send to login</button>
         </form>
       </section>
       <form id="add-subscription" class="add-subscription">
@@ -100,7 +103,7 @@
           API key
           <input id="new-key" type="password" autocomplete="off" spellcheck="false" />
         </label>
-        <button type="submit">Add</button>
+        <button class="primary" type="submit">Add subscription</button>
       </form>
       <p class="muted dialog-note">
         A repository's default subscription per provider is set by name in its
@@ -111,7 +114,7 @@
     <dialog id="host-accounts-dialog" class="subscriptions-dialog" aria-labelledby="host-accounts-title">
       <header class="dialog-header">
         <h2 id="host-accounts-title">Host accounts</h2>
-        <button id="close-host-accounts" type="button">Close</button>
+        <button id="close-host-accounts" class="ghost" type="button">Close</button>
       </header>
       <div id="host-accounts-error" class="error" role="alert" hidden></div>
       <ul id="host-account-list" class="subscription-rows"></ul>
@@ -141,7 +144,7 @@
           Commit author email
           <input id="new-host-author-email" type="email" autocomplete="off" spellcheck="false" />
         </label>
-        <button type="submit">Add</button>
+        <button class="primary" type="submit">Add host account</button>
       </form>
       <p class="muted dialog-note">
         A repository is bound to its host account by name in its
@@ -157,8 +160,8 @@
         <button id="close-pull-request" type="button">Cancel</button>
       </header>
       <div id="pull-request-error" class="error" role="alert" hidden></div>
-      <form id="pull-request-form" class="add-subscription">
-        <p id="pull-request-target" class="muted"></p>
+      <form id="pull-request-form" class="pull-request-form">
+        <p id="pull-request-target" class="muted pull-request-target"></p>
         <label>
           Title
           <input id="pull-request-title-input" type="text" autocomplete="off" required />
