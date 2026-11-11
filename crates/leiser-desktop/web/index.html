@@ -11,13 +11,32 @@
     <aside class="sidebar">
       <header class="sidebar-header">
         <span class="app-name">leiser-harness</span>
-        <div class="sidebar-actions">
-          <button id="add-repository" type="button">Add repository</button>
-          <button id="open-subscriptions" type="button">Subscriptions</button>
-          <button id="open-host-accounts" type="button">Host accounts</button>
-        </div>
       </header>
+      <div class="sidebar-actions">
+        <button id="new-chat" type="button">
+          <span class="sidebar-action-label">New chat</span>
+          <kbd id="new-chat-shortcut" class="shortcut"></kbd>
+        </button>
+      </div>
+      <div class="sidebar-heading">
+        <h2 class="section-label">Repositories</h2>
+        <button
+          id="add-repository"
+          class="icon-button"
+          type="button"
+          aria-label="Add repository"
+          title="Add a repository"
+        ></button>
+      </div>
       <nav id="repositories" aria-label="Repositories and chats"></nav>
+      <footer class="sidebar-actions sidebar-footer">
+        <button id="open-subscriptions" type="button">
+          <span class="sidebar-action-label">Subscriptions</span>
+        </button>
+        <button id="open-host-accounts" type="button">
+          <span class="sidebar-action-label">Host accounts</span>
+        </button>
+      </footer>
     </aside>
     <header class="top-bar" id="top-bar"></header>
     <main class="chat">
@@ -28,12 +47,23 @@
       <section id="extensions" class="extensions" aria-label="CLI extensions" hidden></section>
       <section id="diff" class="diff" aria-label="Changes" hidden></section>
       <form id="composer" class="composer" hidden>
-        <textarea id="message" rows="2" placeholder="Message the agent (Enter sends or queues, Shift+Enter adds a line)"></textarea>
-        <div class="composer-bar">
-          <div id="composer-options" class="composer-options"></div>
-          <div class="composer-actions">
-            <button id="interrupt" class="ghost" type="button" hidden>Interrupt</button>
-            <button id="send" class="primary" type="submit">Send</button>
+        <div id="composer-context" class="composer-context"></div>
+        <div class="composer-box">
+          <textarea id="message" rows="1" aria-label="Message" placeholder="Message the agent"></textarea>
+          <div class="composer-bar">
+            <div id="composer-options" class="composer-options"></div>
+            <div class="composer-actions">
+              <div id="composer-agent" class="composer-agent"></div>
+              <button
+                id="interrupt"
+                class="round-button"
+                type="button"
+                aria-label="Interrupt"
+                title="Interrupt the running turn"
+                hidden
+              ></button>
+              <button id="send" class="round-button primary" type="submit" aria-label="Send"></button>
+            </div>
           </div>
         </div>
       </form>

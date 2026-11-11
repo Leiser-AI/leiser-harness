@@ -3,7 +3,8 @@
 // harness service and reads them again on every service event. The only
 // thing it keeps is what is selected: a chat, a repository's repo-check or
 // a repository's CLI extensions panel, and whether a chat shows its diff
-// panel instead of its transcript.
+// panel instead of its transcript. A chat is always open: while none is
+// selected, the new chat the developer is about to start (`newChat.ts`).
 
 import type {
   AgentCli,
@@ -31,6 +32,7 @@ import type {
   RepositoryOverview,
   RepositoryScript,
   ServiceEvent,
+  StartOn,
   SubscriptionId,
   SubscriptionOverview,
   ServiceConnection,
@@ -41,6 +43,9 @@ import type {
 import * as diffPanel from "./diff";
 import * as extensions from "./extensions";
 import { icon, type IconName } from "./icons";
+import * as menu from "./menu";
+import { menuButton, type MenuSection } from "./menu";
+import * as newChat from "./newChat";
 import * as service from "./service";
 import * as terminal from "./terminal";
 import {
@@ -48,14 +53,35 @@ import {
   AGENT_CLI_PROVIDERS,
   PERMISSION_MODE_NAMES,
   PROVIDER_NAMES,
+  type ChatDefaults,
   type ChatView,
 } from "./service";
 
-let selectedChat: ChatId | null = null;
-// Shown instead of a chat when set.
-let selectedCheck: RepositoryId | null = null;
-// The repository whose CLI extensions panel is open instead of a chat.
-let selectedExtensions: RepositoryId | null = null;
+/**
+ * What the main area shows: the new chat the developer is about to start,
+ * a chat, or one of a repository's views instead of a chat.
+ */
+type Selection =
+  | { type: "new_chat" }
+  | { type: "chat"; chat: ChatId }
+  | { type: "repo_check"; repository: RepositoryId }
+  | { type: "extensions"; repository: RepositoryId };
+
+let selected: Selection = { type: "new_chat" };
+
+/** The selected chat, if a chat is selected. */
+function selectedChat(): ChatId | null {
+  return selected.type === "chat" ? selected.chat : null;
+}
+
+/** The repository whose `view` is selected, if it is. */
+function selectedRepository(view: "repo_check" | "extensions"): RepositoryId | null {
+  return selected.type === view ? selected.repository : null;
+}
+
+// The repository the new chat on screen starts in; `null` while another
+// view shows or there is no repository.
+let newChatRepository: RepositoryId | null = null;
 // Drops answers to older reads that arrive after newer ones.
 let readCount = 0;
 
@@ -66,7 +92,9 @@ const composer = byId<HTMLFormElement>("composer");
 const messageInput = byId<HTMLTextAreaElement>("message");
 const sendButton = byId<HTMLButtonElement>("send");
 const interruptButton = byId<HTMLButtonElement>("interrupt");
+const composerContext = byId("composer-context");
 const composerOptions = byId("composer-options");
+const composerAgent = byId("composer-agent");
 const errorBox = byId("error");
 const subscriptionsDialog = byId<HTMLDialogElement>("subscriptions-dialog");
 const subscriptionsError = byId("subscriptions-error");
@@ -209,14 +237,44 @@ interface ChatContext {
 // The connection to the harness service, as the app's Rust side reports it.
 let connection: ServiceConnection = { state: "connecting" };
 
+/**
+ * What a new chat would start with, or why the harness service cannot
+ * say: the repository's config is invalid, or a service update waits.
+ */
+type NewChatDefaults =
+  | { type: "read"; defaults: ChatDefaults }
+  | { type: "failed"; reason: string }
+  | { type: "service_update_waiting" };
+
+async function readDefaults(repository: RepositoryId, updateWaiting: boolean): Promise<NewChatDefaults> {
+  // While an update waits, the running service may be older than the app
+  // and not know chat defaults or a new chat's settings. It never answers
+  // a command it does not know, so the app does not ask.
+  if (updateWaiting) return { type: "service_update_waiting" };
+  try {
+    return { type: "read", defaults: await service.readChatDefaults(repository) };
+  } catch (error) {
+    return { type: "failed", reason: error instanceof Error ? error.message : String(error) };
+  }
+}
+
 async function refresh(): Promise<void> {
+  try {
+    await readAndRender();
+  } finally {
+    // A menu whose button the render removed has nothing left to choose for.
+    menu.sync();
+  }
+}
+
+async function readAndRender(): Promise<void> {
   // While there is no connection, the service has nothing to read.
   if (connection.state !== "connected") {
     renderServiceNotice(false);
     return;
   }
   const read = ++readCount;
-  const chat = selectedChat;
+  const chat = selectedChat();
   const [repositories, chats, subscriptions, hostAccounts, view, todos, updateWaiting] = await Promise.all([
     service.listRepositories(),
     service.listChats(),
@@ -237,14 +295,19 @@ async function refresh(): Promise<void> {
       )
     ).filter((entry) => entry !== null),
   );
+  // The new chat shows what it would start with in its repository.
+  const startsIn = selected.type === "new_chat" ? newChat.repository(repositories) : null;
+  const defaults = startsIn === null ? null : await readDefaults(startsIn.repository, updateWaiting);
   if (read !== readCount) return;
+  newChatRepository = startsIn?.repository ?? null;
   renderServiceNotice(updateWaiting);
   renderSidebar(repositories, chats, checks);
   // The subscriptions dialog can open over any view.
   renderSubscriptions(subscriptions);
   renderHostAccounts(hostAccounts);
-  if (selectedExtensions !== null) {
-    const shown = repositories.find((overview) => overview.repository === selectedExtensions);
+  if (selected.type === "extensions") {
+    const shownRepository = selected.repository;
+    const shown = repositories.find((overview) => overview.repository === shownRepository);
     repoCheckView.hidden = true;
     diffPanel.hide();
     renderExtensionsTopBar(shown ?? null);
@@ -252,8 +315,9 @@ async function refresh(): Promise<void> {
     terminal.show(null);
     return;
   }
-  const checked = repositories.find((overview) => overview.repository === selectedCheck);
-  const check = selectedCheck === null ? undefined : checks.get(selectedCheck);
+  const checkedRepository = selectedRepository("repo_check");
+  const checked = repositories.find((overview) => overview.repository === checkedRepository);
+  const check = checkedRepository === null ? undefined : checks.get(checkedRepository);
   if (checked && check) {
     diffPanel.hide();
     renderRepoCheck(checked, check);
@@ -264,20 +328,22 @@ async function refresh(): Promise<void> {
   repoCheckView.hidden = true;
   transcript.hidden = false;
   const overview = chats.find((candidate) => candidate.chat === chat) ?? null;
+  if (chat === null || view === null || overview === null) {
+    diffPanel.hide();
+    renderNewChat(startsIn, repositories, chats, subscriptions, defaults);
+    renderTodos(null, null);
+    return;
+  }
   renderChat(
     view,
     overview,
-    repositories.find((candidate) => candidate.repository === overview?.repository) ?? null,
+    repositories.find((candidate) => candidate.repository === overview.repository) ?? null,
     subscriptions,
   );
   renderTodos(chat, todos);
   if (diffPanel.isOpen()) {
-    if (chat === null || view === null) {
-      diffPanel.hide();
-    } else {
-      transcript.hidden = true;
-      await diffPanel.show(chat, selectedWorking);
-    }
+    transcript.hidden = true;
+    await diffPanel.show(chat, selectedWorking);
   }
 }
 
@@ -328,13 +394,38 @@ const SCRIPT_NAMES: Record<RepositoryScript, string> = {
   done: "Done script",
 };
 
-/** Starts a chat, selects it and puts the cursor in the composer. */
-async function startAndSelect(repository: RepositoryId, checkout?: Checkout): Promise<void> {
-  if (!leaveExtensions()) return;
-  selectedChat = await service.startChat(repository, checkout);
-  selectedCheck = null;
+/**
+ * Shows a new chat in `repository` (`null`: the most recently used one)
+ * and puts the cursor in the composer. The chat starts with its first
+ * message.
+ */
+async function openNewChat(repository: RepositoryId | null, checkout?: Checkout): Promise<void> {
+  if (leaveExtensions()) {
+    newChat.open(repository, checkout);
+    selected = { type: "new_chat" };
+  }
   await refresh();
-  messageInput.focus();
+  if (selected.type === "new_chat") messageInput.focus();
+}
+
+/** Starts the new chat on screen in `repository` with its settings and selects it. */
+async function startNewChat(repository: RepositoryId): Promise<ChatId> {
+  const { checkout, startOn, permissionMode } = newChat.current();
+  const chat = await service.startChat(repository, checkout, {
+    start_on: startOn,
+    permission_mode: permissionMode,
+  });
+  newChat.remember(repository);
+  // The next new chat starts over in the same repository.
+  newChat.open(repository);
+  selected = { type: "chat", chat };
+  return chat;
+}
+
+async function addRepository(): Promise<void> {
+  const path = await service.pickFolder();
+  if (path === null) return;
+  await openNewChat(await service.addRepository(path));
 }
 
 function renderServiceNotice(updateWaiting: boolean): void {
@@ -360,12 +451,12 @@ function renderServiceNotice(updateWaiting: boolean): void {
 
 /** Leaves the CLI extensions panel; refuses while it has unsaved changes. */
 function leaveExtensions(): boolean {
-  if (selectedExtensions === null) return true;
+  if (selected.type !== "extensions") return true;
   if (extensions.hasUnsavedChanges()) {
     showError("Save or discard your changes to the CLI extension first.");
     return false;
   }
-  selectedExtensions = null;
+  selected = { type: "new_chat" };
   extensions.hide();
   transcript.hidden = false;
   return true;
@@ -387,28 +478,26 @@ function renderSidebar(
   for (const repository of repositories) {
     const item = el("li", "repository");
     const header = el("div", "repository-header");
-    const name = el("span", "repository-name", repository.name);
-    name.title = repository.path;
-    const newChat = iconButton("plus", "New chat", "new-chat");
-    newChat.title = `Start a chat in a new worktree of ${repository.name}`;
-    newChat.addEventListener("click", () => act(() => startAndSelect(repository.repository)));
-    const inMain = iconButton("home", "New chat in the main checkout", "new-chat secondary");
-    inMain.title = `Start a chat in the main checkout of ${repository.name}`;
-    inMain.addEventListener("click", () =>
-      act(() => startAndSelect(repository.repository, { type: "main" })),
-    );
-    const showExtensions = iconButton("blocks", "CLI extensions", "secondary");
+    // The repository's row opens a new chat in it, as the app shows on start.
+    const name = el("button", "repository-name");
+    name.type = "button";
+    name.title = `${repository.path}\nNew chat in ${repository.name}`;
+    name.append(icon("folder"), el("span", "repository-name-text", repository.name));
+    if (repository.repository === newChatRepository) {
+      name.classList.add("selected");
+      name.setAttribute("aria-current", "true");
+    }
+    name.addEventListener("click", () => act(() => openNewChat(repository.repository)));
+    const showExtensions = iconButton("blocks", `CLI extensions of ${repository.name}`, "secondary");
     showExtensions.title = `Skills, MCP servers, hooks and instruction files the agent CLIs load from ${repository.name}`;
-    if (repository.repository === selectedExtensions) {
+    if (repository.repository === selectedRepository("extensions")) {
       showExtensions.classList.add("selected");
       showExtensions.setAttribute("aria-current", "true");
     }
     showExtensions.addEventListener("click", () =>
       act(async () => {
-        if (selectedExtensions !== repository.repository && !leaveExtensions()) return;
-        selectedChat = null;
-        selectedCheck = null;
-        selectedExtensions = repository.repository;
+        if (selectedRepository("extensions") !== repository.repository && !leaveExtensions()) return;
+        selected = { type: "extensions", repository: repository.repository };
         repoCheckView.hidden = true;
         transcript.hidden = true;
         composer.hidden = true;
@@ -417,7 +506,7 @@ function renderSidebar(
       }),
     );
     const actions = el("span", "repository-actions");
-    actions.append(showExtensions, newChat, inMain);
+    actions.append(showExtensions);
     header.append(name, actions);
 
     const chatList = el("ul", "chat-list");
@@ -429,17 +518,16 @@ function renderSidebar(
       button.append(
         icon("shield"),
         el("span", "chat-title", "repo-check"),
-        el("span", "chat-status", checkStatus(check)),
+        el("span", "chat-note", checkStatus(check)),
       );
-      if (repository.repository === selectedCheck) {
+      if (repository.repository === selectedRepository("repo_check")) {
         button.classList.add("selected");
         button.setAttribute("aria-current", "true");
       }
       button.addEventListener("click", () =>
         act(async () => {
           if (!leaveExtensions()) return;
-          selectedCheck = repository.repository;
-          selectedChat = null;
+          selected = { type: "repo_check", repository: repository.repository };
           await refresh();
         }),
       );
@@ -451,20 +539,21 @@ function renderSidebar(
       const chatItem = el("li");
       const button = el("button", `chat-link ${chat.status}`);
       button.type = "button";
-      button.title = chat.worktree === null ? "Main checkout" : `Worktree: ${chat.worktree}`;
-      button.append(
-        el("span", "chat-title", chat.title ?? "New chat"),
-        el("span", `chat-status ${chat.status}`, STATUS_LABELS[chat.status]),
-      );
-      if (chat.chat === selectedChat) {
+      const status = STATUS_LABELS[chat.status];
+      button.title = `${status} · ${chat.worktree === null ? "main checkout" : `worktree ${chat.worktree}`}`;
+      // The status shows as a mark; its words are for screen readers and the tooltip.
+      const mark = el("span", `chat-status ${chat.status}`);
+      mark.append(el("span", "visually-hidden", status));
+      button.append(el("span", "chat-title", chat.title ?? "New chat"), mark);
+      if (chat.chat === selectedChat()) {
         button.classList.add("selected");
         button.setAttribute("aria-current", "true");
       }
       button.addEventListener("click", () =>
         act(async () => {
           if (!leaveExtensions()) return;
-          selectedChat = chat.chat;
-          selectedCheck = null;
+          selected = { type: "chat", chat: chat.chat };
+          newChat.remember(chat.repository);
           await refresh();
         }),
       );
@@ -496,47 +585,221 @@ function placeTranscript(): void {
   transcript.scrollTop = followTranscript ? transcript.scrollHeight : lastScrollTop;
 }
 
+/** The composer's send button says what Enter does now. */
+function labelSendButton(label: string, hint: string): void {
+  sendButton.setAttribute("aria-label", label);
+  sendButton.title = `${label}: ${hint}`;
+}
+
+/** The new chat the developer is about to start: nothing but the question and the composer. */
+function renderNewChat(
+  startsIn: RepositoryOverview | null,
+  repositories: RepositoryOverview[],
+  chats: ChatOverview[],
+  subscriptions: SubscriptionOverview[],
+  defaults: NewChatDefaults | null,
+): void {
+  terminal.show(null);
+  selectedWorking = false;
+  selectedOpenRequests = [];
+  transcriptChat = null;
+  renderTopBar("New chat");
+  const hero = el("li", "new-chat");
+  const logo = el("div", "new-chat-logo");
+  logo.append(icon("terminal"));
+  hero.append(logo);
+  if (startsIn === null) {
+    const add = el("button", "primary", "Add repository");
+    add.type = "button";
+    add.prepend(icon("folderPlus"));
+    add.addEventListener("click", () => act(addRepository));
+    hero.append(
+      el("h2", "new-chat-title", "Add a repository to start a chat"),
+      el("p", "muted", "A chat works in a repository: in a worktree of its own, or in the main checkout."),
+      add,
+    );
+    transcript.replaceChildren(hero);
+    composer.hidden = true;
+    return;
+  }
+  const title = el("h2", "new-chat-title");
+  title.append(
+    "What should we build in ",
+    menuButton({
+      key: "new-chat-title-repository",
+      name: "Repository",
+      label: startsIn.name,
+      hint: startsIn.path,
+      sections: repositorySections(startsIn, repositories),
+      className: "new-chat-repository",
+      inline: true,
+    }),
+    "?",
+  );
+  hero.append(title);
+  if (defaults?.type === "failed") {
+    hero.append(el("p", "callout danger", `A chat cannot start in ${startsIn.name} yet: ${defaults.reason}`));
+  }
+  transcript.replaceChildren(hero);
+
+  // Without the repository's defaults there is nothing to choose from:
+  // the chat starts with them, and its settings change once it has started.
+  const read = defaults?.type === "read" ? defaults.defaults : null;
+  if (read === null) newChat.resetSettings();
+  const draft = newChat.current();
+  const chosen = async (change: () => void): Promise<void> => {
+    change();
+    await refresh();
+  };
+  composerContext.replaceChildren(
+    menuButton({
+      key: "new-chat-repository",
+      name: "Repository",
+      icon: "folder",
+      label: startsIn.name,
+      hint: startsIn.path,
+      sections: repositorySections(startsIn, repositories),
+    }),
+    checkoutPicker(draft.checkout, chats),
+  );
+  composerOptions.replaceChildren(
+    permissionModePicker(draft.permissionMode ?? read?.permissionMode ?? null, null, read === null, (mode) =>
+      chosen(() => newChat.setPermissionMode(mode)),
+    ),
+  );
+  const startOn: StartOn | null =
+    draft.startOn ??
+    (read === null ? null : { provider: AGENT_CLI_PROVIDERS[read.agentCli], subscription: read.subscription });
+  composerAgent.replaceChildren(
+    agentPicker(startOn, subscriptions, read === null, (choice) => chosen(() => newChat.setStartOn(choice))),
+  );
+  labelSendButton("Send", "starts the chat (Enter)");
+  messageInput.placeholder = `Describe a task in ${startsIn.name}`;
+  interruptButton.hidden = true;
+  composer.hidden = false;
+}
+
+/** The repositories a new chat can start in, and adding another. */
+function repositorySections(startsIn: RepositoryOverview, repositories: RepositoryOverview[]): MenuSection[] {
+  return [
+    {
+      heading: "Start the chat in",
+      items: repositories.map((repository) => ({
+        label: repository.name,
+        icon: "folder",
+        selected: repository.repository === startsIn.repository,
+        onSelect: () => void act(() => openNewChat(repository.repository)),
+      })),
+    },
+    {
+      items: [{ label: "Add repository…", icon: "folderPlus", onSelect: () => void act(addRepository) }],
+    },
+  ];
+}
+
+/** Where the new chat works: a new worktree, the main checkout, or another chat's worktree. */
+function checkoutPicker(checkout: Checkout, chats: ChatOverview[]): HTMLElement {
+  const choose = (chosen: Checkout) => () =>
+    void act(async () => {
+      newChat.setCheckout(chosen);
+      await refresh();
+    });
+  const sections: MenuSection[] = [
+    {
+      heading: "The chat works in",
+      items: [
+        {
+          label: "New worktree",
+          description: "On a new branch from the repository's base branch. Its setup script runs first.",
+          icon: "layers",
+          selected: checkout.type === "new_worktree",
+          onSelect: choose({ type: "new_worktree" }),
+        },
+        {
+          label: "Main checkout",
+          description: "In the repository itself, on the branch it has checked out.",
+          icon: "home",
+          selected: checkout.type === "main",
+          onSelect: choose({ type: "main" }),
+        },
+      ],
+    },
+  ];
+  let label = checkout.type === "main" ? "Main checkout" : "New worktree";
+  if (checkout.type === "worktree") {
+    const other = chats.find((overview) => overview.chat === checkout.chat);
+    label = `Worktree of "${other?.title ?? "New chat"}"`;
+    sections[0]?.items.push({
+      label,
+      description: other?.worktree ?? "Next to the chat that works there, on its branch.",
+      icon: "layers",
+      selected: true,
+      onSelect: choose(checkout),
+    });
+  }
+  return menuButton({
+    key: "new-chat-checkout",
+    name: "Checkout",
+    icon: checkout.type === "main" ? "home" : "layers",
+    label,
+    sections,
+  });
+}
+
+/** A fact about where the chat works, in the line above the composer. */
+function contextItem(iconName: IconName, text: string, title: string, className = ""): HTMLElement {
+  const item = el("span", `context-item ${className}`.trim());
+  item.title = title;
+  item.append(icon(iconName), el("span", "context-text", text));
+  return item;
+}
+
 function renderChat(
-  view: ChatView | null,
-  overview: ChatOverview | null,
+  view: ChatView,
+  overview: ChatOverview,
   repository: RepositoryOverview | null,
   subscriptions: SubscriptionOverview[],
 ): void {
-  if (view === null || overview === null) {
-    terminal.show(null);
-    selectedWorking = false;
-    selectedOpenRequests = [];
-    renderTopBar("No chat selected");
-    transcript.replaceChildren(el("li", "empty", "Select a chat or start a new one."));
-    composer.hidden = true;
-    composerOptions.replaceChildren();
-    return;
-  }
   const chat = overview.chat;
   // The terminal panel's shell runs here.
   const checkout = overview.worktree ?? repository?.path;
-  renderTopBar(
-    overview.title ?? "New chat",
-    [
-      labelled("Repository", repository?.name ?? "unknown"),
-      labelled(
-        "Branch",
-        view.place === "removed_worktree" && view.pullRequest !== null
-          ? `${view.pullRequest.head} (removed)`
-          : branchName(view.branch),
-      ),
-      hostAccountItem(view.hostAccount),
-      commitAuthorItem(view),
-      labelled("Checkout", CHECKOUT_LABELS[view.place]),
-    ],
-    chatActions(overview, view, checkout),
+  renderTopBar(overview.title ?? "New chat", [], chatActions(overview, view, checkout));
+  const branch =
+    view.place === "removed_worktree" && view.pullRequest !== null
+      ? `${view.pullRequest.head} (removed)`
+      : branchName(view.branch);
+  composerContext.replaceChildren(
+    contextItem("folder", repository?.name ?? "unknown", `Repository: ${repository?.path ?? "unknown"}`),
+    contextItem("branch", branch, `Branch: ${branch}`, "mono"),
+    contextItem(
+      view.place === "main_checkout" ? "home" : "layers",
+      CHECKOUT_LABELS[view.place],
+      `Checkout: ${checkout ?? CHECKOUT_LABELS[view.place]}`,
+    ),
+    hostAccountItem(view.hostAccount),
+    commitAuthorItem(view),
   );
-  const agentCli = el("span", "composer-agent-cli", AGENT_CLI_NAMES[view.agentCli]);
-  agentCli.title = "The agent CLI this chat runs on";
+  // A turn that waits for an answer still runs.
+  const betweenTurns = view.status !== "working" && view.openRequests.length === 0;
   composerOptions.replaceChildren(
-    agentCli,
-    subscriptionPicker(view, subscriptions),
-    permissionModePicker(overview.chat, view),
+    permissionModePicker(view.permissionMode, view.appliedPermissionMode, false, async (mode) => {
+      await service.changePermissionMode(chat, mode);
+      await refresh();
+    }),
+  );
+  composerAgent.replaceChildren(
+    agentPicker(
+      { provider: AGENT_CLI_PROVIDERS[view.agentCli], subscription: view.subscription },
+      subscriptions,
+      !betweenTurns,
+      async (choice) => {
+        try {
+          await service.changeSubscription(chat, choice.provider, choice.subscription);
+        } finally {
+          await refresh();
+        }
+      },
+    ),
   );
   const removed = view.place === "removed_worktree";
   terminal.show(removed ? null : chat, checkout);
@@ -574,12 +837,16 @@ function renderChat(
   // A turn that waits for an answer still runs and can be interrupted.
   selectedWorking = view.status === "working" || selectedOpenRequests.length > 0;
   // A text reply to a waiting chat declines its oldest request with feedback.
-  sendButton.textContent =
-    selectedOpenRequests.length > 0 ? "Reply" : selectedWorking ? "Queue" : "Send";
-  messageInput.placeholder =
-    selectedOpenRequests.length > 0
-      ? "Reply instead of approving: the agent gets your text (Enter sends)"
-      : "Message the agent (Enter sends or queues, Shift+Enter adds a line)";
+  if (selectedOpenRequests.length > 0) {
+    labelSendButton("Reply", "declines the request and gives the agent your text (Enter)");
+    messageInput.placeholder = "Reply instead of approving: the agent gets your text";
+  } else if (selectedWorking) {
+    labelSendButton("Queue", "the agent gets your message when the turn ends (Enter)");
+    messageInput.placeholder = "Queue a message for when the turn ends";
+  } else {
+    labelSendButton("Send", "starts a turn (Enter)");
+    messageInput.placeholder = "Message the agent";
+  }
   interruptButton.hidden = !selectedWorking;
   // A chat whose worktree is gone takes no more messages.
   composer.hidden = removed;
@@ -661,64 +928,95 @@ const HARD_BLOCKS =
 
 const PERMISSION_MODES: PermissionMode[] = ["supervised", "auto_accept_edits", "auto", "full_access"];
 
-function permissionModePicker(chat: ChatId, view: ChatView): HTMLElement {
-  const item = el("label", "composer-option");
-  const select = el("select", "permission-mode");
-  select.setAttribute("aria-label", "Permission mode");
-  select.title = `Permission mode: how much the agent may do without your approval. ${HARD_BLOCKS}`;
-  for (const mode of PERMISSION_MODES) {
-    const option = el("option", "", PERMISSION_MODE_NAMES[mode]);
-    option.value = mode;
-    option.selected = mode === view.permissionMode;
-    select.append(option);
-  }
-  select.addEventListener("change", () =>
-    act(async () => {
-      await service.changePermissionMode(chat, select.value as PermissionMode);
-      await refresh();
+const PERMISSION_MODE_MEANINGS: Record<PermissionMode, string> = {
+  supervised: "Asks before commands and file changes.",
+  auto_accept_edits: "Changes files without asking; other actions still ask.",
+  auto: "The agent CLI's automatic review approves routine actions and asks about the others.",
+  full_access: "Never asks.",
+};
+
+/**
+ * The chat's permission mode. `current` is `null` while a new chat's
+ * repository default is unknown; `applied` differs from it when the agent
+ * CLI has no such mode.
+ */
+function permissionModePicker(
+  current: PermissionMode | null,
+  applied: PermissionMode | null,
+  disabled: boolean,
+  choose: (mode: PermissionMode) => Promise<void>,
+): HTMLElement {
+  const item = el("span", "composer-option");
+  item.append(
+    menuButton({
+      key: "permission-mode",
+      name: "Permission mode",
+      hint:
+        current === null
+          ? "changes once the chat has started"
+          : "how much the agent may do without your approval",
+      icon: "shield",
+      label: current === null ? "Repository default" : PERMISSION_MODE_NAMES[current],
+      disabled,
+      sections: [
+        {
+          heading: "Permission mode",
+          items: PERMISSION_MODES.map((mode) => ({
+            label: PERMISSION_MODE_NAMES[mode],
+            description: PERMISSION_MODE_MEANINGS[mode],
+            selected: mode === current,
+            onSelect: () => void act(() => choose(mode)),
+          })),
+        },
+      ],
+      note: HARD_BLOCKS,
     }),
   );
-  item.append(icon("shield"), select);
-  if (view.appliedPermissionMode !== view.permissionMode) {
-    const applied = PERMISSION_MODE_NAMES[view.appliedPermissionMode];
-    item.title = `The agent CLI has no such mode, so the chat runs ${applied}.`;
-    item.append(el("span", "permission-applied", `runs ${applied}`));
+  if (applied !== null && applied !== current) {
+    const runs = el("span", "permission-applied", `runs ${PERMISSION_MODE_NAMES[applied]}`);
+    runs.title = `The agent CLI has no such mode, so the chat runs ${PERMISSION_MODE_NAMES[applied]}.`;
+    item.append(runs);
   }
   return item;
 }
 
-/** Who the chat's commits are by, cut short in the top bar. */
+/** Who the chat's commits are by, cut short above the composer. */
 function commitAuthorItem(view: ChatView): HTMLElement {
   const author =
-    view.commitAuthor === null ? "none" : `${view.commitAuthor.name} <${view.commitAuthor.email}>`;
-  const value = el("span", "top-bar-value truncated", author);
-  value.title = author;
-  return labelled("Commit author", value);
+    view.commitAuthor === null ? "no commit author" : `${view.commitAuthor.name} <${view.commitAuthor.email}>`;
+  return contextItem(
+    "user",
+    view.commitAuthor?.name ?? author,
+    `Commit author: ${author}`,
+    view.commitAuthor === null ? "warning" : "",
+  );
 }
 
 /** The host account the chat's repository is bound to. */
 function hostAccountItem(binding: HostAccountBinding): HTMLElement {
   switch (binding.type) {
-    case "bound": {
-      const item = labelled("Host account", `${binding.name} · ${binding.login}`);
-      item.title = `${binding.login} on ${binding.git_host}`;
-      return item;
-    }
-    case "unbound": {
-      const item = labelled("Host account", el("span", "top-bar-value warning", "not bound"));
-      item.title = 'Bind it in the repository\'s .leiser/config.toml: host_account = "<name>"';
-      return item;
-    }
-    case "unknown": {
-      const item = labelled("Host account", el("span", "top-bar-value warning", `${binding.name}?`));
-      item.title = `"${binding.name}" is not registered; add it under Host accounts.`;
-      return item;
-    }
-    case "unreadable": {
-      const item = labelled("Host account", el("span", "top-bar-value warning", "config unreadable"));
-      item.title = binding.reason;
-      return item;
-    }
+    case "bound":
+      return contextItem(
+        "cloud",
+        `${binding.name} · ${binding.login}`,
+        `Host account: ${binding.login} on ${binding.git_host}`,
+      );
+    case "unbound":
+      return contextItem(
+        "cloud",
+        "No host account",
+        'Host account: not bound. Bind it in the repository\'s .leiser/config.toml: host_account = "<name>"',
+        "warning",
+      );
+    case "unknown":
+      return contextItem(
+        "cloud",
+        `${binding.name}?`,
+        `Host account: "${binding.name}" is not registered; add it under Host accounts.`,
+        "warning",
+      );
+    case "unreadable":
+      return contextItem("cloud", "Config unreadable", `Host account: ${binding.reason}`, "warning");
   }
 }
 
@@ -804,7 +1102,7 @@ function chatActions(
     const sameWorktree = topBarAction("plus", "New chat in this worktree", "ghost");
     sameWorktree.title = overview.worktree;
     sameWorktree.addEventListener("click", () =>
-      act(() => startAndSelect(overview.repository, { type: "worktree", chat: overview.chat })),
+      act(() => openNewChat(overview.repository, { type: "worktree", chat: overview.chat })),
     );
     actions.push(sameWorktree);
   }
@@ -813,7 +1111,8 @@ function chatActions(
     done.addEventListener("click", () =>
       act(async () => {
         await service.markChatDone(overview.chat);
-        await refresh();
+        // The chat is closed; a fresh one in its repository takes its place.
+        await openNewChat(overview.repository);
       }),
     );
     actions.push(done);
@@ -1040,71 +1339,82 @@ function labelled(label: string, value: string | HTMLElement): HTMLElement {
   return item;
 }
 
-const DEFAULT_LOGIN = "default";
-
-/** A provider's subscription, or its agent CLI's default login (`null`). */
-interface SubscriptionChoice {
-  provider: Provider;
-  subscription: SubscriptionId | null;
-}
-
-/** The picker's option value for a choice. */
-function pickerValue({ provider, subscription }: SubscriptionChoice): string {
-  return `${provider}:${subscription === null ? DEFAULT_LOGIN : subscription}`;
-}
-
 /**
- * The chat's subscription, changeable between turns: every agent CLI's
- * default login and every subscription, grouped by provider. Choosing a
- * subscription or default login of the other provider moves the chat to
- * that provider's agent CLI.
+ * The agent CLI and subscription the chat's next turns run on: every agent
+ * CLI's default login and every subscription, grouped by provider.
+ * Choosing one of another provider moves the chat to that provider's agent
+ * CLI. `current` is `null` while a new chat's repository default is
+ * unknown.
  */
-function subscriptionPicker(view: ChatView, subscriptions: SubscriptionOverview[]): HTMLElement {
-  const current = AGENT_CLI_PROVIDERS[view.agentCli];
-  const select = el("select", "subscription-picker");
-  select.title = "The subscription and agent CLI the chat's next turns use";
-  select.setAttribute("aria-label", "Subscription");
-  const choices = new Map<string, SubscriptionChoice>();
+function agentPicker(
+  current: StartOn | null,
+  subscriptions: SubscriptionOverview[],
+  disabled: boolean,
+  choose: (choice: StartOn) => Promise<void>,
+): HTMLElement {
+  const isCurrent = (choice: StartOn): boolean =>
+    choice.provider === current?.provider && choice.subscription === current.subscription;
+  let chosenName: string | null = null;
+  const sections: MenuSection[] = [];
   for (const agentCli of Object.keys(AGENT_CLI_PROVIDERS) as AgentCli[]) {
     const provider = AGENT_CLI_PROVIDERS[agentCli];
-    const group = document.createElement("optgroup");
-    group.label = `${PROVIDER_NAMES[provider]} · ${AGENT_CLI_NAMES[agentCli]}`;
-    const add = (label: string, subscription: SubscriptionId | null): void => {
+    const section: MenuSection = { heading: `${AGENT_CLI_NAMES[agentCli]} · ${PROVIDER_NAMES[provider]}`, items: [] };
+    const add = (label: string, description: string, subscription: SubscriptionId | null): void => {
       const choice = { provider, subscription };
-      const value = pickerValue(choice);
-      choices.set(value, choice);
-      group.append(new Option(label, value));
+      if (isCurrent(choice)) chosenName = label;
+      section.items.push({
+        label,
+        description,
+        selected: isCurrent(choice),
+        onSelect: () => void act(() => choose(choice)),
+      });
     };
-    add(`${AGENT_CLI_NAMES[agentCli]} default login`, null);
+    add("Default login", `What ${AGENT_CLI_NAMES[agentCli]} is signed in with by itself.`, null);
     for (const subscription of subscriptions.filter((overview) => overview.provider === provider)) {
-      add(subscription.name, subscription.subscription);
+      add(
+        subscription.name,
+        subscription.kind === "login" ? "Subscription with a login of its own." : "Subscription with an API key.",
+        subscription.subscription,
+      );
     }
     if (
-      provider === current &&
-      view.subscription !== null &&
-      !subscriptions.some((overview) => overview.subscription === view.subscription)
+      current !== null &&
+      provider === current.provider &&
+      current.subscription !== null &&
+      !subscriptions.some((overview) => overview.subscription === current.subscription)
     ) {
-      add("Removed subscription", view.subscription);
+      add("Removed subscription", "It no longer exists; choose another.", current.subscription);
     }
-    select.append(group);
+    sections.push(section);
   }
-  select.value = pickerValue({ provider: current, subscription: view.subscription });
-  // A turn that waits for an answer still runs.
-  select.disabled = view.status === "working" || view.openRequests.length > 0;
-  select.addEventListener("change", () =>
-    act(async () => {
-      const choice = choices.get(select.value);
-      if (selectedChat === null || choice === undefined) return;
-      try {
-        await service.changeSubscription(selectedChat, choice.provider, choice.subscription);
-      } finally {
-        await refresh();
-      }
-    }),
+  sections.push({
+    items: [
+      {
+        label: "Manage subscriptions…",
+        icon: "key",
+        onSelect: () => byId("open-subscriptions").click(),
+      },
+    ],
+  });
+  const agentCli = (Object.keys(AGENT_CLI_PROVIDERS) as AgentCli[]).find(
+    (candidate) => AGENT_CLI_PROVIDERS[candidate] === current?.provider,
   );
-  const item = el("label", "composer-option");
-  item.append(icon("key"), select);
-  return item;
+  return menuButton({
+    key: "agent",
+    name: "Agent CLI and subscription",
+    hint:
+      current === null
+        ? "changes once the chat has started"
+        : disabled
+          ? "changes between turns"
+          : "what the chat's next turns run on",
+    icon: "agent",
+    label: agentCli === undefined ? "Repository default" : AGENT_CLI_NAMES[agentCli],
+    detail: chosenName ?? undefined,
+    disabled,
+    sections,
+    className: "agent-picker",
+  });
 }
 
 function renderSubscriptions(subscriptions: SubscriptionOverview[]): void {
@@ -1570,13 +1880,17 @@ function formatDuration(seconds: number): string {
 
 async function send(): Promise<void> {
   const text = messageInput.value.trim();
-  if (selectedChat === null || text === "") return;
-  const chat = selectedChat;
+  const startIn = selected.type === "new_chat" ? newChatRepository : null;
+  const open = selectedChat();
+  if (text === "" || (open === null && startIn === null)) return;
   messageInput.disabled = true;
   sendButton.disabled = true;
   try {
     await act(async () => {
-      const waitingFor = selectedOpenRequests[0];
+      // The new chat starts with its first message.
+      const chat = open ?? (startIn === null ? null : await startNewChat(startIn));
+      if (chat === null) return;
+      const waitingFor = open === null ? undefined : selectedOpenRequests[0];
       // A reply to a waiting chat declines its oldest request with the
       // text as feedback. Otherwise the message is sent at once when no
       // turn runs, or waits for the turn, or the worktree's setup script,
@@ -1615,8 +1929,8 @@ new ResizeObserver(placeTranscript).observe(transcript);
 todoForm.addEventListener("submit", (event) => {
   event.preventDefault();
   const text = todoInput.value.trim();
-  if (selectedChat === null || text === "") return;
-  const chat = selectedChat;
+  const chat = selectedChat();
+  if (chat === null || text === "") return;
   void act(async () => {
     await service.addTodo(chat, text);
     todoInput.value = "";
@@ -1626,24 +1940,34 @@ todoForm.addEventListener("submit", (event) => {
 
 interruptButton.addEventListener("click", () =>
   act(async () => {
-    if (selectedChat === null) return;
-    await service.interruptTurn(selectedChat);
+    const chat = selectedChat();
+    if (chat === null) return;
+    await service.interruptTurn(chat);
     await refresh();
   }),
 );
 
-byId("add-repository").prepend(icon("folderPlus"));
+byId("new-chat").prepend(icon("compose"));
+byId("add-repository").append(icon("folderPlus"));
 byId("open-subscriptions").prepend(icon("key"));
-byId("open-host-accounts").prepend(icon("branch"));
+byId("open-host-accounts").prepend(icon("cloud"));
+sendButton.append(icon("arrowUp"));
+interruptButton.append(icon("stop"));
 
-byId("add-repository").addEventListener("click", () =>
-  act(async () => {
-    const path = await service.pickFolder();
-    if (path === null) return;
-    await service.addRepository(path);
-    await refresh();
-  }),
-);
+const onMac = navigator.platform.startsWith("Mac");
+byId("new-chat-shortcut").textContent = onMac ? "⌘N" : "Ctrl+N";
+
+byId("new-chat").addEventListener("click", () => act(() => openNewChat(null)));
+byId("add-repository").addEventListener("click", () => act(addRepository));
+
+document.addEventListener("keydown", (event) => {
+  const modifier = onMac ? event.metaKey : event.ctrlKey;
+  if (!modifier || event.shiftKey || event.altKey || event.key.toLowerCase() !== "n") return;
+  // A dialog is modal: its fields keep the keyboard.
+  if (document.querySelector("dialog[open]") !== null) return;
+  event.preventDefault();
+  void act(() => openNewChat(null));
+});
 
 /** Grows the message field with its text, up to the height CSS allows. */
 function fitMessageInput(): void {

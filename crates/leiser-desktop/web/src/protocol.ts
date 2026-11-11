@@ -22,9 +22,23 @@ export type PermissionMode = "supervised" | "auto_accept_edits" | "auto" | "full
 export type QueueReason = "requested" | "steer_unsupported" | "setting_up";
 export type RepositoryScript = "setup" | "done";
 
+/** What the developer chose for a new chat instead of its repository's defaults. */
+export interface ChatSettings {
+  /** The provider whose agent CLI the chat starts on, and its subscription there. */
+  start_on?: StartOn | null;
+  permission_mode?: PermissionMode | null;
+}
+
+/** A provider's subscription, or its agent CLI's default login (`null`). */
+export interface StartOn {
+  provider: Provider;
+  subscription: SubscriptionId | null;
+}
+
 export type Command =
   | { type: "add_repository"; path: string }
-  | { type: "start_chat"; repository: RepositoryId; checkout?: Checkout }
+  | { type: "start_chat"; repository: RepositoryId; checkout?: Checkout; settings?: ChatSettings }
+  | { type: "read_chat_defaults"; repository: RepositoryId }
   | { type: "send_message"; chat: ChatId; text: string }
   | { type: "change_agent_cli"; chat: ChatId; agent_cli: AgentCli }
   | { type: "queue_message"; chat: ChatId; text: string }
@@ -128,6 +142,13 @@ export type DiffLine =
 export type Response =
   | { type: "repository_added"; repository: RepositoryId }
   | { type: "chat_started"; chat: ChatId }
+  | {
+      type: "chat_defaults";
+      agent_cli: AgentCli;
+      permission_mode: PermissionMode;
+      /** The default subscription of `agent_cli`'s provider; `null`: its default login. */
+      subscription: SubscriptionId | null;
+    }
   | { type: "message_sent" }
   | { type: "message_queued"; reason: QueueReason }
   | { type: "message_steered" }
