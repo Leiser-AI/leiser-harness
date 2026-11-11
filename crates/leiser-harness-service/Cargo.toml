@@ -15,6 +15,7 @@ leiser-service = { version = "0.1.0", path = "../leiser-service" }
 # Chats can run on the testkit's fake agent CLI to try the app without a
 # subscription.
 leiser-testkit = { version = "0.1.0", path = "../leiser-testkit" }
+serde_json = "1.0.154"
 thiserror = "2.0.21"
 tokio = { version = "1.54.1", features = ["rt", "time", "net"] }
 tracing = { version = "0.1.44", default-features = false, features = ["std"] }

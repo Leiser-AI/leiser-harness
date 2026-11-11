@@ -19,6 +19,8 @@ import type {
   Response,
   ServiceConnection,
   ServiceEvent,
+  Todo,
+  TodoId,
   TranscriptEntry,
   UnreadableCliExtensionFile,
 } from "./protocol";
@@ -68,6 +70,10 @@ function describe(error: CommandError): string {
       return `${AGENT_CLI_NAMES[error.agent_cli]} is not set up in the harness service.`;
     case "agent_cli":
       return `The agent CLI failed: ${error.reason}`;
+    case "empty_todo":
+      return "A todo needs a text.";
+    case "unknown_todo":
+      return `Todo ${error.todo} no longer exists.`;
     case "storage":
       return `The harness service could not store the chat: ${error.reason}`;
     case "not_a_cli_extension_file":
@@ -160,6 +166,26 @@ export async function serviceUpdateWaiting(): Promise<boolean> {
 /** The app's connection to the harness service right now. */
 export function serviceConnection(): Promise<ServiceConnection> {
   return invoke<ServiceConnection>("service_connection");
+}
+
+export async function listTodos(chat: ChatId): Promise<Todo[]> {
+  const response = await execute({ type: "list_todos", chat });
+  return response.type === "todos" ? response.todos : unexpected(response);
+}
+
+export async function addTodo(chat: ChatId, text: string): Promise<TodoId> {
+  const response = await execute({ type: "add_todo", chat, text });
+  return response.type === "todo_added" ? response.todo : unexpected(response);
+}
+
+export async function setTodoDone(chat: ChatId, todo: TodoId, done: boolean): Promise<void> {
+  const response = await execute({ type: "set_todo_done", chat, todo, done });
+  if (response.type !== "todo_updated") unexpected(response);
+}
+
+export async function removeTodo(chat: ChatId, todo: TodoId): Promise<void> {
+  const response = await execute({ type: "remove_todo", chat, todo });
+  if (response.type !== "todo_removed") unexpected(response);
 }
 
 /** The CLI extensions each agent CLI loads from a repository. */

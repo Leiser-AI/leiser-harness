@@ -48,8 +48,11 @@ pub fn service_config(program: &ServiceProgram) -> Result<ServiceConfig, FakeAge
     })
 }
 
-/// A driver that answers every message with a tool call, its result and
-/// the message itself. Its agent sessions survive a service update.
+/// A driver that answers every message with a tool call, its result, the
+/// message itself and a todo it adds through the harness MCP server. In a
+/// repository without agent access to the todo list, the harness MCP
+/// server refuses the todo, and the answer says so. Its agent sessions
+/// survive a service update.
 fn fake_driver(program: &Path, state: &Path) -> io::Result<FakeDriver> {
     std::fs::create_dir_all(state)?;
     let gate = state.join(FAKE_TURN_GATE);
@@ -72,6 +75,10 @@ fn fake_driver(program: &Path, state: &Path) -> io::Result<FakeDriver> {
         },
         Step::message("Fake agent CLI here. You wrote:"),
         Step::EchoUserMessage,
+        Step::CallHarnessTool {
+            name: "add_todo".to_owned(),
+            arguments: serde_json::json!({ "text": "Added by the fake agent CLI" }),
+        },
     ];
     let script = (0..FAKE_TURNS).fold(Script::new(), |script, _| script.turn(turn.clone()));
     FakeDriver::persistent(program, &script, state)

@@ -42,7 +42,9 @@ pkill -f leiser-harness-service
 ```
 
 To try the app without a subscription, run it on the testkit's fake agent
-CLI, which answers every message with a tool call, its result and an echo.
+CLI, which answers every message with a tool call, its result, an echo and
+a todo it adds through the harness MCP server (refused unless the
+repository's `.leiser/config.toml` has `[agent_access] todo_list = true`).
 Its chats are kept apart from real ones (data directory
 `fake-agent-cli/`). A fake turn waits after its tool call while the file
 `fake-agent-cli/fake-agent-cli-state/turn-gate` in the data directory is
