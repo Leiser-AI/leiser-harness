@@ -6,11 +6,13 @@
 //! network are needed.
 
 mod fake_driver;
+mod gate;
 mod repo;
 mod script;
 mod turn;
 
 pub use fake_driver::FakeDriver;
+pub use gate::Gate;
 pub use repo::TestRepo;
 pub use script::{FakeInput, Script, Step};
-pub use turn::{TurnError, collect_turn};
+pub use turn::{TurnError, collect_turn, next_event};

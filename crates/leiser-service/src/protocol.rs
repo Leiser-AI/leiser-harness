@@ -33,17 +33,53 @@ pub enum Command {
         checkout: Checkout,
     },
     /// Sends the developer's message to the chat's agent session, starting
-    /// the agent session if the chat has none yet.
+    /// the agent session if the chat has none yet. Fails while a turn runs;
+    /// queue or steer the message instead.
     SendMessage { chat: ChatId, text: String },
+    /// Sends the message when the running turn ends, as the next turn.
+    /// Queued messages are sent in order, one turn each. Without a running
+    /// turn the message is sent at once.
+    QueueMessage { chat: ChatId, text: String },
+    /// Delivers the message into the running turn when the agent CLI can
+    /// take it mid-turn, and queues it otherwise. Without a running turn
+    /// the message is sent at once.
+    SteerMessage { chat: ChatId, text: String },
+    /// Asks the agent CLI to stop the running turn. The turn ends with
+    /// [`AgentEvent::TurnInterrupted`]; queued messages are sent after it.
+    InterruptTurn { chat: ChatId },
 }
 
 /// The answer to a successful [`Command`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Response {
-    RepositoryAdded { repository: RepositoryId },
-    ChatStarted { chat: ChatId },
+    RepositoryAdded {
+        repository: RepositoryId,
+    },
+    ChatStarted {
+        chat: ChatId,
+    },
+    /// The message was sent and starts a turn.
     MessageSent,
+    /// The message waits for the running turn to end.
+    MessageQueued {
+        reason: QueueReason,
+    },
+    /// The message was delivered into the running turn.
+    MessageSteered,
+    /// The agent CLI was asked to stop the running turn.
+    InterruptRequested,
+}
+
+/// Why a message was queued instead of being delivered now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QueueReason {
+    /// The developer queued it.
+    Requested,
+    /// The developer steered it, but the agent CLI cannot take a message
+    /// mid-turn.
+    SteerUnsupported,
 }
 
 /// Why a [`Command`] failed.
@@ -56,6 +92,10 @@ pub enum CommandError {
     UnknownRepository(RepositoryId),
     #[error("unknown chat {0:?}")]
     UnknownChat(ChatId),
+    #[error("a turn is running in chat {0:?}; queue or steer the message")]
+    TurnRunning(ChatId),
+    #[error("no turn is running in chat {0:?}")]
+    NoTurnRunning(ChatId),
     #[error("the agent CLI failed: {reason}")]
     AgentCli { reason: String },
     #[error("the harness service has stopped")]
@@ -68,6 +108,29 @@ pub enum CommandError {
 pub enum Event {
     /// An event from a chat's agent session.
     Agent { chat: ChatId, event: AgentEvent },
+    /// The developer's message waits for the running turn to end.
+    MessageQueued {
+        chat: ChatId,
+        text: String,
+        reason: QueueReason,
+    },
+    /// The developer's message was delivered into the running turn.
+    MessageSteered { chat: ChatId, text: String },
+    /// A queued message was sent and starts the next turn.
+    QueuedMessageSent { chat: ChatId, text: String },
+}
+
+impl Event {
+    /// The chat the event belongs to.
+    #[must_use]
+    pub fn chat(&self) -> ChatId {
+        match self {
+            Self::Agent { chat, .. }
+            | Self::MessageQueued { chat, .. }
+            | Self::MessageSteered { chat, .. }
+            | Self::QueuedMessageSent { chat, .. } => *chat,
+        }
+    }
 }
 
 /// An event from an agent session, the same for every agent CLI.
@@ -90,6 +153,8 @@ pub enum AgentEvent {
     },
     /// The agent finished its turn.
     TurnEnded,
+    /// The turn ended early because the developer interrupted it.
+    TurnInterrupted,
     /// The agent session ended; the agent CLI exited or broke its protocol.
     SessionEnded,
 }

@@ -10,6 +10,6 @@ mod service;
 
 pub use driver::{AgentSession, Driver, DriverError, SessionInput, SessionSpec};
 pub use protocol::{
-    AgentEvent, ChatId, Checkout, Command, CommandError, Event, RepositoryId, Response,
+    AgentEvent, ChatId, Checkout, Command, CommandError, Event, QueueReason, RepositoryId, Response,
 };
 pub use service::{ServiceConfig, ServiceHandle, start};
