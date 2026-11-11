@@ -18,6 +18,8 @@ use tokio::sync::mpsc;
 const SERVICE_PROGRAM_VARIABLE: &str = "LEISER_SERVICE_PROGRAM";
 /// When set, chats run on the `fake-agent-cli` program at this path.
 const FAKE_AGENT_CLI_VARIABLE: &str = "LEISER_FAKE_AGENT_CLI";
+/// Where the fake agent CLI's chats keep their data and worktrees.
+const FAKE_DIR: &str = "fake-agent-cli";
 /// The service program's name, next to the app's own program.
 const SERVICE_PROGRAM: &str = "leiser-harness-service";
 
@@ -101,19 +103,22 @@ enum ConnectionError {
     Timeout { data_dir: PathBuf },
 }
 
-/// The harness service program the app starts, and its data directory.
-/// With `LEISER_FAKE_AGENT_CLI` set, chats run on the fake agent CLI and
-/// keep their data apart from real chats.
-pub fn service_program(app_data_dir: &Path) -> io::Result<ServiceProgram> {
+/// The harness service program the app starts, its data directory and
+/// where it creates worktrees. With `LEISER_FAKE_AGENT_CLI` set, chats run
+/// on the fake agent CLI and keep their data and worktrees apart from real
+/// chats.
+pub fn service_program(app_data_dir: &Path, worktrees_dir: &Path) -> io::Result<ServiceProgram> {
     let program = if let Some(program) = env::var_os(SERVICE_PROGRAM_VARIABLE) {
         PathBuf::from(program)
     } else {
         env::current_exe()?.with_file_name(format!("{SERVICE_PROGRAM}{}", env::consts::EXE_SUFFIX))
     };
     Ok(match env::var_os(FAKE_AGENT_CLI_VARIABLE) {
-        Some(fake) => ServiceProgram::new(program, app_data_dir.join("fake-agent-cli"))
+        Some(fake) => ServiceProgram::new(program, app_data_dir.join(FAKE_DIR))
+            .with_worktrees_dir(worktrees_dir.join(FAKE_DIR))
             .with_fake_agent_cli(PathBuf::from(fake)),
-        None => ServiceProgram::new(program, app_data_dir.to_path_buf()),
+        None => ServiceProgram::new(program, app_data_dir.to_path_buf())
+            .with_worktrees_dir(worktrees_dir.to_path_buf()),
     })
 }
 

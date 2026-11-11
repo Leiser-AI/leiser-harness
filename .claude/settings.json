@@ -21,9 +21,7 @@
       "Bash(gh pr diff *)",
       "WebFetch(domain:docs.rs)",
       "WebFetch(domain:doc.rust-lang.org)",
-      "WebFetch(domain:crates.io)"
-    ],
-    "ask": [
+      "WebFetch(domain:crates.io)",
       "Bash(git push *)",
       "Bash(git push)",
       "Bash(gh pr create *)"

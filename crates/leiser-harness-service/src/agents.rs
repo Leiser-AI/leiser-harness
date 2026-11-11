@@ -27,22 +27,25 @@ pub struct FakeAgentCliError(#[from] io::Error);
 
 /// The harness service's configuration. Chats start on Claude Code and can
 /// change to Codex, or run on the fake agent CLI when the program says so.
+/// Their worktrees go where the program says, by default into the data
+/// directory.
 pub fn service_config(program: &ServiceProgram) -> Result<ServiceConfig, FakeAgentCliError> {
     let data_dir = program.data_dir().to_path_buf();
-    if let Some(fake) = program.fake_agent_cli() {
+    let config = if let Some(fake) = program.fake_agent_cli() {
         let driver = fake_driver(fake, &data_dir.join(FAKE_STATE_DIR))?;
-        return Ok(ServiceConfig::new(
+        ServiceConfig::new(AgentCli::ClaudeCode, Arc::new(driver), data_dir)
+    } else {
+        ServiceConfig::new(
             AgentCli::ClaudeCode,
-            Arc::new(driver),
+            Arc::new(ClaudeCodeDriver::installed()),
             data_dir,
-        ));
-    }
-    Ok(ServiceConfig::new(
-        AgentCli::ClaudeCode,
-        Arc::new(ClaudeCodeDriver::installed()),
-        data_dir,
-    )
-    .with_driver(AgentCli::Codex, Arc::new(CodexDriver::installed())))
+        )
+        .with_driver(AgentCli::Codex, Arc::new(CodexDriver::installed()))
+    };
+    Ok(match program.worktrees_dir() {
+        Some(worktrees) => config.with_worktrees_dir(worktrees.to_path_buf()),
+        None => config,
+    })
 }
 
 /// A driver that answers every message with a tool call, its result and

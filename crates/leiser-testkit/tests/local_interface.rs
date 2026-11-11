@@ -209,7 +209,7 @@ async fn the_app_learns_that_a_service_update_waits() -> TestResult {
     drop(interface);
     let _interface = leiser_service::serve(service.connect(), service.data_dir()).await?;
     let (app, _notifications) = LocalClient::connect(service.data_dir()).await?;
-    assert_eq!(status(&app, chat).await?, ChatStatus::Idle);
+    assert_eq!(status(&app, chat).await?, ChatStatus::WaitingForYou);
     Ok(())
 }
 

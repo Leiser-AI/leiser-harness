@@ -7,8 +7,8 @@ use std::path::Path;
 use std::time::Duration;
 
 use leiser_service::{
-    AgentCli, AgentEvent, ChatId, ChatStatus, Checkout, Command, Event, Response, ServiceHandle,
-    TranscriptEntry,
+    AgentCli, AgentEvent, ChatId, ChatStatus, Checkout, Command, Event, RepositoryScript, Response,
+    ServiceHandle, TranscriptEntry,
 };
 use leiser_testkit::{Gate, Script, Step, TestRepo, TestService, collect_turn};
 use tokio::sync::broadcast;
@@ -136,7 +136,7 @@ async fn a_service_update_waits_for_the_running_turn_to_end() -> TestResult {
     assert_eq!(
         read_chat(&app, chat).await?,
         (
-            ChatStatus::Idle,
+            ChatStatus::WaitingForYou,
             vec![
                 user("take your time"),
                 agent(message("done")),
@@ -157,7 +157,10 @@ async fn a_service_update_without_a_running_turn_is_applied_at_once() -> TestRes
 
     let app = service.connect();
     assert!(!update_waiting(&app).await?);
-    assert_eq!(read_chat(&app, chat).await?, (ChatStatus::Idle, vec![]));
+    assert_eq!(
+        read_chat(&app, chat).await?,
+        (ChatStatus::WaitingForYou, vec![])
+    );
     Ok(())
 }
 
@@ -298,6 +301,129 @@ async fn a_message_sent_while_an_update_waits_still_starts_its_turn() -> TestRes
     gate.open()?;
     collect_turn(&mut events, slow).await?;
     collect_turn(&mut other_events, other).await?;
+    tokio::time::timeout(TIMEOUT, update).await???;
+    Ok(())
+}
+
+/// Waits for the chat's agent event.
+async fn agent_event(
+    events: &mut broadcast::Receiver<Event>,
+    chat: ChatId,
+    expected: &AgentEvent,
+) -> TestResult {
+    tokio::time::timeout(TIMEOUT, async {
+        loop {
+            if let Event::Agent { chat: from, event } = events.recv().await?
+                && from == chat
+                && &event == expected
+            {
+                return Ok(());
+            }
+        }
+    })
+    .await?
+}
+
+#[tokio::test]
+async fn a_service_update_waits_while_a_turn_waits_for_an_approval() -> TestResult {
+    let gate = Gate::new()?;
+    let approval = AgentEvent::ApprovalRequested {
+        request: "1".to_owned(),
+        description: "Run `cargo test`".to_owned(),
+    };
+    let script = Script::new().turn([
+        Step::Emit {
+            event: approval.clone(),
+        },
+        gate.step(),
+        Step::message("approved"),
+    ]);
+    let service = start_service(&script)?;
+    let repo = TestRepo::new()?;
+    let app = service.connect();
+    let chat = start_chat(&app, &repo).await?;
+    let mut events = app.subscribe();
+    send(&app, chat, "may I?").await?;
+    agent_event(&mut events, chat, &approval).await?;
+
+    let update = tokio::spawn(service.update());
+    update_announced(&mut events).await?;
+
+    // Waiting for the developer, but the turn still runs: stopping now
+    // would lose the approval request.
+    assert_eq!(read_chat(&app, chat).await?.0, ChatStatus::WaitingForYou);
+    assert!(update_waiting(&app).await?);
+    assert!(!update.is_finished());
+    gate.open()?;
+    assert_eq!(
+        collect_turn(&mut events, chat).await?,
+        vec![message("approved"), AgentEvent::TurnEnded]
+    );
+    tokio::time::timeout(TIMEOUT, update).await???;
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_service_update_waits_for_the_setup_script_of_a_new_worktree() -> TestResult {
+    let gate = Gate::new()?;
+    let Step::WaitForGate { gate: gate_file } = gate.step() else {
+        return Err("a gate waits at a file".into());
+    };
+    let service = start_service(&Script::new())?;
+    let repo = TestRepo::with_remote()?;
+    let config = repo.path().join(".leiser");
+    std::fs::create_dir_all(&config)?;
+    std::fs::write(
+        config.join("config.toml"),
+        format!(
+            "[worktree]\nsetup_script = '''\nwhile [ ! -e \"{}\" ]; do sleep 0.01; done\n\
+             echo installed > setup.txt\n'''\n",
+            gate_file.display()
+        ),
+    )?;
+    let app = service.connect();
+    let Response::RepositoryAdded { repository } = app
+        .execute(Command::AddRepository {
+            path: repo.path().to_path_buf(),
+        })
+        .await?
+    else {
+        return Err("expected RepositoryAdded".into());
+    };
+    let mut events = app.subscribe();
+    let Response::ChatStarted { chat } = app
+        .execute(Command::StartChat {
+            repository,
+            checkout: Checkout::NewWorktree,
+        })
+        .await?
+    else {
+        return Err("expected ChatStarted".into());
+    };
+
+    let update = tokio::spawn(service.update());
+    update_announced(&mut events).await?;
+
+    assert_eq!(read_chat(&app, chat).await?.0, ChatStatus::Working);
+    assert!(update_waiting(&app).await?);
+    assert!(!update.is_finished());
+    gate.open()?;
+    let exit_code = tokio::time::timeout(TIMEOUT, async {
+        loop {
+            if let Event::ScriptFinished {
+                chat: from,
+                script: RepositoryScript::Setup,
+                exit_code,
+                ..
+            } = events.recv().await?
+                && from == chat
+            {
+                return Ok::<_, Box<dyn Error>>(exit_code);
+            }
+        }
+    })
+    .await??;
+    assert_eq!(exit_code, Some(0));
     tokio::time::timeout(TIMEOUT, update).await???;
     Ok(())
 }

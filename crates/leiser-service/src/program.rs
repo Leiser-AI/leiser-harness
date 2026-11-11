@@ -17,13 +17,17 @@ pub const SERVICE_LOG_FILE: &str = "service.log";
 pub struct ServiceProgram {
     program: PathBuf,
     data_dir: PathBuf,
+    worktrees_dir: Option<PathBuf>,
     fake_agent_cli: Option<PathBuf>,
 }
 
 /// Why the service program's arguments do not parse.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum ArgsError {
-    #[error("usage: leiser-harness-service --data-dir <dir> [--fake-agent-cli <program>]")]
+    #[error(
+        "usage: leiser-harness-service --data-dir <dir> [--worktrees-dir <dir>] \
+         [--fake-agent-cli <program>]"
+    )]
     Usage,
 }
 
@@ -35,8 +39,16 @@ impl ServiceProgram {
         Self {
             program,
             data_dir,
+            worktrees_dir: None,
             fake_agent_cli: None,
         }
+    }
+
+    /// Creates the chats' worktrees in `dir` instead of the data directory.
+    #[must_use]
+    pub fn with_worktrees_dir(mut self, dir: PathBuf) -> Self {
+        self.worktrees_dir = Some(dir);
+        self
     }
 
     /// Runs every chat on the testkit's fake agent CLI at `program`.
@@ -58,11 +70,13 @@ impl ServiceProgram {
     ) -> Result<Self, ArgsError> {
         let mut args = args.into_iter();
         let mut data_dir = None;
+        let mut worktrees_dir = None;
         let mut fake_agent_cli = None;
         while let Some(flag) = args.next() {
             let value = args.next().map(PathBuf::from).ok_or(ArgsError::Usage)?;
             match flag.to_str() {
                 Some("--data-dir") => data_dir = Some(value),
+                Some("--worktrees-dir") => worktrees_dir = Some(value),
                 Some("--fake-agent-cli") => fake_agent_cli = Some(value),
                 _ => return Err(ArgsError::Usage),
             }
@@ -70,6 +84,7 @@ impl ServiceProgram {
         Ok(Self {
             program,
             data_dir: data_dir.ok_or(ArgsError::Usage)?,
+            worktrees_dir,
             fake_agent_cli,
         })
     }
@@ -85,12 +100,20 @@ impl ServiceProgram {
     }
 
     #[must_use]
+    pub fn worktrees_dir(&self) -> Option<&Path> {
+        self.worktrees_dir.as_deref()
+    }
+
+    #[must_use]
     pub fn fake_agent_cli(&self) -> Option<&Path> {
         self.fake_agent_cli.as_deref()
     }
 
     fn args(&self) -> Vec<OsString> {
         let mut args = vec!["--data-dir".into(), self.data_dir.clone().into()];
+        if let Some(worktrees) = &self.worktrees_dir {
+            args.extend(["--worktrees-dir".into(), worktrees.clone().into()]);
+        }
         if let Some(fake) = &self.fake_agent_cli {
             args.extend(["--fake-agent-cli".into(), fake.clone().into()]);
         }
@@ -147,6 +170,7 @@ mod tests {
     #[test]
     fn launch_arguments_parse_back_to_the_same_program() {
         let program = ServiceProgram::new("/bin/service".into(), "/data".into())
+            .with_worktrees_dir("/worktrees".into())
             .with_fake_agent_cli("/bin/fake".into());
 
         let parsed = ServiceProgram::parse(PathBuf::from("/bin/service"), program.args());

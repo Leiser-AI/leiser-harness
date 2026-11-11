@@ -23,9 +23,12 @@ mod harness_mcp;
 mod local_interface;
 mod program;
 mod protocol;
+mod repo_config;
+mod script;
 mod service;
 mod store;
 mod version;
+mod worktree;
 
 pub use claude_code::ClaudeCodeDriver;
 pub use codex::CodexDriver;
@@ -41,7 +44,8 @@ pub use local_interface::{
 pub use program::{ArgsError, SERVICE_LOG_FILE, ServiceProgram};
 pub use protocol::{
     AgentCli, AgentEvent, Branch, ChatId, ChatOverview, ChatStatus, Checkout, Command,
-    CommandError, Event, QueueReason, RepositoryId, RepositoryOverview, Response, TranscriptEntry,
+    CommandError, Event, QueueReason, RepositoryId, RepositoryOverview, RepositoryScript, Response,
+    TranscriptEntry,
 };
 pub use service::{Service, ServiceConfig, ServiceHandle, StartError, start};
 pub use store::StorageError;

@@ -8,7 +8,11 @@ import type {
   Branch,
   ChatId,
   ChatOverview,
+  ChatStatus,
+  Checkout,
+  RepositoryId,
   RepositoryOverview,
+  RepositoryScript,
   ServiceConnection,
   TranscriptEntry,
 } from "./protocol";
@@ -88,8 +92,30 @@ async function refresh(): Promise<void> {
   if (read !== readCount) return;
   renderServiceNotice(updateWaiting);
   renderSidebar(repositories, chats);
-  const repository = chats.find((overview) => overview.chat === chat)?.repository;
-  renderChat(view, repositories.find((overview) => overview.repository === repository) ?? null);
+  const overview = chats.find((candidate) => candidate.chat === chat) ?? null;
+  renderChat(
+    view,
+    overview,
+    repositories.find((candidate) => candidate.repository === overview?.repository) ?? null,
+  );
+}
+
+const STATUS_LABELS: Record<ChatStatus, string> = {
+  working: "working",
+  waiting_for_you: "waiting for you",
+  done: "done",
+};
+
+const SCRIPT_NAMES: Record<RepositoryScript, string> = {
+  setup: "Setup script",
+  done: "Done script",
+};
+
+/** Starts a chat, selects it and puts the cursor in the composer. */
+async function startAndSelect(repository: RepositoryId, checkout?: Checkout): Promise<void> {
+  selectedChat = await service.startChat(repository, checkout);
+  await refresh();
+  messageInput.focus();
 }
 
 function renderServiceNotice(updateWaiting: boolean): void {
@@ -125,25 +151,29 @@ function renderSidebar(repositories: RepositoryOverview[], chats: ChatOverview[]
     name.title = repository.path;
     const newChat = el("button", "new-chat", "New chat");
     newChat.type = "button";
-    newChat.title = `Start a chat in ${repository.name}`;
-    newChat.addEventListener("click", () =>
-      act(async () => {
-        selectedChat = await service.startChat(repository.repository);
-        await refresh();
-        messageInput.focus();
-      }),
+    newChat.title = `Start a chat in a new worktree of ${repository.name}`;
+    newChat.addEventListener("click", () => act(() => startAndSelect(repository.repository)));
+    const inMain = el("button", "new-chat secondary", "Main");
+    inMain.type = "button";
+    inMain.title = `Start a chat in the main checkout of ${repository.name}`;
+    inMain.addEventListener("click", () =>
+      act(() => startAndSelect(repository.repository, { type: "main" })),
     );
-    header.append(name, newChat);
+    const actions = el("span", "repository-actions");
+    actions.append(newChat, inMain);
+    header.append(name, actions);
 
     const chatList = el("ul", "chat-list");
+    // The service lists waiting chats first, then working, then done ones.
     for (const chat of chats.filter((overview) => overview.repository === repository.repository)) {
       const chatItem = el("li");
-      const button = el("button", "chat-link");
+      const button = el("button", `chat-link ${chat.status}`);
       button.type = "button";
-      button.append(el("span", "chat-title", chat.title ?? "New chat"));
-      if (chat.status === "working") {
-        button.append(el("span", "chat-status", "working"));
-      }
+      button.title = chat.worktree === null ? "Main checkout" : `Worktree: ${chat.worktree}`;
+      button.append(
+        el("span", "chat-title", chat.title ?? "New chat"),
+        el("span", `chat-status ${chat.status}`, STATUS_LABELS[chat.status]),
+      );
       if (chat.chat === selectedChat) {
         button.classList.add("selected");
         button.setAttribute("aria-current", "true");
@@ -163,8 +193,12 @@ function renderSidebar(repositories: RepositoryOverview[], chats: ChatOverview[]
   repositoriesNav.replaceChildren(list);
 }
 
-function renderChat(view: ChatView | null, repository: RepositoryOverview | null): void {
-  if (view === null) {
+function renderChat(
+  view: ChatView | null,
+  overview: ChatOverview | null,
+  repository: RepositoryOverview | null,
+): void {
+  if (view === null || overview === null) {
     selectedWorking = false;
     topBar.replaceChildren(el("span", "muted", "No chat selected"));
     transcript.replaceChildren(el("li", "empty", "Select a chat or start a new one."));
@@ -174,6 +208,8 @@ function renderChat(view: ChatView | null, repository: RepositoryOverview | null
   topBar.replaceChildren(
     labelled("Repository", repository?.name ?? "unknown"),
     labelled("Branch", branchName(view.branch)),
+    labelled("Checkout", overview.worktree === null ? "main checkout" : "worktree"),
+    ...chatActions(overview),
   );
   const entries = view.transcript.map(renderEntry);
   if (entries.length === 0) {
@@ -186,6 +222,32 @@ function renderChat(view: ChatView | null, repository: RepositoryOverview | null
   sendButton.textContent = selectedWorking ? "Queue" : "Send";
   interruptButton.hidden = !selectedWorking;
   composer.hidden = false;
+}
+
+/** The top bar's buttons for the selected chat. */
+function chatActions(overview: ChatOverview): HTMLElement[] {
+  const actions: HTMLElement[] = [];
+  if (overview.worktree !== null) {
+    const sameWorktree = el("button", "top-bar-action", "New chat in this worktree");
+    sameWorktree.type = "button";
+    sameWorktree.title = overview.worktree;
+    sameWorktree.addEventListener("click", () =>
+      act(() => startAndSelect(overview.repository, { type: "worktree", chat: overview.chat })),
+    );
+    actions.push(sameWorktree);
+  }
+  if (overview.status === "waiting_for_you") {
+    const done = el("button", "top-bar-action", "Mark done");
+    done.type = "button";
+    done.addEventListener("click", () =>
+      act(async () => {
+        await service.markChatDone(overview.chat);
+        await refresh();
+      }),
+    );
+    actions.push(done);
+  }
+  return actions;
 }
 
 function labelled(label: string, value: string): HTMLElement {
@@ -206,12 +268,22 @@ function branchName(branch: Branch): string {
 }
 
 function renderEntry(entry: TranscriptEntry): HTMLElement {
-  if (entry.type === "user_message") {
-    const item = el("li", "entry user");
-    item.append(el("div", "entry-label", "You"), el("div", "entry-text", entry.text));
-    return item;
+  switch (entry.type) {
+    case "user_message": {
+      const item = el("li", "entry user");
+      item.append(el("div", "entry-label", "You"), el("div", "entry-text", entry.text));
+      return item;
+    }
+    case "agent":
+      return renderAgentEvent(entry.event, AGENT_CLI_NAMES[entry.agent_cli]);
+    case "script_finished": {
+      const exit = entry.exit_code === null ? "did not finish" : `exit ${entry.exit_code}`;
+      const item = el("li", "entry tool-result script");
+      if (entry.exit_code !== 0) item.classList.add("failed");
+      item.append(output(`${SCRIPT_NAMES[entry.script]} · ${exit}`, entry.output));
+      return item;
+    }
   }
-  return renderAgentEvent(entry.event, AGENT_CLI_NAMES[entry.agent_cli]);
 }
 
 function output(label: string, text: string): HTMLElement {
@@ -278,12 +350,9 @@ async function send(): Promise<void> {
   sendButton.disabled = true;
   try {
     await act(async () => {
-      // While a turn runs, a message waits for it to end.
-      if (selectedWorking) {
-        await service.queueMessage(chat, text);
-      } else {
-        await service.sendMessage(chat, text);
-      }
+      // Sent at once when no turn runs; otherwise it waits for the turn,
+      // or for the worktree's setup script, to end.
+      await service.queueMessage(chat, text);
       messageInput.value = "";
       await refresh();
     });

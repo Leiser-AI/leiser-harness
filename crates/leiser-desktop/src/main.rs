@@ -25,7 +25,10 @@ fn main() -> Result<(), tauri::Error> {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
-            let program = connection::service_program(&app.path().app_data_dir()?)?;
+            // Not in the app data directory: its path has a space on macOS,
+            // which some build tools in a worktree trip over.
+            let worktrees = app.path().home_dir()?.join(".leiser").join("worktrees");
+            let program = connection::service_program(&app.path().app_data_dir()?, &worktrees)?;
             let service = ServiceConnection::default();
             app.manage(service.clone());
             tauri::async_runtime::spawn(connection::keep_connected(
