@@ -72,6 +72,30 @@ impl std::fmt::Debug for ApiKey {
     }
 }
 
+/// What the developer types into a running login, such as the code Claude
+/// Code's login asks for. Kept out of `Debug` output like an [`ApiKey`].
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct LoginAnswer(String);
+
+impl LoginAnswer {
+    #[must_use]
+    pub fn new(text: impl Into<String>) -> Self {
+        Self(text.into())
+    }
+
+    #[must_use]
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for LoginAnswer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("LoginAnswer(<redacted>)")
+    }
+}
+
 /// How a new subscription signs in.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -189,6 +213,13 @@ pub enum Command {
     /// Runs the agent CLI's login of a login subscription again, for
     /// example after it expired. A login still running is stopped first.
     LogIn { subscription: SubscriptionId },
+    /// Types a line into the subscription's running login, such as the
+    /// code Claude Code's login asks for once the developer signed in in
+    /// the browser.
+    AnswerLogin {
+        subscription: SubscriptionId,
+        answer: LoginAnswer,
+    },
     /// Lists every registered subscription.
     ListSubscriptions,
     /// Changes the subscription that the chat's next turns on `provider`
@@ -251,6 +282,8 @@ pub enum Response {
     SubscriptionRemoved,
     /// The agent CLI's login runs; its output and end arrive as events.
     LoginStarted,
+    /// The answer reached the running login.
+    LoginAnswered,
     Subscriptions {
         subscriptions: Vec<SubscriptionOverview>,
     },
@@ -390,6 +423,8 @@ pub enum CommandError {
     NotALoginSubscription { subscription: SubscriptionId },
     #[error("could not set up the subscription: {reason}")]
     SubscriptionSetup { reason: String },
+    #[error("no login runs for subscription {subscription:?}")]
+    NoLoginRunning { subscription: SubscriptionId },
     #[error("the OS keychain failed: {reason}")]
     Keychain { reason: String },
     #[error("the repository's config is invalid: {reason}")]

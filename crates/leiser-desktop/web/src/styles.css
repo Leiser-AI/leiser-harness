@@ -43,6 +43,11 @@ body {
   color: var(--text);
 }
 
+/* Elements styled with `display` stay hidden while `hidden` is set. */
+[hidden] {
+  display: none !important;
+}
+
 button {
   font: inherit;
   cursor: pointer;
@@ -135,7 +140,8 @@ button:disabled {
 .top-bar {
   grid-area: top;
   display: flex;
-  gap: 24px;
+  flex-wrap: wrap;
+  gap: 8px 24px;
   align-items: center;
   padding: 10px 16px;
   border-bottom: 1px solid var(--border);
@@ -146,6 +152,7 @@ button:disabled {
   display: flex;
   gap: 6px;
   align-items: baseline;
+  white-space: nowrap;
 }
 
 .top-bar-label {
@@ -393,4 +400,14 @@ button.danger {
 .dialog-note {
   font-size: 12px;
   margin-top: 16px;
+}
+
+.login-answer {
+  display: flex;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.login-answer input {
+  flex: 1;
 }

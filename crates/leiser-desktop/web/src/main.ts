@@ -40,10 +40,14 @@ const newKeyLabel = byId("new-key-label");
 const newKey = byId<HTMLInputElement>("new-key");
 const loginSection = byId("login-section");
 const loginOutput = byId("login-output");
+const loginAnswer = byId<HTMLFormElement>("login-answer");
+const loginAnswerText = byId<HTMLInputElement>("login-answer-text");
 
 // The lines of logins run since the app started; the service does not
 // keep them.
 const loginLines: string[] = [];
+// The subscription whose login printed last; the answer goes to it.
+let answeringLogin: number | null = null;
 
 function byId<T extends HTMLElement = HTMLElement>(id: string): T {
   const element = document.getElementById(id);
@@ -303,10 +307,16 @@ async function actInDialog(action: () => Promise<void>): Promise<void> {
 function showLogin(event: ServiceEvent): void {
   if (event.type === "login_output") {
     loginLines.push(event.text);
+    answeringLogin = event.subscription;
+    loginAnswer.hidden = false;
   } else if (event.type === "login_finished") {
     loginLines.push(
       event.outcome.type === "signed_in" ? "Signed in." : `Login failed: ${event.outcome.reason}`,
     );
+    if (answeringLogin === event.subscription) {
+      answeringLogin = null;
+      loginAnswer.hidden = true;
+    }
   } else {
     return;
   }
@@ -451,6 +461,15 @@ byId("open-subscriptions").addEventListener("click", () =>
 );
 
 byId("close-subscriptions").addEventListener("click", () => subscriptionsDialog.close());
+
+loginAnswer.addEventListener("submit", (event) => {
+  event.preventDefault();
+  void actInDialog(async () => {
+    if (answeringLogin === null || loginAnswerText.value.trim() === "") return;
+    await service.answerLogin(answeringLogin, loginAnswerText.value);
+    loginAnswerText.value = "";
+  });
+});
 
 newKind.addEventListener("change", () => {
   newKeyLabel.hidden = newKind.value !== "api_key";

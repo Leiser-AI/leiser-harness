@@ -21,10 +21,12 @@
 //! `fake-agent-cli --version` prints [`FAKE_VERSION`], older than any agent
 //! CLI the harness supports, for tests of the minimum version check.
 //!
-//! `fake-agent-cli login [--fail]` signs in like an agent CLI's login: it
-//! prints where to sign in and writes [`FAKE_LOGIN_FILE`] into its config
-//! directory, `CLAUDE_CONFIG_DIR` or `CODEX_HOME`, naming the variable it
-//! found. With `--fail` it exits with an error instead.
+//! `fake-agent-cli login [--fail] [--ask-for-code]` signs in like an agent
+//! CLI's login: it prints where to sign in and writes [`FAKE_LOGIN_FILE`]
+//! into its config directory, `CLAUDE_CONFIG_DIR` or `CODEX_HOME`, naming
+//! the variable it found. With `--ask-for-code` it first prompts for a code
+//! without a line end, as Claude Code does, and reads it from standard
+//! input. With `--fail` it exits with an error instead.
 
 use std::ffi::OsString;
 use std::io::{self, BufRead, Write};
@@ -192,10 +194,10 @@ fn run() -> Result<(), FakeError> {
         return Ok(());
     }
     if std::env::args_os().nth(1).is_some_and(|arg| arg == "login") {
+        let flags: Vec<_> = std::env::args_os().skip(2).collect();
         return login(
-            std::env::args_os()
-                .nth(2)
-                .is_some_and(|arg| arg == "--fail"),
+            flags.iter().any(|flag| flag == "--fail"),
+            flags.iter().any(|flag| flag == "--ask-for-code"),
         );
     }
     let args = parse_args()?;
@@ -238,17 +240,28 @@ fn run() -> Result<(), FakeError> {
     Ok(())
 }
 
-fn login(fail: bool) -> Result<(), FakeError> {
-    writeln!(io::stdout(), "Open https://login.invalid/fake to sign in.")?;
+fn login(fail: bool, ask_for_code: bool) -> Result<(), FakeError> {
+    let mut out = io::stdout().lock();
+    writeln!(out, "Open https://login.invalid/fake to sign in.")?;
     if fail {
         return Err(FakeError::LoginFailed);
     }
+    let code = if ask_for_code {
+        write!(out, "Paste code here if prompted > ")?;
+        out.flush()?;
+        let mut code = String::new();
+        io::stdin().lock().read_line(&mut code)?;
+        Some(code.trim().to_owned())
+    } else {
+        None
+    };
     let (variable, home) = [CLAUDE_CONFIG_DIR, CODEX_HOME]
         .into_iter()
         .find_map(|variable| std::env::var_os(variable).map(|home| (variable, home)))
         .ok_or(FakeError::NoConfigDirectory)?;
     let login = FakeLogin {
         variable: variable.to_owned(),
+        code,
     };
     std::fs::write(
         Path::new(&home).join(FAKE_LOGIN_FILE),

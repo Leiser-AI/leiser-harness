@@ -9,8 +9,8 @@ use std::time::Duration;
 
 use leiser_service::{
     AgentCli, AgentEvent, ApiKey, CLAUDE_CONFIG_DIR, CODEX_HOME, ChatId, Checkout, Command,
-    CommandError, Event, LoginOutcome, Provider, Response, ServiceHandle, SignIn, SubscriptionId,
-    SubscriptionKind, SubscriptionOverview,
+    CommandError, Event, LoginAnswer, LoginOutcome, Provider, Response, ServiceHandle, SignIn,
+    SubscriptionId, SubscriptionKind, SubscriptionOverview,
 };
 use leiser_testkit::{
     FAKE_LOGIN_FILE, FakeDriver, FakeLogin, Script, Step, TestRepo, TestService, UNSET,
@@ -337,6 +337,59 @@ async fn adding_a_login_subscription_runs_the_login_in_its_own_claude_config_dir
         let login: FakeLogin = serde_json::from_slice(&std::fs::read(home.join(FAKE_LOGIN_FILE))?)?;
         assert_eq!(login.variable, CLAUDE_CONFIG_DIR);
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_login_that_asks_for_a_code_gets_the_developers_answer() -> TestResult {
+    let harness = claude_service(&Script::new().login_asking_for_code())?;
+    let service = harness.connect();
+    let mut events = service.subscribe();
+    let subscription = add(&service, Provider::Anthropic, "Private", SignIn::Login).await?;
+    // The prompt has no line end, yet the developer must see it.
+    let mut seen: Vec<String> = Vec::new();
+    while !seen.iter().any(|line| line.starts_with("Paste code here")) {
+        match tokio::time::timeout(LOGIN_TIMEOUT, events.recv()).await?? {
+            Event::LoginOutput { text, .. } => seen.push(text),
+            Event::LoginFinished { outcome, .. } => {
+                return Err(format!("the login ended before it asked: {outcome:?}").into());
+            }
+            _ => {}
+        }
+    }
+
+    let response = service
+        .execute(Command::AnswerLogin {
+            subscription,
+            answer: LoginAnswer::new("code-123#state"),
+        })
+        .await?;
+
+    assert_eq!(response, Response::LoginAnswered);
+    assert_eq!(
+        login(&mut events, subscription).await?.1,
+        LoginOutcome::SignedIn
+    );
+    let home = home(&service, subscription).await?;
+    let login: FakeLogin = serde_json::from_slice(&std::fs::read(home.join(FAKE_LOGIN_FILE))?)?;
+    assert_eq!(login.code.as_deref(), Some("code-123#state"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn answering_without_a_running_login_fails() -> TestResult {
+    let harness = claude_service(&Script::new())?;
+    let service = harness.connect();
+    let subscription = add_signed_in(&service, Provider::Anthropic, "Private").await?;
+
+    let result = service
+        .execute(Command::AnswerLogin {
+            subscription,
+            answer: LoginAnswer::new("code"),
+        })
+        .await;
+
+    assert_eq!(result, Err(CommandError::NoLoginRunning { subscription }));
     Ok(())
 }
 

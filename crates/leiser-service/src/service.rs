@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -18,9 +19,9 @@ use crate::store::{
 use crate::subscriptions::{SubscriptionError, Subscriptions};
 use crate::{
     AgentCli, AgentEvent, AgentSessionId, ChatId, ChatOverview, ChatStatus, Checkout, Command,
-    CommandError, Driver, Event, Keychain, LoginOutcome, LoginProcess, OsKeychain, Provider,
-    QueueReason, RepositoryId, RepositoryOverview, Response, SessionInput, SessionSpec, SignIn,
-    SubscriptionId, SubscriptionKind, TranscriptEntry,
+    CommandError, Driver, Event, Keychain, LoginAnswer, LoginOutcome, LoginProcess, OsKeychain,
+    Provider, QueueReason, RepositoryId, RepositoryOverview, Response, SessionInput, SessionSpec,
+    SignIn, SubscriptionId, SubscriptionKind, TranscriptEntry,
 };
 
 /// Commands waiting for the command loop. Small, so callers feel back
@@ -279,11 +280,22 @@ enum SessionMessage {
 }
 
 /// A running login. Dropping it stops the login.
-struct Login(JoinHandle<()>);
+struct Login {
+    task: JoinHandle<()>,
+    input: mpsc::Sender<String>,
+    /// Set before [`Event::LoginFinished`] goes out.
+    finished: Arc<AtomicBool>,
+}
+
+impl Login {
+    fn running(&self) -> bool {
+        !self.finished.load(Ordering::SeqCst)
+    }
+}
 
 impl Drop for Login {
     fn drop(&mut self) {
-        self.0.abort();
+        self.task.abort();
     }
 }
 
@@ -447,6 +459,10 @@ impl State {
             }
             Command::RemoveSubscription { subscription } => self.remove_subscription(subscription),
             Command::LogIn { subscription } => self.log_in(subscription),
+            Command::AnswerLogin {
+                subscription,
+                answer,
+            } => self.answer_login(subscription, &answer).await,
             Command::ListSubscriptions => Ok(self.list_subscriptions()),
             Command::ChangeSubscription {
                 chat,
@@ -882,6 +898,7 @@ impl State {
         let access = self.subscriptions.access(subscription)?;
         let LoginProcess {
             mut output,
+            input,
             outcome,
         } = driver
             .login(&access)
@@ -889,6 +906,8 @@ impl State {
                 reason: error.to_string(),
             })?;
         let events = self.events.clone();
+        let finished = Arc::new(AtomicBool::new(false));
+        let finished_flag = finished.clone();
         let task = tokio::spawn(async move {
             // No subscriber is not an error: the desktop app may be closed.
             while let Some(text) = output.recv().await {
@@ -897,21 +916,43 @@ impl State {
             let outcome = outcome.await.unwrap_or_else(|_| LoginOutcome::Failed {
                 reason: "the login stopped".to_owned(),
             });
+            finished_flag.store(true, Ordering::SeqCst);
             let _ = events.send(Event::LoginFinished {
                 subscription,
                 outcome,
             });
         });
-        self.logins.insert(subscription, Login(task));
+        self.logins.insert(
+            subscription,
+            Login {
+                task,
+                input,
+                finished,
+            },
+        );
         Ok(())
     }
 
+    async fn answer_login(
+        &self,
+        subscription: SubscriptionId,
+        answer: &LoginAnswer,
+    ) -> Result<Response, CommandError> {
+        let input = self
+            .logins
+            .get(&subscription)
+            .filter(|login| login.running())
+            .map(|login| login.input.clone())
+            .ok_or(CommandError::NoLoginRunning { subscription })?;
+        input
+            .send(answer.expose().trim().to_owned())
+            .await
+            .map_err(|_| CommandError::NoLoginRunning { subscription })?;
+        Ok(Response::LoginAnswered)
+    }
+
     fn list_subscriptions(&self) -> Response {
-        let logging_in = |subscription| {
-            self.logins
-                .get(&subscription)
-                .is_some_and(|login| !login.0.is_finished())
-        };
+        let logging_in = |subscription| self.logins.get(&subscription).is_some_and(Login::running);
         Response::Subscriptions {
             subscriptions: self.subscriptions.overview(logging_in),
         }

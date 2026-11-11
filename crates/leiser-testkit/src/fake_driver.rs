@@ -31,6 +31,8 @@ pub const UNSET: &str = "<unset>";
 pub struct FakeLogin {
     /// The environment variable that named the config directory.
     pub variable: String,
+    /// The code the login read, if it asked for one.
+    pub code: Option<String>,
 }
 
 /// Starts every agent session as the `fake-agent-cli` program playing back
@@ -46,6 +48,7 @@ pub struct FakeDriver {
     agent_cli: AgentCli,
     supports_steer: bool,
     login_fails: bool,
+    login_asks_for_code: bool,
     script_file: PathBuf,
     sessions: PathBuf,
     next_session: AtomicU64,
@@ -73,6 +76,7 @@ impl FakeDriver {
             agent_cli: AgentCli::ClaudeCode,
             supports_steer: script.supports_steer,
             login_fails: script.login_fails,
+            login_asks_for_code: script.login_asks_for_code,
             script_file,
             sessions,
             next_session: AtomicU64::new(1),
@@ -162,6 +166,9 @@ impl Driver for FakeDriver {
         command.arg("login");
         if self.login_fails {
             command.arg("--fail");
+        }
+        if self.login_asks_for_code {
+            command.arg("--ask-for-code");
         }
         access.environment(self.agent_cli).apply(&mut command);
         LoginProcess::spawn(command)

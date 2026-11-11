@@ -90,6 +90,8 @@ function describe(error: CommandError): string {
       return `That subscription is not a ${PROVIDER_NAMES[error.provider]} subscription.`;
     case "not_a_login_subscription":
       return "This subscription signs in with an API key, not by login.";
+    case "no_login_running":
+      return "The login has already ended. Start it again with Log in.";
     case "subscription_setup":
       return `Could not set up the subscription: ${error.reason}`;
     case "keychain":
@@ -195,6 +197,12 @@ export async function removeSubscription(subscription: SubscriptionId): Promise<
 export async function logIn(subscription: SubscriptionId): Promise<void> {
   const response = await execute({ type: "log_in", subscription });
   if (response.type !== "login_started") unexpected(response);
+}
+
+/** Types a line, such as the code from the browser, into a running login. */
+export async function answerLogin(subscription: SubscriptionId, answer: string): Promise<void> {
+  const response = await execute({ type: "answer_login", subscription, answer });
+  if (response.type !== "login_answered") unexpected(response);
 }
 
 export async function changeSubscription(

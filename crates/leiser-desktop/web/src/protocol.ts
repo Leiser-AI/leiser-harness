@@ -30,6 +30,7 @@ export type Command =
   | { type: "rename_subscription"; subscription: SubscriptionId; name: string }
   | { type: "remove_subscription"; subscription: SubscriptionId }
   | { type: "log_in"; subscription: SubscriptionId }
+  | { type: "answer_login"; subscription: SubscriptionId; answer: string }
   | { type: "list_subscriptions" }
   | {
       type: "change_subscription";
@@ -60,6 +61,7 @@ export type Response =
   | { type: "subscription_renamed" }
   | { type: "subscription_removed" }
   | { type: "login_started" }
+  | { type: "login_answered" }
   | { type: "subscriptions"; subscriptions: SubscriptionOverview[] }
   | { type: "subscription_changed" };
 
@@ -80,6 +82,7 @@ export type CommandError =
   | { type: "wrong_provider"; subscription: SubscriptionId; provider: Provider }
   | { type: "not_a_login_subscription"; subscription: SubscriptionId }
   | { type: "subscription_setup"; reason: string }
+  | { type: "no_login_running"; subscription: SubscriptionId }
   | { type: "keychain"; reason: string }
   | { type: "repository_config"; reason: string }
   | { type: "service_stopped" };

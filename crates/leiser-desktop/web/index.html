@@ -37,6 +37,21 @@
       </header>
       <div id="subscriptions-error" class="error" role="alert" hidden></div>
       <div id="subscription-list"></div>
+      <section id="login-section" hidden>
+        <h3>Login output</h3>
+        <pre id="login-output" class="login-output"></pre>
+        <form id="login-answer" class="login-answer" hidden>
+          <input
+            id="login-answer-text"
+            type="password"
+            autocomplete="off"
+            spellcheck="false"
+            placeholder="Paste the code from the browser"
+            aria-label="Code for the login"
+          />
+          <button type="submit">Send to login</button>
+        </form>
+      </section>
       <form id="add-subscription" class="add-subscription">
         <h3>Add a subscription</h3>
         <label>
@@ -63,10 +78,6 @@
         </label>
         <button type="submit">Add</button>
       </form>
-      <section id="login-section" hidden>
-        <h3>Login output</h3>
-        <pre id="login-output" class="login-output"></pre>
-      </section>
       <p class="muted dialog-note">
         A repository's default subscription per provider is set by name in its
         <code>.leiser/config.toml</code>, for example

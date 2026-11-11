@@ -40,8 +40,9 @@ pub use harness_mcp::HarnessMcpError;
 pub use keychain::{KEYCHAIN_SERVICE, Keychain, KeychainError, OsKeychain};
 pub use protocol::{
     AgentCli, AgentEvent, ApiKey, Branch, ChatId, ChatOverview, ChatStatus, Checkout, Command,
-    CommandError, Event, LoginOutcome, Provider, QueueReason, RepositoryId, RepositoryOverview,
-    Response, SignIn, SubscriptionId, SubscriptionKind, SubscriptionOverview, TranscriptEntry,
+    CommandError, Event, LoginAnswer, LoginOutcome, Provider, QueueReason, RepositoryId,
+    RepositoryOverview, Response, SignIn, SubscriptionId, SubscriptionKind, SubscriptionOverview,
+    TranscriptEntry,
 };
 pub use service::{Service, ServiceConfig, ServiceHandle, StartError, start};
 pub use store::StorageError;

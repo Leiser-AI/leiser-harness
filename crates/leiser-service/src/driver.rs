@@ -13,9 +13,11 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
+use tokio::process::ChildStdin;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::{AgentCli, AgentEvent, ApiKey, LoginOutcome, Version};
@@ -138,31 +140,39 @@ pub struct LoginProcess {
     /// The lines the login prints, for the developer to read. Never logged:
     /// they may hold one-time codes.
     pub output: mpsc::Receiver<String>,
+    /// Lines for the login to read, such as the code Claude Code's login
+    /// asks for after the developer signed in in the browser.
+    pub input: mpsc::Sender<String>,
     /// Resolves when the login has ended. Its output closes when the
     /// login's output does, usually before.
     pub outcome: oneshot::Receiver<LoginOutcome>,
 }
 
 impl LoginProcess {
-    /// Runs `command` as a login: no input, its output and error lines
-    /// collected, signed in when it exits successfully. Must be called
-    /// inside a Tokio runtime.
+    /// Runs `command` as a login: its output and error lines collected, a
+    /// prompt without a line end too, its input fed from
+    /// [`LoginProcess::input`], signed in when it exits successfully. Must
+    /// be called inside a Tokio runtime.
     ///
     /// # Errors
     ///
     /// Returns [`DriverError::Spawn`] when the program cannot start.
     pub fn spawn(mut command: tokio::process::Command) -> Result<Self, DriverError> {
         let mut child = command
-            .stdin(Stdio::null())
+            .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true)
             .spawn()
             .map_err(DriverError::Spawn)?;
-        let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
+        let (Some(stdin), Some(stdout), Some(stderr)) =
+            (child.stdin.take(), child.stdout.take(), child.stderr.take())
+        else {
             return Err(DriverError::MissingStreams);
         };
         let (lines, output) = mpsc::channel(LOGIN_OUTPUT_BUFFER);
+        let (input, answers) = mpsc::channel(LOGIN_OUTPUT_BUFFER);
+        tokio::spawn(write_lines(stdin, answers));
         let (mut finished, outcome) = oneshot::channel();
         tokio::spawn(forward_lines(stdout, lines.clone()));
         tokio::spawn(forward_lines(stderr, lines));
@@ -186,17 +196,74 @@ impl LoginProcess {
             };
             let _ = finished.send(outcome);
         });
-        Ok(Self { output, outcome })
+        Ok(Self {
+            output,
+            input,
+            outcome,
+        })
     }
 }
 
 const LOGIN_OUTPUT_BUFFER: usize = 64;
+/// How long output without a line end waits for more before it is passed
+/// on as a line of its own: a prompt such as "Paste code here >".
+const PROMPT_WAIT: Duration = Duration::from_millis(100);
 
-async fn forward_lines(stream: impl AsyncRead + Unpin, lines: mpsc::Sender<String>) {
-    let mut reader = BufReader::new(stream).lines();
-    while let Ok(Some(line)) = reader.next_line().await {
-        // Keeps reading when nobody listens, so the login never blocks.
-        let _ = lines.send(line).await;
+/// Passes the stream's lines on. Keeps reading when nobody listens, so the
+/// login never blocks on a full pipe.
+async fn forward_lines(mut stream: impl AsyncRead + Unpin, lines: mpsc::Sender<String>) {
+    let mut pending: Vec<u8> = Vec::new();
+    let mut buffer = [0_u8; 1024];
+    loop {
+        let read = if pending.is_empty() {
+            stream.read(&mut buffer).await.map(Some)
+        } else {
+            match tokio::time::timeout(PROMPT_WAIT, stream.read(&mut buffer)).await {
+                Ok(read) => read.map(Some),
+                // Nothing more came: the pending output is a prompt.
+                Err(_) => Ok(None),
+            }
+        };
+        match read {
+            Ok(Some(0)) | Err(_) => {
+                send_line(&lines, &pending).await;
+                return;
+            }
+            Ok(Some(read)) => {
+                pending.extend_from_slice(&buffer[..read]);
+                while let Some(end) = pending.iter().position(|&byte| byte == b'\n') {
+                    let line: Vec<u8> = pending.drain(..=end).collect();
+                    send_line(&lines, &line).await;
+                }
+            }
+            Ok(None) => {
+                send_line(&lines, &pending).await;
+                pending.clear();
+            }
+        }
+    }
+}
+
+async fn send_line(lines: &mpsc::Sender<String>, bytes: &[u8]) {
+    let line = String::from_utf8_lossy(bytes);
+    let line = line.trim_end_matches(['\r', '\n']);
+    if !line.trim().is_empty() {
+        let _ = lines.send(line.to_owned()).await;
+    }
+}
+
+/// Writes each answer as a line of the login's input. The input closes
+/// when the login is dropped.
+async fn write_lines(mut stdin: ChildStdin, mut answers: mpsc::Receiver<String>) {
+    while let Some(answer) = answers.recv().await {
+        let written = async {
+            stdin.write_all(answer.as_bytes()).await?;
+            stdin.write_all(b"\n").await?;
+            stdin.flush().await
+        };
+        if written.await.is_err() {
+            return;
+        }
     }
 }
 
