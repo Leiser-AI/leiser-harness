@@ -26,6 +26,20 @@ pub const FAKE_LOGIN_FILE: &str = "fake-login.json";
 /// for a variable that is not set.
 pub const UNSET: &str = "<unset>";
 
+/// The file that makes the fake agent CLI report a usage limit: while the
+/// config directory it runs in (`CLAUDE_CONFIG_DIR` or `CODEX_HOME`) holds
+/// it, every turn stops at the [`FakeUsageLimit`] it contains, as a real
+/// agent CLI does when its subscription hits a limit.
+pub const FAKE_USAGE_LIMIT_FILE: &str = "fake-usage-limit.json";
+
+/// The contents of [`FAKE_USAGE_LIMIT_FILE`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FakeUsageLimit {
+    /// Which limit, as the agent CLI words it.
+    pub limit: String,
+    pub resets_in_seconds: Option<u64>,
+}
+
 /// The contents of [`FAKE_LOGIN_FILE`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FakeLogin {

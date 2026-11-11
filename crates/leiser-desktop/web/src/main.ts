@@ -22,10 +22,12 @@ import type {
   RepositoryOverview,
   RepositoryScript,
   ServiceEvent,
+  SubscriptionId,
   SubscriptionOverview,
   ServiceConnection,
   Todo,
   TranscriptEntry,
+  UsageLimit,
 } from "./protocol";
 import * as extensions from "./extensions";
 import * as service from "./service";
@@ -127,6 +129,8 @@ interface ChatContext {
   chat: ChatId;
   open: Set<string>;
   answers: Map<string, Answer>;
+  /** The name of a subscription, or of the default login for `null`. */
+  subscriptionName: (subscription: SubscriptionId | null) => string;
 }
 
 // The connection to the harness service, as the app's Rust side reports it.
@@ -414,11 +418,23 @@ function renderChat(
     permissionModePicker(overview.chat, view),
     ...chatActions(overview),
   );
-  const context: ChatContext = { chat, open: new Set(view.openRequests), answers: new Map() };
+  const context: ChatContext = {
+    chat,
+    open: new Set(view.openRequests),
+    answers: new Map(),
+    subscriptionName: (subscription) =>
+      subscription === null
+        ? "the default login"
+        : (subscriptions.find((overview) => overview.subscription === subscription)?.name ??
+          "a removed subscription"),
+  };
   for (const entry of view.transcript) {
     if (entry.type === "answer") context.answers.set(entry.request, entry.answer);
   }
   const entries = view.transcript.flatMap((entry) => renderEntry(entry, context) ?? []);
+  if (view.usageLimit !== null) {
+    entries.push(limitCard(view, view.usageLimit, subscriptions, context));
+  }
   if (entries.length === 0) {
     entries.push(el("li", "empty", "Send a message to start the agent."));
   }
@@ -599,6 +615,47 @@ function optOuts(optOuts: OptOuts): HTMLElement[] {
   return [section];
 }
 
+/** The usage limit the last turn stopped at, with one button per subscription to continue on. */
+function limitCard(
+  view: ChatView,
+  limit: UsageLimit,
+  subscriptions: SubscriptionOverview[],
+  context: ChatContext,
+): HTMLElement {
+  const item = el("li", "entry card limit open");
+  const resets =
+    limit.resets_in_seconds === null
+      ? "The agent CLI did not say when it resets."
+      : `It resets in ${formatDuration(limit.resets_in_seconds)}.`;
+  item.append(
+    el("div", "entry-label", `Usage limit reached on ${context.subscriptionName(limit.subscription)}`),
+    el("div", "entry-text", `${limit.limit}. ${resets} Wait and send a message, or continue on:`),
+  );
+  const provider = AGENT_CLI_PROVIDERS[view.agentCli];
+  const choices: (SubscriptionId | null)[] = subscriptions
+    .filter((overview) => overview.provider === provider)
+    .map((overview) => overview.subscription);
+  choices.push(null);
+  const actions = el("div", "card-actions");
+  for (const choice of choices.filter((choice) => choice !== limit.subscription)) {
+    const label = choice === null ? "Default login" : context.subscriptionName(choice);
+    const button = el("button", "", label);
+    button.type = "button";
+    button.addEventListener("click", () =>
+      act(async () => {
+        try {
+          await service.continueOnSubscription(context.chat, choice);
+        } finally {
+          await refresh();
+        }
+      }),
+    );
+    actions.append(button);
+  }
+  item.append(actions);
+  return item;
+}
+
 function labelled(label: string, value: string | HTMLElement): HTMLElement {
   const item = el("span", "top-bar-item");
   const shown = typeof value === "string" ? el("span", "top-bar-value", value) : value;
@@ -672,7 +729,23 @@ function subscriptionRow(subscription: SubscriptionOverview): HTMLElement {
       await refresh();
     }),
   );
-  row.append(name, status, rename);
+  const interchangeable = el("label", "subscription-interchangeable");
+  const box = el("input");
+  box.type = "checkbox";
+  box.checked = subscription.interchangeable;
+  box.addEventListener("change", () =>
+    actInDialog(async () => {
+      try {
+        await service.setInterchangeable(subscription.subscription, box.checked);
+      } finally {
+        await refresh();
+      }
+    }),
+  );
+  interchangeable.title =
+    "At a usage limit, chats move by themselves between this provider's interchangeable subscriptions";
+  interchangeable.append(box, "Interchangeable");
+  row.append(name, status, interchangeable, rename);
   if (subscription.kind === "login") {
     const login = el("button", "", "Log in");
     login.type = "button";
@@ -757,6 +830,14 @@ function renderEntry(entry: TranscriptEntry, context: ChatContext): HTMLElement 
       return null;
     case "agent":
       return renderAgentEvent(entry.event, AGENT_CLI_NAMES[entry.agent_cli], context);
+    case "continued_on_subscription": {
+      const how = entry.automatic ? " by itself: both subscriptions are interchangeable" : "";
+      return el(
+        "li",
+        "entry notice",
+        `Continued on ${context.subscriptionName(entry.subscription)}${how}.`,
+      );
+    }
     case "script_finished": {
       const exit = entry.exit_code === null ? "did not finish" : `exit ${entry.exit_code}`;
       const item = el("li", "entry tool-result script");

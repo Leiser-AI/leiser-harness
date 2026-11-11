@@ -44,8 +44,10 @@ use crate::{AgentCli, AgentEvent, PermissionMode, Provider, SubscriptionKind, Tr
 ///   transcript entries for finished repository scripts.
 /// - 3: subscriptions, and each chat's subscription per provider. Later
 ///   additions that version 3 data without them reads as defaults: a
-///   chat's permission mode (Auto) and transcript entries for the
-///   developer's answers.
+///   chat's permission mode (Auto), transcript entries for the
+///   developer's answers and for continuing on another subscription,
+///   whether a subscription is interchangeable (no), and a chat's usage
+///   limit and the messages it holds back (none).
 const VERSION: u32 = 3;
 
 const STATE_FILE: &str = "state.json";
@@ -109,6 +111,10 @@ pub(crate) struct SubscriptionV3 {
     pub provider: Provider,
     pub name: String,
     pub kind: SubscriptionKind,
+    /// Whether chats may move to and from it by themselves at a usage
+    /// limit.
+    #[serde(default)]
+    pub interchangeable: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -137,6 +143,23 @@ pub(crate) struct ChatV3 {
     /// The chat's subscription per provider; a provider without one runs
     /// on the agent CLI's own default login.
     pub subscriptions: Vec<ChatSubscriptionV3>,
+    /// The usage limit the chat's last turn stopped at, until the next
+    /// turn starts.
+    #[serde(default)]
+    pub usage_limit: Option<UsageLimitV3>,
+    /// Messages queued when the usage limit was hit; they go out after the
+    /// chat's next turn.
+    #[serde(default)]
+    pub held: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct UsageLimitV3 {
+    pub limit: String,
+    /// The subscription that hit it; `None` is the default login.
+    pub subscription: Option<u64>,
+    /// When it resets, in seconds since the Unix epoch.
+    pub resets_at: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -347,6 +370,8 @@ impl Store {
                     status_changed: chat.status_changed,
                     permission_mode: chat.permission_mode,
                     subscriptions: Vec::new(),
+                    usage_limit: None,
+                    held: Vec::new(),
                 })
                 .collect(),
         };
