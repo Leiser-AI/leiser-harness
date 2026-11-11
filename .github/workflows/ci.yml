@@ -40,10 +40,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Pull requests test on Linux only, so they never wait for the slower
-        # macOS/Windows runners. Pushes to development, main and hotfix
-        # branches test on all three.
-        os: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-latest"]' || '["ubuntu-latest","macos-latest","windows-latest"]') }}
+        # The repository is public, so GitHub's runners cost nothing: every
+        # pull request and push tests on all three systems.
+        os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
