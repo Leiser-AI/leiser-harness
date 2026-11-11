@@ -14,6 +14,7 @@
 mod claude_code;
 mod codex;
 mod driver;
+mod git;
 mod handoff;
 mod harness_mcp;
 mod protocol;
@@ -29,8 +30,8 @@ pub use driver::{
 };
 pub use harness_mcp::HarnessMcpError;
 pub use protocol::{
-    AgentCli, AgentEvent, ChatId, ChatOverview, ChatStatus, Checkout, Command, CommandError, Event,
-    QueueReason, RepositoryId, Response, TranscriptEntry,
+    AgentCli, AgentEvent, Branch, ChatId, ChatOverview, ChatStatus, Checkout, Command,
+    CommandError, Event, QueueReason, RepositoryId, RepositoryOverview, Response, TranscriptEntry,
 };
 pub use service::{Service, ServiceConfig, ServiceHandle, StartError, start};
 pub use store::StorageError;

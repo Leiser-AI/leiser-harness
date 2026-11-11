@@ -211,7 +211,7 @@ async fn sending_while_a_turn_runs_fails() -> TestResult {
 
     assert_eq!(
         chat.send("two").await,
-        Err(CommandError::TurnRunning(chat.chat))
+        Err(CommandError::TurnRunning { chat: chat.chat })
     );
     Ok(())
 }
@@ -357,7 +357,7 @@ async fn interrupting_while_no_turn_runs_fails() -> TestResult {
 
     assert_eq!(
         chat.interrupt().await,
-        Err(CommandError::NoTurnRunning(chat.chat))
+        Err(CommandError::NoTurnRunning { chat: chat.chat })
     );
     Ok(())
 }

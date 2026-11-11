@@ -246,11 +246,11 @@ async fn deliver(
     id: &mut Option<oneshot::Sender<AgentSessionId>>,
     output: Output,
 ) -> Result<(), SessionStop> {
-    if let Some(thread_id) = output.thread_id {
-        if let Some(sender) = id.take() {
-            // The service may have dropped the agent session already.
-            let _ = sender.send(AgentSessionId::new(thread_id));
-        }
+    if let Some(thread_id) = output.thread_id
+        && let Some(sender) = id.take()
+    {
+        // The service may have dropped the agent session already.
+        let _ = sender.send(AgentSessionId::new(thread_id));
     }
     for line in output.lines {
         stdin.write_all(line.as_bytes()).await?;

@@ -192,6 +192,6 @@ async fn sending_to_an_unknown_chat_fails() -> TestResult {
         })
         .await;
 
-    assert_eq!(result, Err(CommandError::UnknownChat(unknown)));
+    assert_eq!(result, Err(CommandError::UnknownChat { chat: unknown }));
     Ok(())
 }

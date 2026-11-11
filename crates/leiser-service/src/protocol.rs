@@ -73,9 +73,11 @@ pub enum Command {
     /// Asks the agent CLI to stop the running turn. The turn ends with
     /// [`AgentEvent::TurnInterrupted`]; queued messages are sent after it.
     InterruptTurn { chat: ChatId },
+    /// Lists every repository added to the harness.
+    ListRepositories,
     /// Lists every chat with its current status.
     ListChats,
-    /// Reads a chat's status and transcript.
+    /// Reads a chat's status, branch and transcript.
     ReadChat { chat: ChatId },
 }
 
@@ -101,13 +103,27 @@ pub enum Response {
     InterruptRequested,
     /// The chat's next message goes to the new agent CLI.
     AgentCliChanged,
+    Repositories {
+        repositories: Vec<RepositoryOverview>,
+    },
     Chats {
         chats: Vec<ChatOverview>,
     },
     Chat {
         status: ChatStatus,
+        /// The branch checked out where the chat works.
+        branch: Branch,
         transcript: Vec<TranscriptEntry>,
     },
+}
+
+/// A repository as the sidebar lists it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepositoryOverview {
+    pub repository: RepositoryId,
+    /// The name of the repository's directory.
+    pub name: String,
+    pub path: PathBuf,
 }
 
 /// A chat as the sidebar lists it.
@@ -115,7 +131,21 @@ pub enum Response {
 pub struct ChatOverview {
     pub chat: ChatId,
     pub repository: RepositoryId,
+    /// The first line of the developer's first message; `None` until then.
+    pub title: Option<String>,
     pub status: ChatStatus,
+}
+
+/// What is checked out in a working directory.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Branch {
+    /// A branch, possibly without commits yet.
+    Named { name: String },
+    /// A commit without a branch.
+    Detached { commit: String },
+    /// Git could not tell.
+    Unknown,
 }
 
 /// What a chat is doing right now.
@@ -162,16 +192,18 @@ pub enum QueueReason {
 pub enum CommandError {
     #[error("not a git repository: {}", path.display())]
     NotAGitRepository { path: PathBuf },
-    #[error("unknown repository {0:?}")]
-    UnknownRepository(RepositoryId),
-    #[error("unknown chat {0:?}")]
-    UnknownChat(ChatId),
-    #[error("a turn is running in chat {0:?}; queue or steer the message")]
-    TurnRunning(ChatId),
-    #[error("no turn is running in chat {0:?}")]
-    NoTurnRunning(ChatId),
-    #[error("no driver is configured for {0}")]
-    AgentCliNotConfigured(AgentCli),
+    // Struct variants throughout: an internally tagged newtype variant
+    // around a number does not serialize.
+    #[error("unknown repository {repository:?}")]
+    UnknownRepository { repository: RepositoryId },
+    #[error("unknown chat {chat:?}")]
+    UnknownChat { chat: ChatId },
+    #[error("a turn is running in chat {chat:?}; queue or steer the message")]
+    TurnRunning { chat: ChatId },
+    #[error("no turn is running in chat {chat:?}")]
+    NoTurnRunning { chat: ChatId },
+    #[error("no driver is configured for {agent_cli}")]
+    AgentCliNotConfigured { agent_cli: AgentCli },
     #[error("the agent CLI failed: {reason}")]
     AgentCli { reason: String },
     #[error("the harness service could not store the chat: {reason}")]

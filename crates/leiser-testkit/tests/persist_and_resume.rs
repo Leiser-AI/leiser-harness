@@ -62,7 +62,9 @@ async fn read_chat(
     chat: ChatId,
 ) -> TestResult<(ChatStatus, Vec<TranscriptEntry>)> {
     match service.execute(Command::ReadChat { chat }).await? {
-        Response::Chat { status, transcript } => Ok((status, transcript)),
+        Response::Chat {
+            status, transcript, ..
+        } => Ok((status, transcript)),
         response => Err(format!("expected Chat, got {response:?}").into()),
     }
 }

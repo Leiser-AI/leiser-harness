@@ -404,7 +404,9 @@ async fn changing_to_an_agent_cli_without_a_driver_fails() -> TestResult {
 
     assert_eq!(
         result,
-        Err(CommandError::AgentCliNotConfigured(AgentCli::Codex))
+        Err(CommandError::AgentCliNotConfigured {
+            agent_cli: AgentCli::Codex
+        })
     );
     Ok(())
 }

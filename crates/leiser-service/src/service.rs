@@ -12,8 +12,8 @@ use crate::harness_mcp::{ChatRead, HarnessMcp, HarnessMcpError};
 use crate::store::{AgentSessionV2, ChatV2, HandoffV2, RepositoryV1, StateV2, StorageError, Store};
 use crate::{
     AgentCli, AgentEvent, AgentSessionId, ChatId, ChatOverview, ChatStatus, Checkout, Command,
-    CommandError, Driver, Event, QueueReason, RepositoryId, Response, SessionInput, SessionSpec,
-    TranscriptEntry,
+    CommandError, Driver, Event, QueueReason, RepositoryId, RepositoryOverview, Response,
+    SessionInput, SessionSpec, TranscriptEntry,
 };
 
 /// Commands waiting for the command loop. Small, so callers feel back
@@ -155,6 +155,8 @@ impl ServiceHandle {
 struct Chat {
     repository: RepositoryId,
     working_directory: PathBuf,
+    /// The first line of the developer's first message, once there is one.
+    title: Option<String>,
     /// The agent CLI the next message goes to; the running agent session,
     /// if any, runs on it.
     agent_cli: AgentCli,
@@ -275,6 +277,7 @@ impl State {
                     Chat {
                         repository: RepositoryId(chat.repository),
                         working_directory: chat.working_directory,
+                        title: stored_title(&store, chat.id),
                         agent_cli: chat.agent_cli,
                         agent_sessions: chat
                             .agent_sessions
@@ -368,8 +371,9 @@ impl State {
             }
             Command::SteerMessage { chat, text } => self.steer_message(chat, text).await,
             Command::InterruptTurn { chat } => self.interrupt_turn(chat).await,
+            Command::ListRepositories => Ok(self.list_repositories()),
             Command::ListChats => Ok(self.list_chats()),
-            Command::ReadChat { chat } => self.read_chat(chat),
+            Command::ReadChat { chat } => self.read_chat(chat).await,
             Command::ChangeAgentCli { chat, agent_cli } => self.change_agent_cli(chat, agent_cli),
         }
     }
@@ -406,7 +410,7 @@ impl State {
         let path = self
             .repositories
             .get(&repository)
-            .ok_or(CommandError::UnknownRepository(repository))?;
+            .ok_or(CommandError::UnknownRepository { repository })?;
         // Worktrees follow in a later ticket; this stops compiling then.
         let Checkout::Main = checkout;
         let working_directory = path.clone();
@@ -416,6 +420,7 @@ impl State {
             Chat {
                 repository,
                 working_directory,
+                title: None,
                 agent_cli: self.default_agent_cli,
                 agent_sessions: BTreeMap::new(),
                 handoff: None,
@@ -431,7 +436,10 @@ impl State {
 
     /// The input of the chat's agent session while a turn runs.
     fn running_turn(&self, id: ChatId) -> Result<Option<mpsc::Sender<SessionInput>>, CommandError> {
-        let chat = self.chats.get(&id).ok_or(CommandError::UnknownChat(id))?;
+        let chat = self
+            .chats
+            .get(&id)
+            .ok_or(CommandError::UnknownChat { chat: id })?;
         Ok(match &chat.session {
             Some(Session {
                 input,
@@ -443,9 +451,12 @@ impl State {
     }
 
     async fn send_message(&mut self, id: ChatId, text: String) -> Result<Response, CommandError> {
-        let chat = self.chats.get(&id).ok_or(CommandError::UnknownChat(id))?;
+        let chat = self
+            .chats
+            .get(&id)
+            .ok_or(CommandError::UnknownChat { chat: id })?;
         if chat.status() == ChatStatus::Working {
-            return Err(CommandError::TurnRunning(id));
+            return Err(CommandError::TurnRunning { chat: id });
         }
         let pending = chat.handoff;
         if chat.session.is_none() {
@@ -464,15 +475,14 @@ impl State {
             None => text.clone(),
         };
         // Recorded first, so the developer's text is never lost.
-        self.store
-            .append(id.0, &TranscriptEntry::UserMessage { text: text.clone() })?;
+        self.append_user_message(id, &text)?;
         let Some(Chat {
             session: Some(session),
             handoff,
             ..
         }) = self.chats.get_mut(&id)
         else {
-            return Err(CommandError::UnknownChat(id));
+            return Err(CommandError::UnknownChat { chat: id });
         };
         session.turn = Turn::Running {
             queued: VecDeque::new(),
@@ -537,8 +547,7 @@ impl State {
                 .queue_message(id, text, QueueReason::SteerUnsupported)
                 .await;
         }
-        self.store
-            .append(id.0, &TranscriptEntry::UserMessage { text: text.clone() })?;
+        self.append_user_message(id, &text)?;
         send_input(&input, SessionInput::Steer { text: text.clone() }).await?;
         self.emit(Event::MessageSteered { chat: id, text });
         Ok(Response::MessageSteered)
@@ -546,10 +555,40 @@ impl State {
 
     async fn interrupt_turn(&mut self, id: ChatId) -> Result<Response, CommandError> {
         let Some(input) = self.running_turn(id)? else {
-            return Err(CommandError::NoTurnRunning(id));
+            return Err(CommandError::NoTurnRunning { chat: id });
         };
         send_input(&input, SessionInput::Interrupt).await?;
         Ok(Response::InterruptRequested)
+    }
+
+    /// Stores the developer's message in the chat's transcript.
+    fn append_user_message(&mut self, id: ChatId, text: &str) -> Result<(), StorageError> {
+        self.store.append(
+            id.0,
+            &TranscriptEntry::UserMessage {
+                text: text.to_owned(),
+            },
+        )?;
+        if let Some(chat) = self.chats.get_mut(&id) {
+            chat.title = chat.title.take().or_else(|| title(text));
+        }
+        Ok(())
+    }
+
+    fn list_repositories(&self) -> Response {
+        let repositories = self
+            .repositories
+            .iter()
+            .map(|(id, path)| RepositoryOverview {
+                repository: *id,
+                name: path.file_name().map_or_else(
+                    || path.display().to_string(),
+                    |name| name.to_string_lossy().into_owned(),
+                ),
+                path: path.clone(),
+            })
+            .collect();
+        Response::Repositories { repositories }
     }
 
     fn list_chats(&self) -> Response {
@@ -559,17 +598,22 @@ impl State {
             .map(|(id, chat)| ChatOverview {
                 chat: *id,
                 repository: chat.repository,
+                title: chat.title.clone(),
                 status: chat.status(),
             })
             .collect();
         Response::Chats { chats }
     }
 
-    fn read_chat(&self, id: ChatId) -> Result<Response, CommandError> {
-        let chat = self.chats.get(&id).ok_or(CommandError::UnknownChat(id))?;
+    async fn read_chat(&self, id: ChatId) -> Result<Response, CommandError> {
+        let chat = self
+            .chats
+            .get(&id)
+            .ok_or(CommandError::UnknownChat { chat: id })?;
         let transcript = self.store.transcript(id.0)?;
         Ok(Response::Chat {
             status: chat.status(),
+            branch: crate::git::current_branch(&chat.working_directory).await,
             transcript,
         })
     }
@@ -579,19 +623,22 @@ impl State {
         id: ChatId,
         agent_cli: AgentCli,
     ) -> Result<Response, CommandError> {
-        let chat = self.chats.get(&id).ok_or(CommandError::UnknownChat(id))?;
+        let chat = self
+            .chats
+            .get(&id)
+            .ok_or(CommandError::UnknownChat { chat: id })?;
         if !self.drivers.contains_key(&agent_cli) {
-            return Err(CommandError::AgentCliNotConfigured(agent_cli));
+            return Err(CommandError::AgentCliNotConfigured { agent_cli });
         }
         if chat.status() == ChatStatus::Working {
-            return Err(CommandError::TurnRunning(id));
+            return Err(CommandError::TurnRunning { chat: id });
         }
         if chat.agent_cli == agent_cli {
             return Ok(Response::AgentCliChanged);
         }
         let entries = self.store.transcript(id.0)?.len();
         let Some(chat) = self.chats.get_mut(&id) else {
-            return Err(CommandError::UnknownChat(id));
+            return Err(CommandError::UnknownChat { chat: id });
         };
         let left = chat.agent_cli;
         // An agent CLI whose handoff is still pending has not seen it.
@@ -631,11 +678,13 @@ impl State {
         let chat = self
             .chats
             .get_mut(&id)
-            .ok_or(CommandError::UnknownChat(id))?;
-        let driver = self
-            .drivers
-            .get(&chat.agent_cli)
-            .ok_or(CommandError::AgentCliNotConfigured(chat.agent_cli))?;
+            .ok_or(CommandError::UnknownChat { chat: id })?;
+        let driver =
+            self.drivers
+                .get(&chat.agent_cli)
+                .ok_or(CommandError::AgentCliNotConfigured {
+                    agent_cli: chat.agent_cli,
+                })?;
         let harness_mcp_url =
             self.harness_mcp
                 .register(id)
@@ -762,7 +811,7 @@ impl State {
         let chat = self
             .chats
             .get_mut(&id)
-            .ok_or(CommandError::UnknownChat(id))?;
+            .ok_or(CommandError::UnknownChat { chat: id })?;
         chat.session = None;
         chat.agent_sessions.remove(&chat.agent_cli);
         self.open_session(id)?;
@@ -779,7 +828,7 @@ impl State {
             ..
         }) = self.chats.get_mut(&id)
         else {
-            return Err(CommandError::UnknownChat(id));
+            return Err(CommandError::UnknownChat { chat: id });
         };
         session.turn = Turn::Running {
             queued: VecDeque::new(),
@@ -806,8 +855,7 @@ impl State {
         };
         session.turn = Turn::Running { queued };
         let input = session.input.clone();
-        let entry = TranscriptEntry::UserMessage { text: text.clone() };
-        if let Err(error) = self.store.append(id.0, &entry) {
+        if let Err(error) = self.append_user_message(id, &text) {
             tracing::error!(chat = ?id, %error, "could not store a queued message");
         }
         self.emit(Event::QueuedMessageSent {
@@ -918,4 +966,27 @@ async fn forward(
             return;
         }
     }
+}
+
+/// A chat's title: the first line of the developer's first message.
+fn title(text: &str) -> Option<String> {
+    text.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(str::to_owned)
+}
+
+/// The title of a stored chat, from its transcript.
+fn stored_title(store: &Store, chat: u64) -> Option<String> {
+    let transcript = match store.transcript(chat) {
+        Ok(transcript) => transcript,
+        Err(error) => {
+            tracing::warn!(chat, %error, "could not read a chat's transcript for its title");
+            return None;
+        }
+    };
+    transcript.iter().find_map(|entry| match entry {
+        TranscriptEntry::UserMessage { text } => title(text),
+        TranscriptEntry::Agent { .. } => None,
+    })
 }
