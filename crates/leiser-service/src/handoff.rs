@@ -76,11 +76,14 @@ fn quoted(transcript: &[TranscriptEntry]) -> Vec<Quoted<'_>> {
                         output,
                     } => Entry::Command(*agent_cli, command, *exit_code, output),
                     AgentEvent::ApprovalRequested { .. }
+                    | AgentEvent::QuestionAsked { .. }
                     | AgentEvent::UsageLimitReached { .. }
                     | AgentEvent::TurnEnded
                     | AgentEvent::TurnInterrupted
                     | AgentEvent::SessionEnded => return None,
                 },
+                // The agent session that asked has its answer already.
+                TranscriptEntry::Answer { .. } => return None,
             };
             Some((index, entry))
         })

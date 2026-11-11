@@ -1,16 +1,16 @@
 //! The driver interface: one driver per agent CLI (ADR 0002).
 //!
-//! Covers start, resume, send, read events, steer and interrupt. Queue
-//! needs nothing from the driver: the harness service holds queued messages
-//! and sends each when the running turn ends. Approve follows in a later
-//! ticket.
+//! Covers start, resume, send, read events, approve, steer and interrupt.
+//! Queue needs nothing from the driver: the harness service holds queued
+//! messages and sends each when the running turn ends. Approve is
+//! [`SessionInput::Answer`], which answers approval requests and questions.
 
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
 
-use crate::{AgentEvent, Version};
+use crate::{AgentEvent, Answer, PermissionMode, Version};
 
 /// The name the agent CLI must give the harness MCP server, so agents see
 /// its tools as, for example, `mcp__leiser__read_chat` in Claude Code.
@@ -25,6 +25,10 @@ pub struct SessionSpec {
     /// streamable HTTP endpoint on localhost). The driver must configure
     /// the agent CLI to use it under the name [`HARNESS_MCP_SERVER`].
     pub harness_mcp_url: String,
+    /// How much the agent session may do without asking. Always one the
+    /// driver supports (see [`Driver::supports_permission_mode`]). The
+    /// driver keeps the agent CLI's sandbox on in every mode.
+    pub permission_mode: PermissionMode,
 }
 
 /// The agent CLI's own id of an agent session, used to resume it.
@@ -56,6 +60,14 @@ pub enum SessionInput {
     /// Stops the running turn, which then ends with
     /// [`AgentEvent::TurnInterrupted`]. Ignored when no turn runs.
     Interrupt,
+    /// Answers the running turn's approval request or question `request`,
+    /// by the id the driver gave it in [`AgentEvent::ApprovalRequested`] or
+    /// [`AgentEvent::QuestionAsked`]. Sent once per request, only while it
+    /// is open, and only with an answer that fits it: never
+    /// [`Answer::Approve`] for a question or [`Answer::Answers`] for an
+    /// approval request. The feedback of [`Answer::Decline`] must reach
+    /// the agent.
+    Answer { request: String, answer: Answer },
 }
 
 /// A running agent session: send it input, read its events.
@@ -104,6 +116,10 @@ pub trait Driver: Send + Sync + std::fmt::Debug {
     fn supports_steer(&self) -> bool {
         false
     }
+
+    /// Whether the agent CLI has a mode for `mode`. A chat in a mode the
+    /// agent CLI lacks runs Supervised, which every driver must support.
+    fn supports_permission_mode(&self, mode: PermissionMode) -> bool;
 }
 
 /// Why a driver could not start an agent session.

@@ -6,7 +6,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::{env, io};
 
-use leiser_service::{AgentCli, AgentEvent, ClaudeCodeDriver, CodexDriver, ServiceConfig};
+use leiser_service::{
+    AgentCli, AgentEvent, ClaudeCodeDriver, CodexDriver, Question, QuestionOption, ServiceConfig,
+};
 use leiser_testkit::{FakeDriver, Script, Step};
 
 /// When set, chats run on the `fake-agent-cli` program at this path.
@@ -40,8 +42,30 @@ pub fn service_config(data_dir: PathBuf) -> Result<ServiceConfig, FakeAgentCliEr
 }
 
 /// A driver that answers every message with a tool call, its result and
-/// the message itself.
+/// the message itself. Of every three turns, the second first asks for an
+/// approval and the third asks a question, to try the cards.
 fn fake_driver(program: &std::path::Path) -> io::Result<FakeDriver> {
+    let approval = Step::RequestApproval {
+        description: "Run `cargo test --workspace`".to_owned(),
+    };
+    let question = Step::AskQuestions {
+        questions: vec![Question {
+            id: "runner".to_owned(),
+            header: "Test runner".to_owned(),
+            question: "Which test runner should I use?".to_owned(),
+            options: vec![
+                QuestionOption {
+                    label: "cargo test".to_owned(),
+                    description: "The default runner".to_owned(),
+                },
+                QuestionOption {
+                    label: "cargo nextest".to_owned(),
+                    description: "Faster, needs an install".to_owned(),
+                },
+            ],
+            multi_select: false,
+        }],
+    };
     let turn = [
         Step::Emit {
             event: AgentEvent::ToolCall {
@@ -58,6 +82,13 @@ fn fake_driver(program: &std::path::Path) -> io::Result<FakeDriver> {
         Step::message("Fake agent CLI here. You wrote:"),
         Step::EchoUserMessage,
     ];
-    let script = (0..FAKE_TURNS).fold(Script::new(), |script, _| script.turn(turn.clone()));
+    let script = (0..FAKE_TURNS).fold(Script::new(), |script, number| {
+        let first = match number % 3 {
+            1 => Some(approval.clone()),
+            2 => Some(question.clone()),
+            _ => None,
+        };
+        script.turn(first.into_iter().chain(turn.iter().cloned()))
+    });
     FakeDriver::new(program, &script)
 }

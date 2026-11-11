@@ -101,9 +101,10 @@ async fn a_chat_in_the_main_checkout_runs_the_agent_cli_in_the_repository() -> T
 
 #[tokio::test]
 async fn approval_requests_and_usage_limits_come_back_as_events() -> TestResult {
+    let description = "Run `cargo test`";
     let approval = AgentEvent::ApprovalRequested {
         request: "1".to_owned(),
-        description: "Run `cargo test`".to_owned(),
+        description: description.to_owned(),
     };
     let limit = AgentEvent::UsageLimitReached {
         limit: "5-hour limit".to_owned(),
@@ -125,10 +126,16 @@ async fn approval_requests_and_usage_limits_come_back_as_events() -> TestResult 
 
     send(&service, chat, "test it").await?;
 
-    assert_eq!(
-        collect_turn(&mut events, chat).await?,
-        vec![approval, limit, AgentEvent::TurnEnded]
-    );
+    let turn = collect_turn(&mut events, chat).await?;
+    // The service gives the request its own id, unique in the chat.
+    let Some(AgentEvent::ApprovalRequested {
+        description: got, ..
+    }) = turn.first()
+    else {
+        return Err(format!("expected an approval request first, got {turn:?}").into());
+    };
+    assert_eq!(got, description);
+    assert_eq!(turn[1..], [limit, AgentEvent::TurnEnded]);
     Ok(())
 }
 

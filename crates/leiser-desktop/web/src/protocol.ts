@@ -6,7 +6,8 @@ export type ChatId = number;
 
 export type AgentCli = "claude_code" | "codex";
 export type Checkout = "main";
-export type ChatStatus = "idle" | "working";
+export type ChatStatus = "idle" | "working" | "waiting";
+export type PermissionMode = "supervised" | "auto_accept_edits" | "auto" | "full_access";
 export type QueueReason = "requested" | "steer_unsupported";
 
 export type Command =
@@ -17,6 +18,8 @@ export type Command =
   | { type: "queue_message"; chat: ChatId; text: string }
   | { type: "steer_message"; chat: ChatId; text: string }
   | { type: "interrupt_turn"; chat: ChatId }
+  | { type: "change_permission_mode"; chat: ChatId; permission_mode: PermissionMode }
+  | { type: "answer_request"; chat: ChatId; request: string; answer: Answer }
   | { type: "list_repositories" }
   | { type: "list_chats" }
   | { type: "read_chat"; chat: ChatId };
@@ -29,9 +32,19 @@ export type Response =
   | { type: "message_steered" }
   | { type: "interrupt_requested" }
   | { type: "agent_cli_changed" }
+  | { type: "permission_mode_changed" }
+  | { type: "request_answered" }
   | { type: "repositories"; repositories: RepositoryOverview[] }
   | { type: "chats"; chats: ChatOverview[] }
-  | { type: "chat"; status: ChatStatus; branch: Branch; transcript: TranscriptEntry[] };
+  | {
+      type: "chat";
+      status: ChatStatus;
+      branch: Branch;
+      permission_mode: PermissionMode;
+      applied_permission_mode: PermissionMode;
+      open_requests: string[];
+      transcript: TranscriptEntry[];
+    };
 
 export type CommandError =
   | { type: "not_a_git_repository"; path: string }
@@ -39,6 +52,9 @@ export type CommandError =
   | { type: "unknown_chat"; chat: ChatId }
   | { type: "turn_running"; chat: ChatId }
   | { type: "no_turn_running"; chat: ChatId }
+  | { type: "unknown_request"; chat: ChatId; request: string }
+  | { type: "answer_does_not_fit"; chat: ChatId; request: string }
+  | { type: "repository_config"; reason: string }
   | { type: "agent_cli_not_configured"; agent_cli: AgentCli }
   | { type: "agent_cli"; reason: string }
   | { type: "storage"; reason: string }
@@ -64,7 +80,26 @@ export type Branch =
 
 export type TranscriptEntry =
   | { type: "user_message"; text: string }
-  | { type: "agent"; agent_cli: AgentCli; event: AgentEvent };
+  | { type: "agent"; agent_cli: AgentCli; event: AgentEvent }
+  | { type: "answer"; request: string; answer: Answer };
+
+export type Answer =
+  | { type: "approve" }
+  | { type: "decline"; feedback: string | null }
+  | { type: "answers"; answers: Record<string, string[]> };
+
+export interface Question {
+  id: string;
+  header: string;
+  question: string;
+  options: QuestionOption[];
+  multi_select: boolean;
+}
+
+export interface QuestionOption {
+  label: string;
+  description: string;
+}
 
 export type AgentEvent =
   | { type: "message"; text: string }
@@ -72,6 +107,7 @@ export type AgentEvent =
   | { type: "tool_result"; name: string; output: string }
   | { type: "command_finished"; command: string; exit_code: number | null; output: string }
   | { type: "approval_requested"; request: string; description: string }
+  | { type: "question_asked"; request: string; questions: Question[] }
   | { type: "usage_limit_reached"; limit: string; resets_in_seconds: number | null }
   | { type: "turn_ended" }
   | { type: "turn_interrupted" }
@@ -81,4 +117,5 @@ export type ServiceEvent =
   | { type: "agent"; chat: ChatId; event: AgentEvent }
   | { type: "message_queued"; chat: ChatId; text: string; reason: QueueReason }
   | { type: "message_steered"; chat: ChatId; text: string }
-  | { type: "queued_message_sent"; chat: ChatId; text: string };
+  | { type: "queued_message_sent"; chat: ChatId; text: string }
+  | { type: "request_answered"; chat: ChatId; request: string; answer: Answer };

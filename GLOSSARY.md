@@ -42,6 +42,13 @@ How much an agent session may do without the developer's approval:
 Supervised, Auto-accept edits, Auto or Full access. Set per chat.
 _Avoid_: runtime mode, approval policy, trust level
 
+**Approval request**:
+An agent session's request for the developer's approval of one action,
+shown as a card in the chat while the chat waits. The developer approves,
+declines, or replies with text, which declines and passes the text to the
+agent. Questions from the agent are answered the same way.
+_Avoid_: permission prompt, confirmation
+
 **Handoff**:
 The part of a chat that the harness gives a new agent session so it can
 continue: a selection of the chat's real messages, not a summary.

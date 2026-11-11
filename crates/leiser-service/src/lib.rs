@@ -18,6 +18,7 @@ mod git;
 mod handoff;
 mod harness_mcp;
 mod protocol;
+mod repository_config;
 mod service;
 mod store;
 mod version;
@@ -30,8 +31,9 @@ pub use driver::{
 };
 pub use harness_mcp::HarnessMcpError;
 pub use protocol::{
-    AgentCli, AgentEvent, Branch, ChatId, ChatOverview, ChatStatus, Checkout, Command,
-    CommandError, Event, QueueReason, RepositoryId, RepositoryOverview, Response, TranscriptEntry,
+    AgentCli, AgentEvent, Answer, Branch, ChatId, ChatOverview, ChatStatus, Checkout, Command,
+    CommandError, Event, PermissionMode, Question, QuestionOption, QueueReason, RepositoryId,
+    RepositoryOverview, Response, TranscriptEntry,
 };
 pub use service::{Service, ServiceConfig, ServiceHandle, StartError, start};
 pub use store::StorageError;

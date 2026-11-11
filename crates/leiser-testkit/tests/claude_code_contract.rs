@@ -1,5 +1,5 @@
 //! Contract tests: the real Claude Code behaves like the fake agent CLI for
-//! start, send, read events, queue, steer, interrupt and resume, so the service
+//! start, send, read events, approve, queue, steer, interrupt and resume, so the service
 //! tests with the fake agent CLI also hold for Claude Code.
 //!
 //! They need Claude Code signed in to one of the developer's subscriptions,
@@ -19,8 +19,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use leiser_service::{
-    AgentCli, AgentEvent, ChatId, Checkout, ClaudeCodeDriver, Command, Driver, Event, QueueReason,
-    Response, ServiceHandle, SessionSpec,
+    AgentCli, AgentEvent, Answer, ChatId, Checkout, ClaudeCodeDriver, Command, Driver, Event,
+    PermissionMode, QueueReason, Response, ServiceHandle, SessionSpec,
 };
 use leiser_testkit::{TestRepo, TestService};
 use tokio::sync::broadcast;
@@ -220,6 +220,7 @@ async fn an_agent_session_ends_when_its_input_is_dropped() -> TestResult {
         working_directory: repo.path().to_path_buf(),
         // No harness MCP server listens there; these tests do not use it.
         harness_mcp_url: "http://127.0.0.1:9/mcp/none".to_owned(),
+        permission_mode: PermissionMode::Supervised,
     })?;
 
     drop(session.input);
@@ -298,5 +299,92 @@ async fn queued_and_steered_messages_wait_for_the_running_turn() -> TestResult {
     assert!(messages(&second).contains("QUEUED-1"), "{second:?}");
     let third = collect_turn(&mut events, chat).await?;
     assert!(messages(&third).contains("STEERED-2"), "{third:?}");
+    Ok(())
+}
+
+/// Asks Claude Code, in a Supervised chat, to create `file`, and answers
+/// the approval request that comes with `answer`. Returns the agent's
+/// messages after the answer, once the turn has ended normally.
+async fn answer_a_command_approval(
+    repo: &TestRepo,
+    file: &str,
+    answer: Answer,
+) -> TestResult<String> {
+    let (_harness, service, chat) = start_chat(repo).await?;
+    service
+        .execute(Command::ChangePermissionMode {
+            chat,
+            permission_mode: PermissionMode::Supervised,
+        })
+        .await?;
+    let mut events = service.subscribe();
+    send(
+        &service,
+        chat,
+        &format!(
+            "Use the Bash tool to run exactly this command: `touch {file}`. \
+             If I decline and say why, reply with exactly what I said. Otherwise \
+             reply with the single word done."
+        ),
+    )
+    .await?;
+    let request = tokio::time::timeout(TURN_TIMEOUT, async {
+        loop {
+            match events.recv().await? {
+                Event::Agent {
+                    chat: from,
+                    event: AgentEvent::ApprovalRequested { request, .. },
+                } if from == chat => return Ok::<_, Box<dyn Error>>(request),
+                Event::Agent {
+                    chat: from,
+                    event: event @ (AgentEvent::TurnEnded | AgentEvent::SessionEnded),
+                } if from == chat => {
+                    return Err(format!("no approval request before {event:?}").into());
+                }
+                _ => {}
+            }
+        }
+    })
+    .await??;
+    let response = service
+        .execute(Command::AnswerRequest {
+            chat,
+            request,
+            answer,
+        })
+        .await?;
+    assert_eq!(response, Response::RequestAnswered);
+    let turn = collect_turn(&mut events, chat).await?;
+    assert_eq!(turn.last(), Some(&AgentEvent::TurnEnded), "{turn:?}");
+    Ok(messages(&turn))
+}
+
+#[tokio::test]
+#[ignore = "needs Claude Code signed in to a subscription; run locally with --ignored"]
+async fn an_approved_command_runs() -> TestResult {
+    let repo = TestRepo::new()?;
+
+    answer_a_command_approval(&repo, "approved.txt", Answer::Approve).await?;
+
+    assert!(repo.path().join("approved.txt").exists());
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "needs Claude Code signed in to a subscription; run locally with --ignored"]
+async fn a_declined_commands_feedback_reaches_the_agent() -> TestResult {
+    let repo = TestRepo::new()?;
+
+    let answer = answer_a_command_approval(
+        &repo,
+        "declined.txt",
+        Answer::Decline {
+            feedback: Some("The code word is pineapple.".to_owned()),
+        },
+    )
+    .await?;
+
+    assert!(answer.to_lowercase().contains("pineapple"), "{answer}");
+    assert!(!repo.path().join("declined.txt").exists());
     Ok(())
 }

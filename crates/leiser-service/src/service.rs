@@ -11,9 +11,9 @@ use crate::handoff::{self, Handoff, ReadError};
 use crate::harness_mcp::{ChatRead, HarnessMcp, HarnessMcpError};
 use crate::store::{AgentSessionV2, ChatV2, HandoffV2, RepositoryV1, StateV2, StorageError, Store};
 use crate::{
-    AgentCli, AgentEvent, AgentSessionId, ChatId, ChatOverview, ChatStatus, Checkout, Command,
-    CommandError, Driver, Event, QueueReason, RepositoryId, RepositoryOverview, Response,
-    SessionInput, SessionSpec, TranscriptEntry,
+    AgentCli, AgentEvent, AgentSessionId, Answer, ChatId, ChatOverview, ChatStatus, Checkout,
+    Command, CommandError, Driver, Event, PermissionMode, QueueReason, RepositoryId,
+    RepositoryOverview, Response, SessionInput, SessionSpec, TranscriptEntry, repository_config,
 };
 
 /// Commands waiting for the command loop. Small, so callers feel back
@@ -166,6 +166,8 @@ struct Chat {
     /// The handoff the next message carries, after the chat changed agent
     /// CLI.
     handoff: Option<Handoff>,
+    /// The permission mode the developer chose; each turn starts in it.
+    permission_mode: PermissionMode,
     /// The running agent session, if any.
     session: Option<Session>,
 }
@@ -181,6 +183,7 @@ struct Resumable {
 impl Chat {
     fn status(&self) -> ChatStatus {
         match &self.session {
+            Some(Session { open, .. }) if !open.is_empty() => ChatStatus::Waiting,
             Some(Session {
                 turn: Turn::Running { .. },
                 ..
@@ -196,6 +199,36 @@ struct Session {
     input: mpsc::Sender<SessionInput>,
     turn: Turn,
     resume: Resume,
+    /// The permission mode the agent CLI runs this agent session in.
+    permission_mode: PermissionMode,
+    /// Approval requests and questions waiting for the developer, oldest
+    /// first. They close when the turn ends.
+    open: Vec<OpenRequest>,
+}
+
+/// An approval request or a question the agent waits for an answer to.
+struct OpenRequest {
+    /// The id the chat knows it by, unique in the harness service.
+    id: String,
+    /// The driver's id, unique only in the agent session.
+    driver_id: String,
+    kind: RequestKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RequestKind {
+    Approval,
+    Question,
+}
+
+impl RequestKind {
+    fn fits(self, answer: &Answer) -> bool {
+        match answer {
+            Answer::Decline { .. } => true,
+            Answer::Approve => self == Self::Approval,
+            Answer::Answers { .. } => self == Self::Question,
+        }
+    }
 }
 
 /// Whether a resumed agent session has shown that the agent CLI could
@@ -296,6 +329,7 @@ impl State {
                             HandoffV2::NewSession => Handoff::NewSession,
                             HandoffV2::Resume { known } => Handoff::Resume { known },
                         }),
+                        permission_mode: chat.permission_mode,
                         // Agent sessions did not survive the restart, so no
                         // turn runs; resumed ones wait for the next message.
                         session: None,
@@ -375,6 +409,15 @@ impl State {
             Command::ListChats => Ok(self.list_chats()),
             Command::ReadChat { chat } => self.read_chat(chat).await,
             Command::ChangeAgentCli { chat, agent_cli } => self.change_agent_cli(chat, agent_cli),
+            Command::ChangePermissionMode {
+                chat,
+                permission_mode,
+            } => self.change_permission_mode(chat, permission_mode),
+            Command::AnswerRequest {
+                chat,
+                request,
+                answer,
+            } => self.answer_request(chat, request, answer).await,
         }
     }
 
@@ -413,6 +456,10 @@ impl State {
             .ok_or(CommandError::UnknownRepository { repository })?;
         // Worktrees follow in a later ticket; this stops compiling then.
         let Checkout::Main = checkout;
+        let config =
+            repository_config::load(path).map_err(|error| CommandError::RepositoryConfig {
+                reason: error.to_string(),
+            })?;
         let working_directory = path.clone();
         let chat = ChatId(self.next_id());
         self.chats.insert(
@@ -424,6 +471,7 @@ impl State {
                 agent_cli: self.default_agent_cli,
                 agent_sessions: BTreeMap::new(),
                 handoff: None,
+                permission_mode: config.permission_mode,
                 session: None,
             },
         );
@@ -459,7 +507,20 @@ impl State {
             return Err(CommandError::TurnRunning { chat: id });
         }
         let pending = chat.handoff;
-        if chat.session.is_none() {
+        let mode_changed = chat
+            .session
+            .as_ref()
+            .is_some_and(|session| session.permission_mode != self.applied_mode(chat));
+        if mode_changed {
+            // The agent CLI takes the new mode when the agent session is
+            // resumed with it.
+            self.end_session(id);
+        }
+        if self
+            .chats
+            .get(&id)
+            .is_some_and(|chat| chat.session.is_none())
+        {
             self.open_session(id)?;
         }
         let entries_before = self.store.transcript(id.0)?.len();
@@ -614,8 +675,94 @@ impl State {
         Ok(Response::Chat {
             status: chat.status(),
             branch: crate::git::current_branch(&chat.working_directory).await,
+            permission_mode: chat.permission_mode,
+            applied_permission_mode: self.applied_mode(chat),
+            open_requests: chat
+                .session
+                .iter()
+                .flat_map(|session| &session.open)
+                .map(|request| request.id.clone())
+                .collect(),
             transcript,
         })
+    }
+
+    /// The mode the chat's agent CLI runs it in: its permission mode, or
+    /// Supervised where the agent CLI lacks that mode.
+    fn applied_mode(&self, chat: &Chat) -> PermissionMode {
+        let supported = self
+            .drivers
+            .get(&chat.agent_cli)
+            .is_some_and(|driver| driver.supports_permission_mode(chat.permission_mode));
+        if supported {
+            chat.permission_mode
+        } else {
+            PermissionMode::Supervised
+        }
+    }
+
+    fn change_permission_mode(
+        &mut self,
+        id: ChatId,
+        permission_mode: PermissionMode,
+    ) -> Result<Response, CommandError> {
+        let chat = self
+            .chats
+            .get_mut(&id)
+            .ok_or(CommandError::UnknownChat { chat: id })?;
+        let before = std::mem::replace(&mut chat.permission_mode, permission_mode);
+        if let Err(error) = self.save() {
+            if let Some(chat) = self.chats.get_mut(&id) {
+                chat.permission_mode = before;
+            }
+            return Err(error);
+        }
+        Ok(Response::PermissionModeChanged)
+    }
+
+    async fn answer_request(
+        &mut self,
+        id: ChatId,
+        request: String,
+        answer: Answer,
+    ) -> Result<Response, CommandError> {
+        let chat = self
+            .chats
+            .get_mut(&id)
+            .ok_or(CommandError::UnknownChat { chat: id })?;
+        let Some((session, index)) = chat.session.as_mut().and_then(|session| {
+            let index = session.open.iter().position(|open| open.id == request)?;
+            Some((session, index))
+        }) else {
+            return Err(CommandError::UnknownRequest { chat: id, request });
+        };
+        if !session.open[index].kind.fits(&answer) {
+            return Err(CommandError::AnswerDoesNotFit { chat: id, request });
+        }
+        let open = session.open.remove(index);
+        let input = session.input.clone();
+        // Recorded first, so the developer's answer is never lost.
+        self.store.append(
+            id.0,
+            &TranscriptEntry::Answer {
+                request: request.clone(),
+                answer: answer.clone(),
+            },
+        )?;
+        send_input(
+            &input,
+            SessionInput::Answer {
+                request: open.driver_id,
+                answer: answer.clone(),
+            },
+        )
+        .await?;
+        self.emit(Event::RequestAnswered {
+            chat: id,
+            request,
+            answer,
+        });
+        Ok(Response::RequestAnswered)
     }
 
     fn change_agent_cli(
@@ -691,9 +838,15 @@ impl State {
                 .map_err(|error| CommandError::AgentCli {
                     reason: error.to_string(),
                 })?;
+        let permission_mode = if driver.supports_permission_mode(chat.permission_mode) {
+            chat.permission_mode
+        } else {
+            PermissionMode::Supervised
+        };
         let spec = SessionSpec {
             working_directory: chat.working_directory.clone(),
             harness_mcp_url,
+            permission_mode,
         };
         let (started, resume) = match chat.agent_sessions.get(&chat.agent_cli) {
             Some(session) => (driver.resume(spec, &session.id), Resume::Untried),
@@ -716,6 +869,8 @@ impl State {
             input: started.input,
             turn: Turn::Idle,
             resume,
+            permission_mode,
+            open: Vec::new(),
         });
         Ok(())
     }
@@ -765,6 +920,7 @@ impl State {
     /// Records and forwards an agent session's event and, when it ends the
     /// turn, sends the next queued message.
     async fn agent_event(&mut self, id: ChatId, event: AgentEvent) {
+        let event = self.open_request(id, event);
         let Some(chat) = self.chats.get_mut(&id) else {
             return;
         };
@@ -795,12 +951,67 @@ impl State {
             AgentEvent::TurnEnded | AgentEvent::TurnInterrupted => Some(false),
             _ => None,
         };
+        if session_ended == Some(false)
+            && let Some(Chat {
+                session: Some(session),
+                ..
+            }) = self.chats.get_mut(&id)
+        {
+            // The agent CLI no longer waits for answers of an ended turn.
+            session.open.clear();
+        }
         self.emit(Event::Agent { chat: id, event });
         match session_ended {
             None => {}
             // Queued messages of the ended agent session are dropped with it.
             Some(true) => self.end_session(id),
             Some(false) => self.send_next_queued(id).await,
+        }
+    }
+
+    /// Opens an approval request or a question of the chat's agent session,
+    /// under an id unique in the harness service: drivers number requests
+    /// per agent session, and a chat can have several. Other events pass
+    /// unchanged.
+    fn open_request(&mut self, id: ChatId, event: AgentEvent) -> AgentEvent {
+        let (kind, driver_id) = match &event {
+            AgentEvent::ApprovalRequested { request, .. } => (RequestKind::Approval, request),
+            AgentEvent::QuestionAsked { request, .. } => (RequestKind::Question, request),
+            _ => return event,
+        };
+        let driver_id = driver_id.clone();
+        if self
+            .chats
+            .get(&id)
+            .is_none_or(|chat| chat.session.is_none())
+        {
+            return event;
+        }
+        let request = self.next_id().to_string();
+        if let Err(error) = self.save() {
+            // Only a restart before the next save could reuse the id.
+            tracing::error!(chat = ?id, %error, "could not store the next id");
+        }
+        if let Some(Chat {
+            session: Some(session),
+            ..
+        }) = self.chats.get_mut(&id)
+        {
+            session.open.push(OpenRequest {
+                id: request.clone(),
+                driver_id,
+                kind,
+            });
+        }
+        match event {
+            AgentEvent::ApprovalRequested { description, .. } => AgentEvent::ApprovalRequested {
+                request,
+                description,
+            },
+            AgentEvent::QuestionAsked { questions, .. } => {
+                AgentEvent::QuestionAsked { request, questions }
+            }
+            event => event,
         }
     }
 
@@ -839,6 +1050,11 @@ impl State {
     }
 
     async fn send_next_queued(&mut self, id: ChatId) {
+        let mode_changed = self.chats.get(&id).is_some_and(|chat| {
+            chat.session
+                .as_ref()
+                .is_some_and(|session| session.permission_mode != self.applied_mode(chat))
+        });
         let Some(Chat {
             session: Some(session),
             ..
@@ -854,7 +1070,17 @@ impl State {
             return;
         };
         session.turn = Turn::Running { queued };
-        let input = session.input.clone();
+        let mut input = session.input.clone();
+        if mode_changed {
+            match self.reopen_with_turn(id, &text) {
+                Ok(reopened) => input = reopened,
+                Err(error) => {
+                    // The queued messages go with the ended agent session.
+                    tracing::error!(chat = ?id, %error, "could not resume the agent session in its new permission mode");
+                    return;
+                }
+            }
+        }
         if let Err(error) = self.append_user_message(id, &text) {
             tracing::error!(chat = ?id, %error, "could not store a queued message");
         }
@@ -865,6 +1091,38 @@ impl State {
         // A failed send means the agent session has ended; its
         // `SessionEnded` event follows and ends the session.
         let _ = send_input(&input, SessionInput::UserMessage { text }).await;
+    }
+
+    /// Ends the chat's agent session, whose turn has just ended, and
+    /// resumes it in the chat's permission mode with the same queue, for
+    /// the turn that `text` starts. Returns the new agent session's input.
+    fn reopen_with_turn(
+        &mut self,
+        id: ChatId,
+        text: &str,
+    ) -> Result<mpsc::Sender<SessionInput>, CommandError> {
+        let entries_before = self.store.transcript(id.0)?.len();
+        let turn = self
+            .chats
+            .get_mut(&id)
+            .and_then(|chat| chat.session.take())
+            .map_or(Turn::Idle, |session| session.turn);
+        self.open_session(id)?;
+        let Some(Chat {
+            session: Some(session),
+            ..
+        }) = self.chats.get_mut(&id)
+        else {
+            return Err(CommandError::UnknownChat { chat: id });
+        };
+        session.turn = turn;
+        if let Resume::Untried = session.resume {
+            session.resume = Resume::Trying(Retry {
+                text: text.to_owned(),
+                entries_before,
+            });
+        }
+        Ok(session.input.clone())
     }
 
     /// The chat, if `generation` is its running agent session.
@@ -910,6 +1168,7 @@ impl State {
                         Handoff::NewSession => HandoffV2::NewSession,
                         Handoff::Resume { known } => HandoffV2::Resume { known },
                     }),
+                    permission_mode: chat.permission_mode,
                 })
                 .collect(),
         }
@@ -987,6 +1246,6 @@ fn stored_title(store: &Store, chat: u64) -> Option<String> {
     };
     transcript.iter().find_map(|entry| match entry {
         TranscriptEntry::UserMessage { text } => title(text),
-        TranscriptEntry::Agent { .. } => None,
+        TranscriptEntry::Agent { .. } | TranscriptEntry::Answer { .. } => None,
     })
 }

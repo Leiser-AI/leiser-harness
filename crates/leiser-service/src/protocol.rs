@@ -1,6 +1,7 @@
 //! The local interface of the harness service. Every type here crosses the
 //! boundary to the desktop app, so all of them serialize.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -26,6 +27,38 @@ impl std::fmt::Display for AgentCli {
         f.write_str(match self {
             Self::ClaudeCode => "Claude Code",
             Self::Codex => "Codex",
+        })
+    }
+}
+
+/// How much an agent session may do without the developer's approval.
+/// Each driver maps it onto its agent CLI's own mode; where an agent CLI
+/// lacks a mode, the chat runs Supervised. The agent CLI's sandbox applies
+/// in every mode.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionMode {
+    /// Asks before commands and file changes.
+    Supervised,
+    /// Changes files without asking; other actions still ask.
+    AutoAcceptEdits,
+    /// The agent CLI's automatic review approves routine actions and asks
+    /// about the others.
+    #[default]
+    Auto,
+    /// Never asks.
+    FullAccess,
+}
+
+impl std::fmt::Display for PermissionMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Supervised => "Supervised",
+            Self::AutoAcceptEdits => "Auto-accept edits",
+            Self::Auto => "Auto",
+            Self::FullAccess => "Full access",
         })
     }
 }
@@ -73,6 +106,21 @@ pub enum Command {
     /// Asks the agent CLI to stop the running turn. The turn ends with
     /// [`AgentEvent::TurnInterrupted`]; queued messages are sent after it.
     InterruptTurn { chat: ChatId },
+    /// Changes the chat's permission mode. A new chat starts in its
+    /// repository's default. The mode applies from the chat's next turn; a
+    /// running turn keeps the mode it started with.
+    ChangePermissionMode {
+        chat: ChatId,
+        permission_mode: PermissionMode,
+    },
+    /// Answers an approval request or a question of the chat's running
+    /// turn (see [`AgentEvent::ApprovalRequested`] and
+    /// [`AgentEvent::QuestionAsked`]).
+    AnswerRequest {
+        chat: ChatId,
+        request: String,
+        answer: Answer,
+    },
     /// Lists every repository added to the harness.
     ListRepositories,
     /// Lists every chat with its current status.
@@ -103,6 +151,10 @@ pub enum Response {
     InterruptRequested,
     /// The chat's next message goes to the new agent CLI.
     AgentCliChanged,
+    /// The chat's next turn runs in the new permission mode.
+    PermissionModeChanged,
+    /// The answer has been passed to the agent.
+    RequestAnswered,
     Repositories {
         repositories: Vec<RepositoryOverview>,
     },
@@ -113,6 +165,14 @@ pub enum Response {
         status: ChatStatus,
         /// The branch checked out where the chat works.
         branch: Branch,
+        /// The chat's permission mode, as the developer chose it.
+        permission_mode: PermissionMode,
+        /// The mode the chat's agent CLI runs it in: Supervised where the
+        /// agent CLI lacks `permission_mode`.
+        applied_permission_mode: PermissionMode,
+        /// The approval requests and questions the running turn waits for,
+        /// oldest first.
+        open_requests: Vec<String>,
         transcript: Vec<TranscriptEntry>,
     },
 }
@@ -156,6 +216,9 @@ pub enum ChatStatus {
     Idle,
     /// A turn is running.
     Working,
+    /// A turn is running and waits for the developer to answer an approval
+    /// request or a question.
+    Waiting,
 }
 
 /// One entry of a chat's transcript, in the order it happened.
@@ -173,6 +236,47 @@ pub enum TranscriptEntry {
         agent_cli: AgentCli,
         event: AgentEvent,
     },
+    /// The developer's answer to an approval request or a question.
+    Answer { request: String, answer: Answer },
+}
+
+/// The developer's answer to an approval request or a question.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Answer {
+    /// Allows the action the agent asked for. Only for approval requests.
+    Approve,
+    /// Refuses the action, or the questions. `feedback` is the developer's
+    /// text reply, which the agent gets instead.
+    Decline { feedback: Option<String> },
+    /// Answers questions: per question id, the labels of the chosen
+    /// options or the developer's own text. Only for questions.
+    Answers {
+        answers: BTreeMap<String, Vec<String>>,
+    },
+}
+
+/// A question an agent asks the developer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Question {
+    /// The question's id within its request; [`Answer::Answers`] keys
+    /// answers by it.
+    pub id: String,
+    /// A short label for the question.
+    pub header: String,
+    pub question: String,
+    /// The options to choose from; the developer may also write their own
+    /// answer.
+    pub options: Vec<QuestionOption>,
+    /// Whether the developer may choose several options.
+    pub multi_select: bool,
+}
+
+/// One option of a [`Question`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuestionOption {
+    pub label: String,
+    pub description: String,
 }
 
 /// Why a message was queued instead of being delivered now.
@@ -204,6 +308,12 @@ pub enum CommandError {
     NoTurnRunning { chat: ChatId },
     #[error("no driver is configured for {agent_cli}")]
     AgentCliNotConfigured { agent_cli: AgentCli },
+    #[error("no approval request or question {request:?} is open in chat {chat:?}")]
+    UnknownRequest { chat: ChatId, request: String },
+    #[error("request {request:?} in chat {chat:?} takes another kind of answer")]
+    AnswerDoesNotFit { chat: ChatId, request: String },
+    #[error("could not read the repository's config: {reason}")]
+    RepositoryConfig { reason: String },
     #[error("the agent CLI failed: {reason}")]
     AgentCli { reason: String },
     #[error("the harness service could not store the chat: {reason}")]
@@ -228,6 +338,12 @@ pub enum Event {
     MessageSteered { chat: ChatId, text: String },
     /// A queued message was sent and starts the next turn.
     QueuedMessageSent { chat: ChatId, text: String },
+    /// The developer answered an approval request or a question.
+    RequestAnswered {
+        chat: ChatId,
+        request: String,
+        answer: Answer,
+    },
 }
 
 impl Event {
@@ -238,7 +354,8 @@ impl Event {
             Self::Agent { chat, .. }
             | Self::MessageQueued { chat, .. }
             | Self::MessageSteered { chat, .. }
-            | Self::QueuedMessageSent { chat, .. } => *chat,
+            | Self::QueuedMessageSent { chat, .. }
+            | Self::RequestAnswered { chat, .. } => *chat,
         }
     }
 }
@@ -264,10 +381,21 @@ pub enum AgentEvent {
         exit_code: Option<i32>,
         output: String,
     },
-    /// The agent waits for the developer's approval.
+    /// The agent waits for the developer's approval of an action, until
+    /// [`Command::AnswerRequest`] answers it or the turn ends.
+    ///
+    /// `request` is unique in the chat once the harness service has
+    /// recorded the event; a driver gives its own id, unique in the agent
+    /// session, which the service replaces.
     ApprovalRequested {
         request: String,
         description: String,
+    },
+    /// The agent asks the developer questions and waits for the answers,
+    /// like [`AgentEvent::ApprovalRequested`].
+    QuestionAsked {
+        request: String,
+        questions: Vec<Question>,
     },
     /// The subscription hit a usage limit.
     UsageLimitReached {

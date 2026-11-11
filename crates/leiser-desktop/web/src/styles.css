@@ -291,3 +291,50 @@ button:disabled {
 .entry.failed {
   border-color: #d05050;
 }
+
+/* Approval requests and questions from the agent. */
+.entry.card {
+  background: var(--warn);
+  border: 1px solid var(--border);
+}
+
+.entry.card.open {
+  border-color: var(--accent);
+}
+
+.card-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.card-outcome {
+  margin-top: 6px;
+  font-size: 12px;
+  opacity: 0.8;
+}
+
+.card-questions fieldset {
+  border: none;
+  margin: 6px 0 0;
+  padding: 0;
+}
+
+.card-questions legend {
+  font-weight: 600;
+  padding: 0;
+}
+
+.card-option {
+  display: block;
+  margin-top: 4px;
+}
+
+.chat-status.waiting {
+  font-weight: 600;
+}
+
+.permission-mode {
+  font: inherit;
+}

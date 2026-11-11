@@ -5,14 +5,17 @@
 
 import type {
   AgentEvent,
+  Answer,
   Branch,
   ChatId,
   ChatOverview,
+  PermissionMode,
+  Question,
   RepositoryOverview,
   TranscriptEntry,
 } from "./protocol";
 import * as service from "./service";
-import { AGENT_CLI_NAMES, type ChatView } from "./service";
+import { AGENT_CLI_NAMES, type ChatView, PERMISSION_MODE_NAMES } from "./service";
 
 let selectedChat: ChatId | null = null;
 // Drops answers to older reads that arrive after newer ones.
@@ -65,6 +68,15 @@ async function act(action: () => Promise<void>): Promise<void> {
 
 // Whether the selected chat runs a turn, as last read from the service.
 let selectedWorking = false;
+// The approval requests and questions the selected chat waits for.
+let selectedOpenRequests: string[] = [];
+
+/** What a transcript entry needs to know about the rest of the chat. */
+interface ChatContext {
+  chat: ChatId;
+  open: Set<string>;
+  answers: Map<string, Answer>;
+}
 
 async function refresh(): Promise<void> {
   const read = ++readCount;
@@ -110,6 +122,8 @@ function renderSidebar(repositories: RepositoryOverview[], chats: ChatOverview[]
       button.append(el("span", "chat-title", chat.title ?? "New chat"));
       if (chat.status === "working") {
         button.append(el("span", "chat-status", "working"));
+      } else if (chat.status === "waiting") {
+        button.append(el("span", "chat-status waiting", "waiting for you"));
       }
       if (chat.chat === selectedChat) {
         button.classList.add("selected");
@@ -131,28 +145,68 @@ function renderSidebar(repositories: RepositoryOverview[], chats: ChatOverview[]
 }
 
 function renderChat(view: ChatView | null, repository: RepositoryOverview | null): void {
-  if (view === null) {
+  if (view === null || selectedChat === null) {
     selectedWorking = false;
+    selectedOpenRequests = [];
     topBar.replaceChildren(el("span", "muted", "No chat selected"));
     transcript.replaceChildren(el("li", "empty", "Select a chat or start a new one."));
     composer.hidden = true;
     return;
   }
+  const chat = selectedChat;
   topBar.replaceChildren(
     labelled("Repository", repository?.name ?? "unknown"),
     labelled("Branch", branchName(view.branch)),
+    permissionModePicker(chat, view),
   );
-  const entries = view.transcript.map(renderEntry);
+  const context: ChatContext = { chat, open: new Set(view.openRequests), answers: new Map() };
+  for (const entry of view.transcript) {
+    if (entry.type === "answer") context.answers.set(entry.request, entry.answer);
+  }
+  const entries = view.transcript.flatMap((entry) => renderEntry(entry, context) ?? []);
   if (entries.length === 0) {
     entries.push(el("li", "empty", "Send a message to start the agent."));
   }
   const atBottom = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 40;
   transcript.replaceChildren(...entries);
   if (atBottom) transcript.scrollTop = transcript.scrollHeight;
-  selectedWorking = view.status === "working";
-  sendButton.textContent = selectedWorking ? "Queue" : "Send";
+  selectedWorking = view.status !== "idle";
+  selectedOpenRequests = view.openRequests;
+  // A text reply to a waiting chat declines its oldest request with feedback.
+  sendButton.textContent =
+    selectedOpenRequests.length > 0 ? "Reply" : selectedWorking ? "Queue" : "Send";
+  messageInput.placeholder =
+    selectedOpenRequests.length > 0
+      ? "Reply instead of approving: the agent gets your text (Enter sends)"
+      : "Message the agent (Enter sends or queues, Shift+Enter adds a line)";
   interruptButton.hidden = !selectedWorking;
   composer.hidden = false;
+}
+
+const PERMISSION_MODES: PermissionMode[] = ["supervised", "auto_accept_edits", "auto", "full_access"];
+
+function permissionModePicker(chat: ChatId, view: ChatView): HTMLElement {
+  const item = el("label", "top-bar-item");
+  const select = el("select", "permission-mode");
+  for (const mode of PERMISSION_MODES) {
+    const option = el("option", "", PERMISSION_MODE_NAMES[mode]);
+    option.value = mode;
+    option.selected = mode === view.permissionMode;
+    select.append(option);
+  }
+  select.addEventListener("change", () =>
+    act(async () => {
+      await service.changePermissionMode(chat, select.value as PermissionMode);
+      await refresh();
+    }),
+  );
+  item.append(el("span", "top-bar-label", "Permissions"), select);
+  if (view.appliedPermissionMode !== view.permissionMode) {
+    const applied = PERMISSION_MODE_NAMES[view.appliedPermissionMode];
+    item.title = `The agent CLI has no such mode, so the chat runs ${applied}.`;
+    item.append(el("span", "top-bar-value muted", `runs ${applied}`));
+  }
+  return item;
 }
 
 function labelled(label: string, value: string): HTMLElement {
@@ -172,13 +226,124 @@ function branchName(branch: Branch): string {
   }
 }
 
-function renderEntry(entry: TranscriptEntry): HTMLElement {
-  if (entry.type === "user_message") {
-    const item = el("li", "entry user");
-    item.append(el("div", "entry-label", "You"), el("div", "entry-text", entry.text));
+function renderEntry(entry: TranscriptEntry, context: ChatContext): HTMLElement | null {
+  switch (entry.type) {
+    case "user_message": {
+      const item = el("li", "entry user");
+      item.append(el("div", "entry-label", "You"), el("div", "entry-text", entry.text));
+      return item;
+    }
+    // Shown on the card of the request it answers.
+    case "answer":
+      return null;
+    case "agent":
+      return renderAgentEvent(entry.event, AGENT_CLI_NAMES[entry.agent_cli], context);
+  }
+}
+
+function answer(context: ChatContext, request: string, given: Answer): Promise<void> {
+  return act(async () => {
+    await service.answerRequest(context.chat, request, given);
+    await refresh();
+  });
+}
+
+/** How a request ended, for a card that no longer waits. */
+function outcome(given: Answer | undefined): string {
+  if (given === undefined) return "No longer waiting: the turn ended.";
+  switch (given.type) {
+    case "approve":
+      return "Approved";
+    case "decline":
+      return given.feedback === null ? "Declined" : `Declined: ${given.feedback}`;
+    case "answers":
+      return `Answered: ${Object.values(given.answers).map((chosen) => chosen.join(", ")).join("; ")}`;
+  }
+}
+
+function approvalCard(
+  event: { request: string; description: string },
+  agentCli: string,
+  context: ChatContext,
+): HTMLElement {
+  const item = el("li", "entry card approval");
+  item.append(
+    el("div", "entry-label", `${agentCli} asks for approval`),
+    el("div", "entry-text", event.description),
+  );
+  if (!context.open.has(event.request)) {
+    item.append(el("div", "card-outcome", outcome(context.answers.get(event.request))));
     return item;
   }
-  return renderAgentEvent(entry.event, AGENT_CLI_NAMES[entry.agent_cli]);
+  item.classList.add("open");
+  const approve = el("button", "primary", "Approve");
+  approve.type = "button";
+  approve.addEventListener("click", () => void answer(context, event.request, { type: "approve" }));
+  const decline = el("button", "", "Decline");
+  decline.type = "button";
+  decline.addEventListener(
+    "click",
+    () => void answer(context, event.request, { type: "decline", feedback: null }),
+  );
+  const actions = el("div", "card-actions");
+  actions.append(approve, decline, el("span", "muted", "or reply below to decline with feedback"));
+  item.append(actions);
+  return item;
+}
+
+function questionCard(
+  event: { request: string; questions: Question[] },
+  agentCli: string,
+  context: ChatContext,
+): HTMLElement {
+  const item = el("li", "entry card question");
+  item.append(el("div", "entry-label", `${agentCli} asks`));
+  const open = context.open.has(event.request);
+  const form = el("form", "card-questions");
+  event.questions.forEach((question, index) => {
+    const fieldset = el("fieldset");
+    fieldset.append(el("legend", "", question.header === "" ? question.question : question.header));
+    if (question.header !== "") fieldset.append(el("div", "entry-text", question.question));
+    for (const option of question.options) {
+      const label = el("label", "card-option");
+      const input = el("input");
+      input.type = question.multi_select ? "checkbox" : "radio";
+      input.name = `question-${index}`;
+      input.value = option.label;
+      input.disabled = !open;
+      label.append(input, el("span", "", option.label));
+      if (option.description !== "") label.append(el("span", "muted", ` — ${option.description}`));
+      fieldset.append(label);
+    }
+    form.append(fieldset);
+  });
+  item.append(form);
+  if (!open) {
+    item.append(el("div", "card-outcome", outcome(context.answers.get(event.request))));
+    return item;
+  }
+  item.classList.add("open");
+  const send = el("button", "primary", "Send answers");
+  send.type = "submit";
+  const decline = el("button", "", "Decline");
+  decline.type = "button";
+  decline.addEventListener(
+    "click",
+    () => void answer(context, event.request, { type: "decline", feedback: null }),
+  );
+  form.addEventListener("submit", (submitted) => {
+    submitted.preventDefault();
+    const answers: Record<string, string[]> = {};
+    event.questions.forEach((question, index) => {
+      const checked = form.querySelectorAll<HTMLInputElement>(`input[name="question-${index}"]:checked`);
+      answers[question.id] = Array.from(checked, (input) => input.value);
+    });
+    void answer(context, event.request, { type: "answers", answers });
+  });
+  const actions = el("div", "card-actions");
+  actions.append(send, decline, el("span", "muted", "or reply below in your own words"));
+  form.append(actions);
+  return item;
 }
 
 function output(label: string, text: string): HTMLElement {
@@ -188,7 +353,7 @@ function output(label: string, text: string): HTMLElement {
   return details;
 }
 
-function renderAgentEvent(event: AgentEvent, agentCli: string): HTMLElement {
+function renderAgentEvent(event: AgentEvent, agentCli: string, context: ChatContext): HTMLElement {
   switch (event.type) {
     case "message": {
       const item = el("li", "entry agent");
@@ -212,11 +377,10 @@ function renderAgentEvent(event: AgentEvent, agentCli: string): HTMLElement {
       item.append(el("code", "", event.command), output(`Command · ${exit}`, event.output));
       return item;
     }
-    case "approval_requested": {
-      const item = el("li", "entry notice approval");
-      item.append(el("div", "entry-label", "Approval requested"), el("div", "entry-text", event.description));
-      return item;
-    }
+    case "approval_requested":
+      return approvalCard(event, agentCli, context);
+    case "question_asked":
+      return questionCard(event, agentCli, context);
     case "usage_limit_reached": {
       const resets =
         event.resets_in_seconds === null ? "" : ` · resets in ${formatDuration(event.resets_in_seconds)}`;
@@ -245,8 +409,12 @@ async function send(): Promise<void> {
   sendButton.disabled = true;
   try {
     await act(async () => {
-      // While a turn runs, a message waits for it to end.
-      if (selectedWorking) {
+      const waitingFor = selectedOpenRequests[0];
+      // A reply to a waiting chat declines its oldest request with the
+      // text as feedback; while a turn runs, a message waits for it to end.
+      if (waitingFor !== undefined) {
+        await service.answerRequest(chat, waitingFor, { type: "decline", feedback: text });
+      } else if (selectedWorking) {
         await service.queueMessage(chat, text);
       } else {
         await service.sendMessage(chat, text);

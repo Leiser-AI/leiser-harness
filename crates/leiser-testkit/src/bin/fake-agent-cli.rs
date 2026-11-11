@@ -3,11 +3,13 @@
 //! Usage:
 //!
 //! ```text
-//! fake-agent-cli --script <script.json> --sessions <dir> --session-id <id> [--harness-mcp <url>]
-//! fake-agent-cli --script <script.json> --sessions <dir> --resume <id> [--harness-mcp <url>]
+//! fake-agent-cli --script <script.json> --sessions <dir> --session-id <id> [--harness-mcp <url>] [--permission-mode <mode>]
+//! fake-agent-cli --script <script.json> --sessions <dir> --resume <id> [--harness-mcp <url>] [--permission-mode <mode>]
 //! ```
 //!
 //! Scripted calls to the harness MCP server go to `--harness-mcp`.
+//! `--permission-mode` takes the harness's spelling (default `auto`); the
+//! fake agent CLI only reports it.
 //!
 //! Reads one [`FakeInput`] per line on standard input and answers each
 //! message with the next scripted turn, written as one [`AgentEvent`] per
@@ -28,7 +30,7 @@ use std::process::ExitCode;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, TryRecvError};
 use std::time::Duration;
 
-use leiser_service::AgentEvent;
+use leiser_service::{AgentEvent, Answer, PermissionMode, Question};
 use leiser_testkit::{FakeInput, HarnessMcpClient, McpClientError, Script, Step};
 use serde::{Deserialize, Serialize};
 
@@ -39,7 +41,7 @@ const GATE_POLL: Duration = Duration::from_millis(10);
 enum FakeError {
     #[error(
         "usage: fake-agent-cli --script <script.json> --sessions <dir> \
-         (--session-id <id> | --resume <id>) [--harness-mcp <url>]"
+         (--session-id <id> | --resume <id>) [--harness-mcp <url>] [--permission-mode <mode>]"
     )]
     Usage,
     #[error("the script calls the harness MCP server, but no --harness-mcp was given")]
@@ -56,6 +58,8 @@ enum FakeError {
     Unexpected(&'static str),
     #[error("no steered message to echo")]
     NoSteer,
+    #[error("an answer to {0}, which is not open")]
+    UnknownRequest(String),
 }
 
 fn main() -> ExitCode {
@@ -87,6 +91,7 @@ struct Args {
     sessions: PathBuf,
     session: SessionArg,
     harness_mcp: Option<String>,
+    permission_mode: PermissionMode,
 }
 
 fn parse_args() -> Result<Args, FakeError> {
@@ -94,6 +99,7 @@ fn parse_args() -> Result<Args, FakeError> {
     let mut sessions = None;
     let mut session = None;
     let mut harness_mcp = None;
+    let mut permission_mode = PermissionMode::default();
     let mut args = std::env::args_os().skip(1);
     while let Some(flag) = args.next() {
         let value = args.next().ok_or(FakeError::Usage)?;
@@ -104,6 +110,10 @@ fn parse_args() -> Result<Args, FakeError> {
             Some("--session-id") => session = Some(SessionArg::New(text()?)),
             Some("--resume") => session = Some(SessionArg::Resume(text()?)),
             Some("--harness-mcp") => harness_mcp = Some(text()?),
+            Some("--permission-mode") => {
+                permission_mode = serde_json::from_value(serde_json::Value::String(text()?))
+                    .map_err(|_| FakeError::Usage)?;
+            }
             _ => return Err(FakeError::Usage),
         }
     }
@@ -113,6 +123,7 @@ fn parse_args() -> Result<Args, FakeError> {
             sessions,
             session,
             harness_mcp,
+            permission_mode,
         }),
         _ => Err(FakeError::Usage),
     }
@@ -184,6 +195,7 @@ fn run() -> Result<(), FakeError> {
     let mut session = SessionFile::open(&args.sessions, args.session)?;
     let inputs = read_inputs();
     let mut out = io::stdout().lock();
+    let mut requests: u64 = 0;
     while let Ok(input) = inputs.recv() {
         match input? {
             FakeInput::UserMessage { text } => {
@@ -192,6 +204,8 @@ fn run() -> Result<(), FakeError> {
                     steer: None,
                     supports_steer: script.supports_steer,
                     harness_mcp: args.harness_mcp.as_deref(),
+                    permission_mode: args.permission_mode,
+                    requests: &mut requests,
                     forget_session: false,
                     inputs: &inputs,
                     out: &mut out,
@@ -214,6 +228,7 @@ fn run() -> Result<(), FakeError> {
             FakeInput::Steer { .. } => return Err(FakeError::Unexpected("steer between turns")),
             // An interrupt that arrives after its turn ended is harmless.
             FakeInput::Interrupt => {}
+            FakeInput::Answer { request, .. } => return Err(FakeError::UnknownRequest(request)),
         }
     }
     Ok(())
@@ -247,6 +262,7 @@ enum Outcome {
 enum MidTurn {
     Steered,
     Interrupted,
+    Answered { request: String, answer: Answer },
 }
 
 struct Turn<'a, W> {
@@ -257,6 +273,9 @@ struct Turn<'a, W> {
     supports_steer: bool,
     /// The harness MCP server's address, if the agent session got one.
     harness_mcp: Option<&'a str>,
+    permission_mode: PermissionMode,
+    /// How many requests the agent session has sent, for their ids.
+    requests: &'a mut u64,
     /// Set by [`Step::ForgetSession`].
     forget_session: bool,
     inputs: &'a Receiver<Result<FakeInput, FakeError>>,
@@ -305,9 +324,82 @@ impl<W: Write> Turn<'_, W> {
                 self.forget_session = true;
                 return Ok(None);
             }
+            Step::ReportPermissionMode => AgentEvent::Message {
+                text: serde_json::to_value(self.permission_mode)?
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned(),
+            },
+            Step::RequestApproval { description } => {
+                let request = self.next_request();
+                emit(
+                    self.out,
+                    &AgentEvent::ApprovalRequested {
+                        request: request.clone(),
+                        description,
+                    },
+                )?;
+                return self.wait_for_answer(&request);
+            }
+            Step::AskQuestions { questions } => return self.ask(questions),
         };
         emit(self.out, &event)?;
         Ok(None)
+    }
+
+    fn next_request(&mut self) -> String {
+        *self.requests += 1;
+        format!("fake-{}", self.requests)
+    }
+
+    fn ask(&mut self, questions: Vec<Question>) -> Result<Option<Outcome>, FakeError> {
+        let request = self.next_request();
+        emit(
+            self.out,
+            &AgentEvent::QuestionAsked {
+                request: request.clone(),
+                questions,
+            },
+        )?;
+        self.wait_for_answer(&request)
+    }
+
+    /// Waits for the answer to `request` and answers with what it got.
+    fn wait_for_answer(&mut self, request: &str) -> Result<Option<Outcome>, FakeError> {
+        loop {
+            let Ok(input) = self.inputs.recv() else {
+                return Ok(Some(Outcome::InputClosed));
+            };
+            match self.mid_turn(input?)? {
+                MidTurn::Steered => {}
+                MidTurn::Interrupted => return Ok(Some(Outcome::Interrupted)),
+                MidTurn::Answered {
+                    request: answered,
+                    answer,
+                } => {
+                    if answered != request {
+                        return Err(FakeError::UnknownRequest(answered));
+                    }
+                    let text = match answer {
+                        Answer::Approve => "approved".to_owned(),
+                        Answer::Decline { feedback: None } => "declined".to_owned(),
+                        Answer::Decline {
+                            feedback: Some(feedback),
+                        } => format!("declined: {feedback}"),
+                        Answer::Answers { answers } => format!(
+                            "answered: {}",
+                            answers
+                                .into_iter()
+                                .map(|(id, chosen)| format!("{id}={}", chosen.join("|")))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ),
+                    };
+                    emit(self.out, &AgentEvent::Message { text })?;
+                    return Ok(None);
+                }
+            }
+        }
     }
 
     fn harness_mcp(&self) -> Result<HarnessMcpClient, FakeError> {
@@ -328,17 +420,20 @@ impl<W: Write> Turn<'_, W> {
         Ok(match self.mid_turn(input?)? {
             MidTurn::Steered => None,
             MidTurn::Interrupted => Some(Outcome::Interrupted),
+            MidTurn::Answered { request, .. } => return Err(FakeError::UnknownRequest(request)),
         })
     }
 
     fn wait_for_gate(&mut self, gate: &Path) -> Result<Option<Outcome>, FakeError> {
         while !gate.exists() {
             match self.inputs.recv_timeout(GATE_POLL) {
-                Ok(input) => {
-                    if let MidTurn::Interrupted = self.mid_turn(input?)? {
-                        return Ok(Some(Outcome::Interrupted));
+                Ok(input) => match self.mid_turn(input?)? {
+                    MidTurn::Steered => {}
+                    MidTurn::Interrupted => return Ok(Some(Outcome::Interrupted)),
+                    MidTurn::Answered { request, .. } => {
+                        return Err(FakeError::UnknownRequest(request));
                     }
-                }
+                },
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => return Ok(Some(Outcome::InputClosed)),
             }
@@ -351,11 +446,13 @@ impl<W: Write> Turn<'_, W> {
     fn take_pending(&mut self) -> Result<Option<Outcome>, FakeError> {
         loop {
             match self.inputs.try_recv() {
-                Ok(input) => {
-                    if let MidTurn::Interrupted = self.mid_turn(input?)? {
-                        return Ok(Some(Outcome::Interrupted));
+                Ok(input) => match self.mid_turn(input?)? {
+                    MidTurn::Steered => {}
+                    MidTurn::Interrupted => return Ok(Some(Outcome::Interrupted)),
+                    MidTurn::Answered { request, .. } => {
+                        return Err(FakeError::UnknownRequest(request));
                     }
-                }
+                },
                 Err(TryRecvError::Empty) => return Ok(None),
                 Err(TryRecvError::Disconnected) => return Ok(Some(Outcome::InputClosed)),
             }
@@ -375,6 +472,7 @@ impl<W: Write> Turn<'_, W> {
                 Ok(MidTurn::Steered)
             }
             FakeInput::Interrupt => Ok(MidTurn::Interrupted),
+            FakeInput::Answer { request, answer } => Ok(MidTurn::Answered { request, answer }),
         }
     }
 }

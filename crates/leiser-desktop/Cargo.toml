@@ -19,5 +19,7 @@ leiser-service = { version = "0.1.0", path = "../leiser-service" }
 leiser-testkit = { version = "0.1.0", path = "../leiser-testkit" }
 tauri = { version = "2.12.5", features = [] }
 tauri-plugin-dialog = "2.8.4"
+tauri-plugin-notification = "2.8.1"
 thiserror = "2.0.21"
 tokio = { version = "1.54.1", features = ["sync"] }
+tracing = { version = "0.1.44", default-features = false, features = ["std"] }

@@ -16,6 +16,16 @@
 //! Interrupt uses Claude Code's control protocol. Steering is not supported
 //! yet, so the harness service queues steered messages: it is not verified
 //! how Claude Code ends turns when a message arrives mid-turn.
+//!
+//! Permission modes map onto `--permission-mode`; Claude Code has all four
+//! (its `auto` falls back to asking where the model or plan lacks it).
+//! Claude Code's sandbox is switched on with `--settings` in every mode.
+//! Whatever needs approval reaches the driver as a `can_use_tool` control
+//! request (`--permission-prompt-tool stdio`, as the Agent SDK passes) and
+//! stays open until the developer answers; `AskUserQuestion` arrives the
+//! same way and becomes a question. Wire shapes follow the Python Agent SDK
+//! (`claude_agent_sdk/_internal/query.py`) and
+//! <https://code.claude.com/docs/en/agent-sdk/user-input>.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -28,8 +38,8 @@ use tokio::process::{ChildStdin, ChildStdout, Command};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::{
-    AgentEvent, AgentSession, AgentSessionId, Driver, DriverError, HARNESS_MCP_SERVER,
-    SessionInput, SessionSpec, Version,
+    AgentEvent, AgentSession, AgentSessionId, Answer, Driver, DriverError, HARNESS_MCP_SERVER,
+    PermissionMode, Question, QuestionOption, SessionInput, SessionSpec, Version,
 };
 
 const AGENT_CLI: &str = "Claude Code";
@@ -37,10 +47,9 @@ const CHANNEL_BUFFER: usize = 64;
 
 /// Claude Code's arguments for a long-running agent session.
 ///
-/// `--verbose` is needed for the full turn-by-turn stream. Until the
-/// harness answers approvals, `--permission-prompts none` declines whatever
-/// would prompt instead of leaving the turn waiting for an answer.
-const ARGUMENTS: [&str; 8] = [
+/// `--verbose` is needed for the full turn-by-turn stream. Permission
+/// prompts go to the driver over the control protocol.
+const ARGUMENTS: [&str; 10] = [
     "--print",
     "--input-format",
     "stream-json",
@@ -48,8 +57,37 @@ const ARGUMENTS: [&str; 8] = [
     "stream-json",
     "--verbose",
     "--permission-prompts",
-    "none",
+    "host",
+    "--permission-prompt-tool",
+    "stdio",
 ];
+
+/// The tool Claude Code asks the developer questions with.
+const ASK_USER_QUESTION: &str = "AskUserQuestion";
+
+/// Claude Code's `--permission-mode` for a permission mode.
+fn permission_mode_argument(mode: PermissionMode) -> &'static str {
+    match mode {
+        PermissionMode::Supervised => "default",
+        PermissionMode::AutoAcceptEdits => "acceptEdits",
+        PermissionMode::Auto => "auto",
+        PermissionMode::FullAccess => "bypassPermissions",
+    }
+}
+
+/// Claude Code's settings that switch its sandbox on: shell commands run in
+/// it and may not leave it. Native Windows has no Claude Code sandbox, so
+/// there it is asked for but not required.
+fn sandbox_settings() -> String {
+    serde_json::json!({
+        "sandbox": {
+            "enabled": true,
+            "failIfUnavailable": !cfg!(windows),
+            "allowUnsandboxedCommands": false,
+        }
+    })
+    .to_string()
+}
 
 /// Starts agent sessions on the developer's installed Claude Code.
 #[derive(Debug, Clone)]
@@ -130,6 +168,11 @@ impl Driver for ClaudeCodeDriver {
     ) -> Result<AgentSession, DriverError> {
         self.spawn(&spec, Some(session))
     }
+
+    /// Claude Code has a mode for each.
+    fn supports_permission_mode(&self, _mode: PermissionMode) -> bool {
+        true
+    }
 }
 
 impl ClaudeCodeDriver {
@@ -139,19 +182,8 @@ impl ClaudeCodeDriver {
         resume: Option<&AgentSessionId>,
     ) -> Result<AgentSession, DriverError> {
         self.check_version()?;
-        let mut command = Command::new(&self.program);
-        command.args(ARGUMENTS);
-        // Both options take several values; each is followed by another
-        // option or ends the arguments.
-        command
-            .arg("--mcp-config")
-            .arg(harness_mcp_config(&spec.harness_mcp_url))
-            .arg("--allowedTools")
-            .arg(format!("mcp__{HARNESS_MCP_SERVER}__read_chat"));
-        if let Some(session) = resume {
-            command.arg("--resume").arg(session.as_str());
-        }
-        let mut child = command
+        let mut child = Command::new(&self.program)
+            .args(arguments(spec, resume))
             .current_dir(&spec.working_directory)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -164,18 +196,41 @@ impl ClaudeCodeDriver {
         let (id_sender, id) = oneshot::channel();
         let (input, input_receiver) = mpsc::channel(CHANNEL_BUFFER);
         let (event_sender, events) = mpsc::channel(CHANNEL_BUFFER);
-        tokio::spawn(write_input(stdin, input_receiver));
         tokio::spawn(async move {
-            if read_events(stdout, id_sender, &event_sender).await == ReadEnd::ProtocolBroken {
+            let end = converse(stdin, stdout, input_receiver, id_sender, &event_sender).await;
+            if end == ReadEnd::ProtocolBroken {
                 // The process may still wait for input; it is of no use now.
                 let _ = child.start_kill();
             }
-            // Closing stdin (dropping the input sender) lets Claude Code exit.
             let _ = child.wait().await;
             let _ = event_sender.send(AgentEvent::SessionEnded).await;
         });
         Ok(AgentSession { id, input, events })
     }
+}
+
+/// Claude Code's arguments for the agent session.
+fn arguments(spec: &SessionSpec, resume: Option<&AgentSessionId>) -> Vec<String> {
+    let mut arguments: Vec<String> = ARGUMENTS
+        .iter()
+        .map(|&argument| argument.to_owned())
+        .collect();
+    arguments.extend([
+        "--permission-mode".to_owned(),
+        permission_mode_argument(spec.permission_mode).to_owned(),
+        "--settings".to_owned(),
+        sandbox_settings(),
+        // Both options take several values; each is followed by another
+        // option or ends the arguments.
+        "--mcp-config".to_owned(),
+        harness_mcp_config(&spec.harness_mcp_url),
+        "--allowedTools".to_owned(),
+        format!("mcp__{HARNESS_MCP_SERVER}__read_chat"),
+    ]);
+    if let Some(session) = resume {
+        arguments.extend(["--resume".to_owned(), session.as_str().to_owned()]);
+    }
+    arguments
 }
 
 /// Claude Code's MCP configuration with only the harness MCP server.
@@ -186,32 +241,6 @@ fn harness_mcp_config(url: &str) -> String {
     .to_string()
 }
 
-async fn write_input(mut stdin: ChildStdin, mut input: mpsc::Receiver<SessionInput>) {
-    let mut requests: u64 = 0;
-    while let Some(input) = input.recv().await {
-        let line = match &input {
-            SessionInput::UserMessage { text } => InputLine::user_message(text),
-            SessionInput::Interrupt => {
-                requests += 1;
-                InputLine::ControlRequest {
-                    request_id: format!("leiser-{requests}"),
-                    request: ControlRequest::Interrupt,
-                }
-            }
-            // The driver does not support steering, so the harness service
-            // queues steered messages and never sends this.
-            SessionInput::Steer { .. } => continue,
-        };
-        let Ok(mut line) = serde_json::to_vec(&line) else {
-            return;
-        };
-        line.push(b'\n');
-        if stdin.write_all(&line).await.is_err() || stdin.flush().await.is_err() {
-            return;
-        }
-    }
-}
-
 #[derive(Debug, PartialEq, Eq)]
 enum ReadEnd {
     /// Claude Code closed its output, or nobody reads the events any more.
@@ -220,34 +249,96 @@ enum ReadEnd {
     ProtocolBroken,
 }
 
-async fn read_events(
+/// Talks to Claude Code until it closes its output: writes the harness
+/// service's input, reads Claude Code's lines and passes their events on.
+/// When the input closes, Claude Code's standard input is closed so it
+/// exits, and its last lines are still read.
+async fn converse(
+    stdin: ChildStdin,
     stdout: ChildStdout,
+    mut input: mpsc::Receiver<SessionInput>,
     id: oneshot::Sender<AgentSessionId>,
     events: &mpsc::Sender<AgentEvent>,
 ) -> ReadEnd {
+    let mut stdin = Some(stdin);
     let mut lines = BufReader::new(stdout).lines();
     let mut parser = Parser::default();
     let mut id = Some(id);
-    while let Ok(Some(line)) = lines.next_line().await {
-        if let Some(sender) = id.take() {
-            match session_id(&line) {
-                // The service may have dropped the agent session already.
-                Some(session) => {
-                    let _ = sender.send(session);
+    let mut requests: u64 = 0;
+    // Claude Code answers permission prompts to the host only after the
+    // host has introduced itself, as the Agent SDK does.
+    if let Some(writer) = &mut stdin
+        && write_line(
+            writer,
+            &InputLine::control(&mut requests, ControlRequest::initialize()),
+        )
+        .await
+        .is_err()
+    {
+        stdin = None;
+    }
+    loop {
+        tokio::select! {
+            message = input.recv(), if stdin.is_some() => {
+                let line = match message {
+                    Some(SessionInput::UserMessage { text }) => Some(InputLine::user_message(text)),
+                    Some(SessionInput::Interrupt) => {
+                        Some(InputLine::control(&mut requests, ControlRequest::Interrupt))
+                    }
+                    Some(SessionInput::Answer { request, answer }) => parser.answer(&request, answer),
+                    // The driver does not support steering, so the harness
+                    // service queues steered messages and never sends this.
+                    Some(SessionInput::Steer { .. }) => None,
+                    None => {
+                        // Closing stdin lets Claude Code exit.
+                        stdin = None;
+                        None
+                    }
+                };
+                if let (Some(line), Some(writer)) = (line, &mut stdin)
+                    && write_line(writer, &line).await.is_err()
+                {
+                    stdin = None;
                 }
-                None => id = Some(sender),
             }
-        }
-        let Some(parsed) = parser.parse_line(&line) else {
-            return ReadEnd::ProtocolBroken;
-        };
-        for event in parsed {
-            if events.send(event).await.is_err() {
-                return ReadEnd::Closed;
+            line = lines.next_line() => {
+                let Ok(Some(line)) = line else {
+                    return ReadEnd::Closed;
+                };
+                if let Some(sender) = id.take() {
+                    match session_id(&line) {
+                        // The service may have dropped the agent session already.
+                        Some(session) => {
+                            let _ = sender.send(session);
+                        }
+                        None => id = Some(sender),
+                    }
+                }
+                let Some(parsed) = parser.parse_line(&line) else {
+                    return ReadEnd::ProtocolBroken;
+                };
+                for reply in std::mem::take(&mut parser.replies) {
+                    if let Some(writer) = &mut stdin
+                        && write_line(writer, &reply).await.is_err()
+                    {
+                        stdin = None;
+                    }
+                }
+                for event in parsed {
+                    // Nobody reads the events any more; the lines are still
+                    // read so Claude Code can write them and exit.
+                    let _ = events.send(event).await;
+                }
             }
         }
     }
-    ReadEnd::Closed
+}
+
+async fn write_line(stdin: &mut ChildStdin, line: &InputLine) -> std::io::Result<()> {
+    let mut bytes = serde_json::to_vec(line)?;
+    bytes.push(b'\n');
+    stdin.write_all(&bytes).await?;
+    stdin.flush().await
 }
 
 /// The agent session id that Claude Code puts on its output lines, first
@@ -268,6 +359,19 @@ struct Parser {
     /// Names of the tools called and not returned yet, by tool use id.
     /// A tool result names only the id of its call.
     running_tools: HashMap<String, String>,
+    /// Permission prompts waiting for the developer, by request id.
+    open: HashMap<String, OpenPrompt>,
+    /// Lines Claude Code waits for, to write before reading on.
+    replies: Vec<InputLine>,
+}
+
+/// A `can_use_tool` request waiting for the developer's answer.
+#[derive(Debug)]
+struct OpenPrompt {
+    /// The tool's input, which an allow passes back.
+    input: serde_json::Map<String, serde_json::Value>,
+    /// Set for `AskUserQuestion`: the questions as Claude Code sent them.
+    questions: Option<serde_json::Value>,
 }
 
 impl Parser {
@@ -307,23 +411,123 @@ impl Parser {
             OutputLine::RateLimitEvent { rate_limit_info } => {
                 rate_limit_info.into_event(now).into_iter().collect()
             }
+            OutputLine::ControlRequest {
+                request_id,
+                request,
+            } => self.control_request(request_id, request),
+            OutputLine::ControlCancelRequest { request_id } => {
+                // Claude Code no longer waits; an answer would be dropped.
+                self.open.remove(&request_id);
+                Vec::new()
+            }
             OutputLine::Assistant { .. } | OutputLine::User { .. } | OutputLine::Other => {
                 Vec::new()
             }
         }
     }
 
+    fn control_request(&mut self, request_id: String, request: IncomingControl) -> Vec<AgentEvent> {
+        let IncomingControl::CanUseTool {
+            tool_name,
+            input,
+            title,
+        } = request
+        else {
+            self.replies.push(InputLine::ControlResponse {
+                response: ControlResponse::Error {
+                    request_id,
+                    error: "leiser-harness does not support this control request".to_owned(),
+                },
+            });
+            return Vec::new();
+        };
+        if tool_name == ASK_USER_QUESTION
+            && let Some(raw) = input.get("questions")
+            && let Ok(asked) = serde_json::from_value::<Vec<AskedQuestion>>(raw.clone())
+        {
+            let questions = asked
+                .into_iter()
+                .map(AskedQuestion::into_question)
+                .collect();
+            self.open.insert(
+                request_id.clone(),
+                OpenPrompt {
+                    questions: Some(raw.clone()),
+                    input,
+                },
+            );
+            return vec![AgentEvent::QuestionAsked {
+                request: request_id,
+                questions,
+            }];
+        }
+        let description = title.unwrap_or_else(|| {
+            let detail = tool_detail(&input);
+            format!("{tool_name}: {detail}")
+        });
+        self.open.insert(
+            request_id.clone(),
+            OpenPrompt {
+                input,
+                questions: None,
+            },
+        );
+        vec![AgentEvent::ApprovalRequested {
+            request: request_id,
+            description,
+        }]
+    }
+
+    /// The line that answers the open prompt `request`, or `None` when it
+    /// is no longer open. A decline tells the agent why, in the developer's
+    /// words when they gave any.
+    fn answer(&mut self, request: &str, answer: Answer) -> Option<InputLine> {
+        let open = self.open.remove(request)?;
+        let result = match (open.questions, answer) {
+            (None, Answer::Approve) => PermissionResult::Allow {
+                updated_input: open.input,
+            },
+            (Some(questions), Answer::Answers { answers }) => {
+                let mut input = open.input;
+                // Claude Code keys answers by the question's text, with
+                // several chosen labels joined by commas.
+                let answers = answers
+                    .into_iter()
+                    .map(|(question, labels)| (question, labels.join(", ").into()))
+                    .collect();
+                input.insert("questions".to_owned(), questions);
+                input.insert("answers".to_owned(), serde_json::Value::Object(answers));
+                PermissionResult::Allow {
+                    updated_input: input,
+                }
+            }
+            (questions, Answer::Decline { feedback }) => PermissionResult::Deny {
+                message: feedback.unwrap_or_else(|| {
+                    if questions.is_some() {
+                        "The developer declined to answer.".to_owned()
+                    } else {
+                        "The developer declined this action.".to_owned()
+                    }
+                }),
+            },
+            // The harness service sends only answers that fit.
+            (_, Answer::Approve | Answer::Answers { .. }) => PermissionResult::Deny {
+                message: "The developer declined this action.".to_owned(),
+            },
+        };
+        Some(InputLine::ControlResponse {
+            response: ControlResponse::Success {
+                request_id: request.to_owned(),
+                response: result,
+            },
+        })
+    }
+
     fn assistant_event(&mut self, block: ContentBlock) -> Option<AgentEvent> {
         match block {
             ContentBlock::Text { text } => Some(AgentEvent::Message { text }),
             ContentBlock::ToolUse { id, name, input } => {
-                let detail = TOOL_DETAIL_FIELDS
-                    .iter()
-                    .find_map(|field| input.get(*field)?.as_str())
-                    .map_or_else(
-                        || serde_json::Value::Object(input.clone()).to_string(),
-                        str::to_owned,
-                    );
+                let detail = tool_detail(&input);
                 self.running_tools.insert(id, name.clone());
                 Some(AgentEvent::ToolCall { name, detail })
             }
@@ -349,6 +553,17 @@ impl Parser {
     }
 }
 
+/// What a tool call does, from the most telling field of its input.
+fn tool_detail(input: &serde_json::Map<String, serde_json::Value>) -> String {
+    TOOL_DETAIL_FIELDS
+        .iter()
+        .find_map(|field| input.get(*field)?.as_str())
+        .map_or_else(
+            || serde_json::Value::Object(input.clone()).to_string(),
+            str::to_owned,
+        )
+}
+
 fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -358,10 +573,10 @@ fn unix_now() -> u64 {
 /// A line the driver writes to Claude Code's standard input.
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-enum InputLine<'a> {
+enum InputLine {
     User {
-        message: UserMessage<'a>,
-        parent_tool_use_id: Option<&'a str>,
+        message: UserMessage,
+        parent_tool_use_id: Option<String>,
     },
     /// A request of Claude Code's control protocol. Its answer, a
     /// `control_response` line, is not needed.
@@ -369,32 +584,77 @@ enum InputLine<'a> {
         request_id: String,
         request: ControlRequest,
     },
+    /// The answer to one of Claude Code's control requests.
+    ControlResponse { response: ControlResponse },
 }
 
 #[derive(Debug, Serialize)]
 #[serde(tag = "subtype", rename_all = "snake_case")]
 enum ControlRequest {
+    /// Introduces the driver as the host that answers permission prompts.
+    Initialize { hooks: Option<()> },
     /// Stops the running turn, which then ends with a result whose
     /// terminal reason is `aborted_streaming` or `aborted_tools`.
     Interrupt,
 }
 
-impl<'a> InputLine<'a> {
-    fn user_message(text: &'a str) -> Self {
+impl ControlRequest {
+    const fn initialize() -> Self {
+        Self::Initialize { hooks: None }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "subtype", rename_all = "snake_case")]
+enum ControlResponse {
+    Success {
+        request_id: String,
+        response: PermissionResult,
+    },
+    Error {
+        request_id: String,
+        error: String,
+    },
+}
+
+/// The answer to a `can_use_tool` request.
+#[derive(Debug, Serialize)]
+#[serde(tag = "behavior", rename_all = "snake_case")]
+enum PermissionResult {
+    Allow {
+        #[serde(rename = "updatedInput")]
+        updated_input: serde_json::Map<String, serde_json::Value>,
+    },
+    Deny {
+        message: String,
+    },
+}
+
+impl InputLine {
+    fn user_message(text: impl Into<String>) -> Self {
         Self::User {
             message: UserMessage {
                 role: Role::User,
-                content: text,
+                content: text.into(),
             },
             parent_tool_use_id: None,
+        }
+    }
+
+    /// A control request with the next of the driver's request ids.
+    fn control(requests: &mut u64, request: ControlRequest) -> Self {
+        *requests += 1;
+        Self::ControlRequest {
+            request_id: format!("leiser-{requests}"),
+            request,
         }
     }
 }
 
 #[derive(Debug, Serialize)]
-struct UserMessage<'a> {
+struct UserMessage {
     role: Role,
-    content: &'a str,
+    content: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -428,8 +688,76 @@ enum OutputLine {
     RateLimitEvent {
         rate_limit_info: RateLimitInfo,
     },
+    /// A request of Claude Code's control protocol, such as a permission
+    /// prompt.
+    ControlRequest {
+        request_id: String,
+        request: IncomingControl,
+    },
+    /// Claude Code withdrew one of its control requests.
+    ControlCancelRequest {
+        request_id: String,
+    },
     #[serde(other)]
     Other,
+}
+
+/// A control request from Claude Code.
+#[derive(Debug, Deserialize)]
+#[serde(tag = "subtype", rename_all = "snake_case")]
+enum IncomingControl {
+    /// Asks whether the agent may use a tool.
+    CanUseTool {
+        tool_name: String,
+        input: serde_json::Map<String, serde_json::Value>,
+        /// A sentence that says what the agent wants to do, when Claude
+        /// Code gives one.
+        #[serde(default)]
+        title: Option<String>,
+    },
+    /// Hook callbacks, MCP messages and requests added later.
+    #[serde(other)]
+    Other,
+}
+
+/// One question of `AskUserQuestion`'s input.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AskedQuestion {
+    question: String,
+    #[serde(default)]
+    header: String,
+    #[serde(default)]
+    options: Vec<AskedOption>,
+    #[serde(default)]
+    multi_select: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct AskedOption {
+    label: String,
+    #[serde(default)]
+    description: String,
+}
+
+impl AskedQuestion {
+    /// Claude Code keys answers by the question's text, so it is the id.
+    fn into_question(self) -> Question {
+        Question {
+            id: self.question.clone(),
+            header: self.header,
+            question: self.question,
+            options: self
+                .options
+                .into_iter()
+                .map(|option| QuestionOption {
+                    label: option.label,
+                    description: option.description,
+                })
+                .collect(),
+            multi_select: self.multi_select,
+        }
+    }
 }
 
 /// Why a turn ended.
@@ -607,8 +935,257 @@ impl RateLimitInfo {
 
 #[cfg(test)]
 mod tests {
-    use super::{ControlRequest, InputLine, OutputLine, Parser, session_id};
-    use crate::{AgentEvent, AgentSessionId};
+    use std::collections::BTreeMap;
+
+    use serde_json::{Value, json};
+
+    use super::{ControlRequest, InputLine, OutputLine, Parser, arguments, session_id};
+    use crate::{
+        AgentEvent, AgentSessionId, Answer, PermissionMode, Question, QuestionOption, SessionSpec,
+    };
+
+    fn spec(permission_mode: PermissionMode) -> SessionSpec {
+        SessionSpec {
+            working_directory: "/repo".into(),
+            harness_mcp_url: "http://127.0.0.1:1/mcp/1".to_owned(),
+            permission_mode,
+        }
+    }
+
+    /// The value after `option` in the arguments for `mode`.
+    fn option(mode: PermissionMode, option: &str) -> Option<String> {
+        let arguments = arguments(&spec(mode), None);
+        let index = arguments.iter().position(|argument| argument == option)?;
+        arguments.get(index + 1).cloned()
+    }
+
+    #[test]
+    fn each_permission_mode_is_claude_codes_own() {
+        for (mode, expected) in [
+            (PermissionMode::Supervised, "default"),
+            (PermissionMode::AutoAcceptEdits, "acceptEdits"),
+            (PermissionMode::Auto, "auto"),
+            (PermissionMode::FullAccess, "bypassPermissions"),
+        ] {
+            assert_eq!(
+                option(mode, "--permission-mode").as_deref(),
+                Some(expected),
+                "{mode:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_sandbox_is_on_in_every_mode_and_prompts_come_to_the_driver() -> serde_json::Result<()> {
+        for mode in [
+            PermissionMode::Supervised,
+            PermissionMode::AutoAcceptEdits,
+            PermissionMode::Auto,
+            PermissionMode::FullAccess,
+        ] {
+            let settings: Value =
+                serde_json::from_str(&option(mode, "--settings").unwrap_or_default())?;
+            assert_eq!(settings["sandbox"]["enabled"], true, "{mode:?}");
+            assert_eq!(
+                settings["sandbox"]["allowUnsandboxedCommands"], false,
+                "{mode:?}"
+            );
+            assert_eq!(
+                option(mode, "--permission-prompts").as_deref(),
+                Some("host")
+            );
+            assert_eq!(
+                option(mode, "--permission-prompt-tool").as_deref(),
+                Some("stdio")
+            );
+        }
+        Ok(())
+    }
+
+    fn can_use_tool(id: &str, tool: &str, input: &Value) -> String {
+        json!({"type": "control_request", "request_id": id, "request": {
+            "subtype": "can_use_tool", "tool_name": tool, "input": input,
+            "permission_suggestions": null, "blocked_path": null, "tool_use_id": "toolu_1",
+        }})
+        .to_string()
+    }
+
+    fn answer_line(
+        parser: &mut Parser,
+        request: &str,
+        answer: Answer,
+    ) -> serde_json::Result<Value> {
+        let line = parser.answer(request, answer);
+        serde_json::to_value(&line)
+    }
+
+    #[test]
+    fn a_permission_prompt_is_an_approval_request_that_stays_open() {
+        let mut parser = Parser::default();
+
+        let events = parser
+            .parse_line(&can_use_tool(
+                "r1",
+                "Bash",
+                &json!({"command": "cargo test"}),
+            ))
+            .unwrap_or_default();
+
+        assert_eq!(
+            events,
+            [AgentEvent::ApprovalRequested {
+                request: "r1".to_owned(),
+                description: "Bash: cargo test".to_owned(),
+            }]
+        );
+        assert!(parser.replies.is_empty());
+    }
+
+    #[test]
+    fn approving_allows_the_tool_with_its_input() -> serde_json::Result<()> {
+        let mut parser = Parser::default();
+        parser.parse_line(&can_use_tool(
+            "r1",
+            "Bash",
+            &json!({"command": "cargo test"}),
+        ));
+
+        assert_eq!(
+            answer_line(&mut parser, "r1", Answer::Approve)?,
+            json!({"type": "control_response", "response": {"subtype": "success",
+                "request_id": "r1", "response": {"behavior": "allow",
+                "updatedInput": {"command": "cargo test"}}}})
+        );
+        // Answered once only.
+        assert_eq!(
+            answer_line(&mut parser, "r1", Answer::Approve)?,
+            Value::Null
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_decline_denies_with_the_developers_feedback() -> serde_json::Result<()> {
+        let mut parser = Parser::default();
+        parser.parse_line(&can_use_tool("r1", "Bash", &json!({"command": "rm -rf /"})));
+        parser.parse_line(&can_use_tool("r2", "Edit", &json!({"file_path": "a.rs"})));
+
+        let with_feedback = answer_line(
+            &mut parser,
+            "r1",
+            Answer::Decline {
+                feedback: Some("Never that.".to_owned()),
+            },
+        )?;
+        let without = answer_line(&mut parser, "r2", Answer::Decline { feedback: None })?;
+
+        assert_eq!(
+            with_feedback["response"]["response"],
+            json!({"behavior": "deny", "message": "Never that."})
+        );
+        assert_eq!(without["response"]["response"]["behavior"], "deny");
+        Ok(())
+    }
+
+    fn ask_user_question() -> Value {
+        json!({"questions": [{"question": "Which runner?", "header": "Runner",
+            "multiSelect": true, "options": [
+                {"label": "cargo test", "description": "Default"},
+                {"label": "nextest", "description": "Faster"}]}]})
+    }
+
+    #[test]
+    fn ask_user_question_is_a_question_answered_by_question_text() -> serde_json::Result<()> {
+        let mut parser = Parser::default();
+
+        let events = parser
+            .parse_line(&can_use_tool("r1", "AskUserQuestion", &ask_user_question()))
+            .unwrap_or_default();
+
+        assert_eq!(
+            events,
+            [AgentEvent::QuestionAsked {
+                request: "r1".to_owned(),
+                questions: vec![Question {
+                    id: "Which runner?".to_owned(),
+                    header: "Runner".to_owned(),
+                    question: "Which runner?".to_owned(),
+                    options: vec![
+                        QuestionOption {
+                            label: "cargo test".to_owned(),
+                            description: "Default".to_owned(),
+                        },
+                        QuestionOption {
+                            label: "nextest".to_owned(),
+                            description: "Faster".to_owned(),
+                        },
+                    ],
+                    multi_select: true,
+                }],
+            }]
+        );
+        let answers = BTreeMap::from([(
+            "Which runner?".to_owned(),
+            vec!["cargo test".to_owned(), "nextest".to_owned()],
+        )]);
+        let line = answer_line(&mut parser, "r1", Answer::Answers { answers })?;
+        assert_eq!(line["response"]["response"]["behavior"], "allow");
+        assert_eq!(
+            line["response"]["response"]["updatedInput"]["questions"],
+            ask_user_question()["questions"]
+        );
+        assert_eq!(
+            line["response"]["response"]["updatedInput"]["answers"],
+            json!({"Which runner?": "cargo test, nextest"})
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_withdrawn_prompt_takes_no_answer() -> serde_json::Result<()> {
+        let mut parser = Parser::default();
+        parser.parse_line(&can_use_tool("r1", "Bash", &json!({"command": "ls"})));
+
+        parser.parse_line(r#"{"type":"control_cancel_request","request_id":"r1"}"#);
+
+        assert_eq!(
+            answer_line(&mut parser, "r1", Answer::Approve)?,
+            Value::Null
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn control_requests_the_driver_does_not_handle_get_an_error_answer() -> serde_json::Result<()> {
+        let mut parser = Parser::default();
+
+        let events = parser.parse_line(
+            r#"{"type":"control_request","request_id":"r9","request":{"subtype":"hook_callback","callback_id":"x"}}"#,
+        );
+
+        assert_eq!(events, Some(vec![]));
+        assert_eq!(
+            serde_json::to_value(&parser.replies)?,
+            json!([{"type": "control_response", "response": {"subtype": "error",
+                "request_id": "r9",
+                "error": "leiser-harness does not support this control request"}}])
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn the_driver_introduces_itself_as_the_host() -> serde_json::Result<()> {
+        let mut requests = 0;
+
+        let line = InputLine::control(&mut requests, ControlRequest::initialize());
+
+        assert_eq!(
+            serde_json::to_value(&line)?,
+            json!({"type": "control_request", "request_id": "leiser-1",
+                "request": {"subtype": "initialize", "hooks": null}})
+        );
+        Ok(())
+    }
 
     /// The events of `lines`, read in order by one parser.
     fn events(lines: &[&str]) -> Vec<AgentEvent> {

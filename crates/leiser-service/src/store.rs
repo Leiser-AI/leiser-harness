@@ -19,13 +19,16 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{AgentCli, AgentEvent, TranscriptEntry};
+use crate::{AgentCli, AgentEvent, PermissionMode, TranscriptEntry};
 
 /// The storage version this harness service writes.
 ///
 /// - 1: one agent session per chat; transcript entries without agent CLI.
 /// - 2: a chat can change agent CLI: it keeps one agent session per agent
 ///   CLI and a pending handoff, and agent entries name their agent CLI.
+///   Later additions that version 2 data still parses with: a chat's
+///   permission mode (default Auto) and the developer's answers in the
+///   transcript.
 const VERSION: u32 = 2;
 
 const STATE_FILE: &str = "state.json";
@@ -72,6 +75,10 @@ pub(crate) struct ChatV2 {
     pub agent_sessions: Vec<AgentSessionV2>,
     /// The handoff the chat's next message carries.
     pub handoff: Option<HandoffV2>,
+    /// The chat's permission mode. Chats stored before permission modes
+    /// existed run in the default, Auto.
+    #[serde(default)]
+    pub permission_mode: PermissionMode,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -247,6 +254,7 @@ impl Store {
                         .into_iter()
                         .collect(),
                     handoff: None,
+                    permission_mode: PermissionMode::default(),
                 })
                 .collect(),
         };

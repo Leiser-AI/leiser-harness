@@ -5,12 +5,14 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 import type {
   AgentCli,
+  Answer,
   Branch,
   ChatId,
   ChatOverview,
   ChatStatus,
   Command,
   CommandError,
+  PermissionMode,
   QueueReason,
   RepositoryId,
   RepositoryOverview,
@@ -23,8 +25,19 @@ import type {
 export interface ChatView {
   status: ChatStatus;
   branch: Branch;
+  permissionMode: PermissionMode;
+  appliedPermissionMode: PermissionMode;
+  /** Approval requests and questions the running turn waits for, oldest first. */
+  openRequests: string[];
   transcript: TranscriptEntry[];
 }
+
+export const PERMISSION_MODE_NAMES: Record<PermissionMode, string> = {
+  supervised: "Supervised",
+  auto_accept_edits: "Auto-accept edits",
+  auto: "Auto",
+  full_access: "Full access",
+};
 
 export const AGENT_CLI_NAMES: Record<AgentCli, string> = {
   claude_code: "Claude Code",
@@ -50,6 +63,12 @@ function describe(error: CommandError): string {
       return "A turn is running; queue the message or interrupt the turn.";
     case "no_turn_running":
       return "No turn is running.";
+    case "unknown_request":
+      return "The agent no longer waits for this answer.";
+    case "answer_does_not_fit":
+      return "This answer does not fit the request.";
+    case "repository_config":
+      return `Could not read the repository's .leiser/config.toml: ${error.reason}`;
     case "agent_cli_not_configured":
       return `${AGENT_CLI_NAMES[error.agent_cli]} is not set up in the harness service.`;
     case "agent_cli":
@@ -106,6 +125,18 @@ export async function interruptTurn(chat: ChatId): Promise<void> {
   if (response.type !== "interrupt_requested") unexpected(response);
 }
 
+/** Changes the chat's permission mode; it applies from the next turn. */
+export async function changePermissionMode(chat: ChatId, mode: PermissionMode): Promise<void> {
+  const response = await execute({ type: "change_permission_mode", chat, permission_mode: mode });
+  if (response.type !== "permission_mode_changed") unexpected(response);
+}
+
+/** Answers an approval request or a question of the running turn. */
+export async function answerRequest(chat: ChatId, request: string, answer: Answer): Promise<void> {
+  const response = await execute({ type: "answer_request", chat, request, answer });
+  if (response.type !== "request_answered") unexpected(response);
+}
+
 export async function listRepositories(): Promise<RepositoryOverview[]> {
   const response = await execute({ type: "list_repositories" });
   return response.type === "repositories" ? response.repositories : unexpected(response);
@@ -119,7 +150,14 @@ export async function listChats(): Promise<ChatOverview[]> {
 export async function readChat(chat: ChatId): Promise<ChatView> {
   const response = await execute({ type: "read_chat", chat });
   return response.type === "chat"
-    ? { status: response.status, branch: response.branch, transcript: response.transcript }
+    ? {
+        status: response.status,
+        branch: response.branch,
+        permissionMode: response.permission_mode,
+        appliedPermissionMode: response.applied_permission_mode,
+        openRequests: response.open_requests,
+        transcript: response.transcript,
+      }
     : unexpected(response);
 }
 

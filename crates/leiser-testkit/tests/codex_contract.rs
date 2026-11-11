@@ -1,5 +1,5 @@
 //! Contract tests: the real Codex behaves like the fake agent CLI for
-//! start, send, read events, queue, steer, interrupt and resume.
+//! start, send, read events, approve, queue, steer, interrupt and resume.
 //!
 //! Each contract runs twice: against the fake agent CLI, in CI, and against
 //! the developer's installed Codex, only on demand, because it needs a
@@ -10,7 +10,7 @@
 //! ```
 //!
 //! `LEISER_CODEX` names the Codex program (default: `codex` on `PATH`).
-//! Approve joins once the driver interface has it.
+//! Approve covers approving a command and declining it with feedback.
 
 use std::error::Error;
 use std::path::Path;
@@ -18,8 +18,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use leiser_service::{
-    AgentCli, AgentEvent, ChatId, Checkout, CodexDriver, Command, Driver, Event, QueueReason,
-    Response, ServiceHandle, SessionSpec,
+    AgentCli, AgentEvent, Answer, ChatId, Checkout, CodexDriver, Command, Driver, Event,
+    PermissionMode, QueueReason, Response, ServiceHandle, SessionSpec,
 };
 use leiser_testkit::{FakeDriver, Gate, Script, Step, TestRepo, TestService, collect_turn_within};
 use tokio::sync::broadcast;
@@ -298,6 +298,7 @@ async fn an_agent_session_ends_when_its_input_is_dropped(driver: Arc<dyn Driver>
         working_directory: repo.path().to_path_buf(),
         // No harness MCP server listens there; these tests do not use it.
         harness_mcp_url: "http://127.0.0.1:9/mcp/none".to_owned(),
+        permission_mode: PermissionMode::Supervised,
     })?;
 
     drop(session.input);
@@ -311,6 +312,92 @@ async fn an_agent_session_ends_when_its_input_is_dropped(driver: Arc<dyn Driver>
     })
     .await?;
     assert_eq!(last, Some(AgentEvent::SessionEnded));
+    Ok(())
+}
+
+/// Asks the agent, in a Supervised chat, to create `file`, and answers
+/// the approval request that comes with `answer`. Returns the agent's
+/// messages after the answer, once the turn has ended normally.
+async fn answer_a_command_approval(
+    driver: Arc<dyn Driver>,
+    repo: &TestRepo,
+    file: &str,
+    answer: Answer,
+) -> TestResult<Vec<String>> {
+    let mut chat = Chat::start(driver, repo).await?;
+    chat.execute(Command::ChangePermissionMode {
+        chat: chat.id,
+        permission_mode: PermissionMode::Supervised,
+    })
+    .await?;
+    chat.send(&format!(
+        "Run exactly this shell command in the current directory: `touch {file}`. \
+         If I decline and say why, reply with exactly what I said. Otherwise reply \
+         with the single word done."
+    ))
+    .await?;
+    let request = tokio::time::timeout(TURN_TIMEOUT, async {
+        loop {
+            match chat.events.recv().await? {
+                Event::Agent {
+                    event: AgentEvent::ApprovalRequested { request, .. },
+                    ..
+                } => return Ok::<_, Box<dyn Error>>(request),
+                Event::Agent {
+                    event: event @ (AgentEvent::TurnEnded | AgentEvent::SessionEnded),
+                    ..
+                } => return Err(format!("no approval request before {event:?}").into()),
+                _ => {}
+            }
+        }
+    })
+    .await??;
+    let response = chat
+        .execute(Command::AnswerRequest {
+            chat: chat.id,
+            request,
+            answer,
+        })
+        .await?;
+    assert_eq!(response, Response::RequestAnswered);
+    // The command's own events may come too, so only messages are kept.
+    let turn = collect_turn_within(&mut chat.events, chat.id, TURN_TIMEOUT).await?;
+    assert_eq!(turn.last(), Some(&AgentEvent::TurnEnded), "{turn:?}");
+    Ok(turn
+        .into_iter()
+        .filter_map(|event| match event {
+            AgentEvent::Message { text } => Some(text),
+            _ => None,
+        })
+        .collect())
+}
+
+async fn an_approved_command_runs(driver: Arc<dyn Driver>, runs_commands: bool) -> TestResult {
+    let repo = TestRepo::new()?;
+
+    answer_a_command_approval(driver, &repo, "approved.txt", Answer::Approve).await?;
+
+    if runs_commands {
+        assert!(repo.path().join("approved.txt").exists());
+    }
+    Ok(())
+}
+
+async fn a_declined_commands_feedback_reaches_the_agent(driver: Arc<dyn Driver>) -> TestResult {
+    let repo = TestRepo::new()?;
+
+    let answer = answer_a_command_approval(
+        driver,
+        &repo,
+        "declined.txt",
+        Answer::Decline {
+            feedback: Some("The code word is pineapple.".to_owned()),
+        },
+    )
+    .await?;
+
+    assert!(mentions(&answer, "pineapple"), "{answer:?}");
+    assert!(!repo.path().join("declined.txt").exists());
     Ok(())
 }
 
@@ -382,6 +469,22 @@ async fn fake_an_agent_session_ends_when_its_input_is_dropped() -> TestResult {
 // --- The installed Codex, on demand ---
 
 #[tokio::test]
+async fn fake_an_approved_command_runs() -> TestResult {
+    let script = Script::new().turn([Step::RequestApproval {
+        description: "Run `touch approved.txt`".to_owned(),
+    }]);
+    an_approved_command_runs(fake(&script)?, false).await
+}
+
+#[tokio::test]
+async fn fake_a_declined_commands_feedback_reaches_the_agent() -> TestResult {
+    let script = Script::new().turn([Step::RequestApproval {
+        description: "Run `touch declined.txt`".to_owned(),
+    }]);
+    a_declined_commands_feedback_reaches_the_agent(fake(&script)?).await
+}
+
+#[tokio::test]
 #[ignore = "needs Codex and a subscription; see the module docs"]
 async fn codex_a_message_gets_an_answer_and_the_turn_ends() -> TestResult {
     a_message_gets_an_answer_and_the_turn_ends(codex()).await
@@ -421,4 +524,16 @@ async fn codex_a_steered_message_reaches_the_running_turn_and_a_queued_one_waits
 #[ignore = "needs Codex installed; see the module docs"]
 async fn codex_an_agent_session_ends_when_its_input_is_dropped() -> TestResult {
     an_agent_session_ends_when_its_input_is_dropped(codex()).await
+}
+
+#[tokio::test]
+#[ignore = "needs Codex and a subscription; see the module docs"]
+async fn codex_an_approved_command_runs() -> TestResult {
+    an_approved_command_runs(codex(), true).await
+}
+
+#[tokio::test]
+#[ignore = "needs Codex and a subscription; see the module docs"]
+async fn codex_a_declined_commands_feedback_reaches_the_agent() -> TestResult {
+    a_declined_commands_feedback_reaches_the_agent(codex()).await
 }

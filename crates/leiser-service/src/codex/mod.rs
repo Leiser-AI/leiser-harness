@@ -5,6 +5,12 @@
 //! Resume uses `thread/resume` with the thread's id as the agent session id.
 //! The harness MCP server is configured with `-c mcp_servers.<name>.url`,
 //! which Codex reaches over streamable HTTP.
+//!
+//! Every agent session runs in Codex's `workspace-write` sandbox. The
+//! permission mode sets Codex's approval policy (see
+//! `conversation::approval_settings`); Codex has no Auto-accept edits.
+//! Approval requests and `request_user_input` questions stay open until the
+//! developer answers; a decline's feedback is steered into the turn.
 
 mod conversation;
 mod wire;
@@ -20,7 +26,7 @@ use tokio::sync::{mpsc, oneshot};
 use self::conversation::{Conversation, Output, ProtocolError};
 use crate::{
     AgentEvent, AgentSession, AgentSessionId, Driver, DriverError, HARNESS_MCP_SERVER,
-    SessionInput, SessionSpec, Version,
+    PermissionMode, SessionInput, SessionSpec, Version,
 };
 
 const AGENT_CLI: &str = "Codex";
@@ -125,6 +131,11 @@ impl Driver for CodexDriver {
     fn supports_steer(&self) -> bool {
         true
     }
+
+    /// Codex has no mode that accepts file edits but asks about commands.
+    fn supports_permission_mode(&self, mode: PermissionMode) -> bool {
+        mode != PermissionMode::AutoAcceptEdits
+    }
 }
 
 impl CodexDriver {
@@ -165,14 +176,18 @@ impl CodexDriver {
         let (id_sender, id) = oneshot::channel();
         let (input, input_receiver) = mpsc::channel(CHANNEL_BUFFER);
         let (event_sender, events) = mpsc::channel(CHANNEL_BUFFER);
+        let thread = ThreadSettings {
+            working_directory,
+            permission_mode: spec.permission_mode,
+            resume,
+        };
         tokio::spawn(async move {
             // Ends the agent session however the conversation stopped:
             // the input was dropped, Codex exited, or Codex broke the
             // protocol. The cause is not reported yet: `AgentEvent` has no
             // variant for it.
             let _ = run(
-                working_directory,
-                resume,
+                thread,
                 id_sender,
                 stdin,
                 stdout,
@@ -207,18 +222,30 @@ enum SessionStop {
     Protocol(#[from] ProtocolError),
 }
 
-async fn run(
+/// What Codex's thread starts or resumes with.
+struct ThreadSettings {
     working_directory: String,
+    permission_mode: PermissionMode,
+    /// The thread to resume instead of starting a new one.
     resume: Option<String>,
+}
+
+async fn run(
+    thread: ThreadSettings,
     id: oneshot::Sender<AgentSessionId>,
     mut stdin: ChildStdin,
     stdout: ChildStdout,
     mut input: mpsc::Receiver<SessionInput>,
     events: &mpsc::Sender<AgentEvent>,
 ) -> Result<(), SessionStop> {
+    let ThreadSettings {
+        working_directory,
+        permission_mode,
+        resume,
+    } = thread;
     let (mut conversation, output) = match resume {
-        Some(thread_id) => Conversation::resume(working_directory, thread_id)?,
-        None => Conversation::start(working_directory)?,
+        Some(thread_id) => Conversation::resume(working_directory, permission_mode, thread_id)?,
+        None => Conversation::start(working_directory, permission_mode)?,
     };
     let mut id = Some(id);
     deliver(&mut stdin, events, &mut id, output).await?;
@@ -229,6 +256,9 @@ async fn run(
                 Some(SessionInput::UserMessage { text }) => conversation.user_message(text)?,
                 Some(SessionInput::Steer { text }) => conversation.steer(text)?,
                 Some(SessionInput::Interrupt) => conversation.interrupt()?,
+                Some(SessionInput::Answer { request, answer }) => {
+                    conversation.answer(&request, answer)?
+                }
                 None => return Err(SessionStop::InputClosed),
             },
             line = lines.next_line() => match line? {

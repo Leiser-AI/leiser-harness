@@ -6,7 +6,8 @@ use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use leiser_service::{
-    AgentEvent, AgentSession, AgentSessionId, Driver, DriverError, SessionInput, SessionSpec,
+    AgentEvent, AgentSession, AgentSessionId, Driver, DriverError, PermissionMode, SessionInput,
+    SessionSpec,
 };
 use tempfile::TempDir;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -27,6 +28,7 @@ const CHANNEL_BUFFER: usize = 64;
 pub struct FakeDriver {
     program: PathBuf,
     supports_steer: bool,
+    unsupported_permission_modes: Vec<PermissionMode>,
     script_file: PathBuf,
     sessions: PathBuf,
     next_session: AtomicU64,
@@ -50,6 +52,7 @@ impl FakeDriver {
         Ok(Self {
             program: program.to_path_buf(),
             supports_steer: script.supports_steer,
+            unsupported_permission_modes: script.unsupported_permission_modes.clone(),
             script_file,
             sessions,
             next_session: AtomicU64::new(1),
@@ -74,6 +77,8 @@ impl FakeDriver {
             .arg(id.as_str())
             .arg("--harness-mcp")
             .arg(&spec.harness_mcp_url)
+            .arg("--permission-mode")
+            .arg(permission_mode_argument(spec.permission_mode))
             .current_dir(&spec.working_directory)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -121,6 +126,19 @@ impl Driver for FakeDriver {
     fn supports_steer(&self) -> bool {
         self.supports_steer
     }
+
+    fn supports_permission_mode(&self, mode: PermissionMode) -> bool {
+        !self.unsupported_permission_modes.contains(&mode)
+    }
+}
+
+/// The permission mode as the fake agent CLI's `--permission-mode` takes
+/// it: the harness's own spelling.
+fn permission_mode_argument(mode: PermissionMode) -> String {
+    serde_json::to_value(mode)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_default()
 }
 
 async fn write_input(mut stdin: ChildStdin, mut input: mpsc::Receiver<SessionInput>) {
@@ -129,6 +147,7 @@ async fn write_input(mut stdin: ChildStdin, mut input: mpsc::Receiver<SessionInp
             SessionInput::UserMessage { text } => FakeInput::UserMessage { text },
             SessionInput::Steer { text } => FakeInput::Steer { text },
             SessionInput::Interrupt => FakeInput::Interrupt,
+            SessionInput::Answer { request, answer } => FakeInput::Answer { request, answer },
         };
         let Ok(mut line) = serde_json::to_vec(&message) else {
             return;
