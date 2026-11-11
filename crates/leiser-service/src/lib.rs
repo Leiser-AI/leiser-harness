@@ -22,11 +22,13 @@ mod git;
 mod handoff;
 mod harness_mcp;
 mod protocol;
-mod repository_config;
+mod repo_config;
+mod script;
 mod service;
 mod store;
 mod todos;
 mod version;
+mod worktree;
 
 pub use claude_code::ClaudeCodeDriver;
 pub use codex::CodexDriver;
@@ -37,8 +39,8 @@ pub use driver::{
 pub use harness_mcp::HarnessMcpError;
 pub use protocol::{
     AgentCli, AgentEvent, Branch, ChatId, ChatOverview, ChatStatus, Checkout, Command,
-    CommandError, Event, QueueReason, RepositoryId, RepositoryOverview, Response, Todo, TodoId,
-    TranscriptEntry,
+    CommandError, Event, QueueReason, RepositoryId, RepositoryOverview, RepositoryScript, Response,
+    Todo, TodoId, TranscriptEntry,
 };
 pub use service::{Service, ServiceConfig, ServiceHandle, StartError, start};
 pub use store::StorageError;

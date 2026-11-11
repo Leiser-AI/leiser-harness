@@ -20,24 +20,33 @@ const FAKE_TURNS: usize = 1000;
 pub struct FakeAgentCliError(#[from] io::Error);
 
 /// The harness service's configuration. Chats start on Claude Code and can
-/// change to Codex. With `LEISER_FAKE_AGENT_CLI` set, they run on the fake
-/// agent CLI instead and keep their data apart from real chats.
-pub fn service_config(data_dir: PathBuf) -> Result<ServiceConfig, FakeAgentCliError> {
+/// change to Codex; their worktrees go to `worktrees_dir`. With
+/// `LEISER_FAKE_AGENT_CLI` set, they run on the fake agent CLI instead and
+/// keep their data and worktrees apart from real chats.
+pub fn service_config(
+    data_dir: PathBuf,
+    worktrees_dir: PathBuf,
+) -> Result<ServiceConfig, FakeAgentCliError> {
     if let Some(program) = env::var_os(FAKE_AGENT_CLI_VARIABLE) {
         let driver = fake_driver(&PathBuf::from(program))?;
         return Ok(ServiceConfig::new(
             AgentCli::ClaudeCode,
             Arc::new(driver),
-            data_dir.join("fake-agent-cli"),
-        ));
+            data_dir.join(FAKE_DIR),
+        )
+        .with_worktrees_dir(worktrees_dir.join(FAKE_DIR)));
     }
     Ok(ServiceConfig::new(
         AgentCli::ClaudeCode,
         Arc::new(ClaudeCodeDriver::installed()),
         data_dir,
     )
-    .with_driver(AgentCli::Codex, Arc::new(CodexDriver::installed())))
+    .with_driver(AgentCli::Codex, Arc::new(CodexDriver::installed()))
+    .with_worktrees_dir(worktrees_dir))
 }
+
+/// Where the fake agent CLI's chats keep their data and worktrees.
+const FAKE_DIR: &str = "fake-agent-cli";
 
 /// A driver that answers every message with a tool call, its result, the
 /// message itself and a todo it adds through the harness MCP server. In a

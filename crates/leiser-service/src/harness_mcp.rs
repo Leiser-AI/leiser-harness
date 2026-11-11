@@ -6,10 +6,11 @@
 //! unguessable token, which also names the chat it may read and the tools
 //! it gets. Calls go to the service's command loop, which owns the chats.
 //!
-//! v1 exposes `read_chat`, always on, and the chat's todo list
-//! (`list_todos`, `add_todo`, `set_todo_done`, `remove_todo`) where the
-//! repository switches agent access to it on. A tool that is not on is
-//! not listed and calling it fails like calling an unknown tool.
+//! v1 exposes `read_chat`, always on, `name_branch` for chats in a
+//! worktree, and the chat's todo list (`list_todos`, `add_todo`,
+//! `set_todo_done`, `remove_todo`) where the repository switches agent
+//! access to it on. A tool that is not on is not listed and calling it
+//! fails like calling an unknown tool.
 
 use std::collections::HashMap;
 use std::convert::Infallible;
@@ -45,6 +46,7 @@ const LIST_TODOS: &str = "list_todos";
 const ADD_TODO: &str = "add_todo";
 const SET_TODO_DONE: &str = "set_todo_done";
 const REMOVE_TODO: &str = "remove_todo";
+const NAME_BRANCH: &str = "name_branch";
 
 /// Why the harness MCP server could not start.
 #[derive(Debug, thiserror::Error)]
@@ -64,6 +66,15 @@ pub(crate) struct ChatRead {
     pub reply: oneshot::Sender<Result<String, ReadError>>,
 }
 
+/// A name-branch call, for the command loop to answer: renames the branch
+/// of the chat's worktree, or says why not.
+#[derive(Debug)]
+pub(crate) struct BranchNaming {
+    pub chat: ChatId,
+    pub name: String,
+    pub reply: oneshot::Sender<Result<String, String>>,
+}
+
 /// A todo list call, for the command loop to answer with the todo list
 /// after the change, if any, and the id of an added todo.
 #[derive(Debug)]
@@ -79,14 +90,15 @@ pub(crate) struct TodoAnswer {
     pub todos: Vec<Todo>,
 }
 
-/// A tool call for the command loop to answer.
+/// A tool call the command loop answers.
 #[derive(Debug)]
 pub(crate) enum HarnessCall {
     ReadChat(ChatRead),
+    NameBranch(BranchNaming),
     Todos(TodoCall),
 }
 
-/// The tools an agent session gets besides `read_chat`.
+/// The tools an agent session gets besides those always on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Tools {
     pub todo_list: bool,
@@ -99,8 +111,8 @@ struct Access {
     tools: Tools,
 }
 
-/// What every connection shares: which token may do what, and where calls
-/// go.
+/// What every connection shares: which token may do what, and where tool
+/// calls go.
 #[derive(Debug)]
 struct Shared {
     chats: Mutex<HashMap<String, Access>>,
@@ -276,6 +288,7 @@ struct InitializeParams {
 #[derive(Debug)]
 enum ToolCall {
     ReadChat(Result<ReadChatArguments, String>),
+    NameBranch(Result<NameBranchArguments, String>),
     /// `None` reads the todo list, a change changes it.
     Todos(Result<Option<TodoChange>, String>),
 }
@@ -292,6 +305,12 @@ struct CallToolParams {
 struct ReadChatArguments {
     from: usize,
     to: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NameBranchArguments {
+    name: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -357,27 +376,28 @@ fn parse_request(
         "tools/call" => {
             let call: CallToolParams = serde_json::from_value(params).map_err(invalid)?;
             let arguments = call.arguments.unwrap_or_else(|| json!({}));
-            let todos = |change: Result<Option<TodoChange>, serde_json::Error>| {
-                Ok(McpRequest::CallTool(ToolCall::Todos(
-                    change.map_err(|error| error.to_string()),
-                )))
+            let todos = |change: Result<Option<TodoChange>, String>| {
+                Ok(McpRequest::CallTool(ToolCall::Todos(change)))
             };
             match call.name.as_str() {
-                READ_CHAT => Ok(McpRequest::CallTool(ToolCall::ReadChat(
-                    serde_json::from_value(arguments).map_err(|error| error.to_string()),
-                ))),
+                READ_CHAT => Ok(McpRequest::CallTool(ToolCall::ReadChat(tool_arguments(
+                    arguments,
+                )))),
+                NAME_BRANCH => Ok(McpRequest::CallTool(ToolCall::NameBranch(tool_arguments(
+                    arguments,
+                )))),
                 LIST_TODOS if tools.todo_list => {
-                    todos(serde_json::from_value::<NoArguments>(arguments).map(|_| None))
+                    todos(tool_arguments::<NoArguments>(arguments).map(|_| None))
                 }
                 ADD_TODO if tools.todo_list => todos(
-                    serde_json::from_value::<AddTodoArguments>(arguments).map(|arguments| {
+                    tool_arguments::<AddTodoArguments>(arguments).map(|arguments| {
                         Some(TodoChange::Add {
                             text: arguments.text,
                         })
                     }),
                 ),
                 SET_TODO_DONE if tools.todo_list => todos(
-                    serde_json::from_value::<SetTodoDoneArguments>(arguments).map(|arguments| {
+                    tool_arguments::<SetTodoDoneArguments>(arguments).map(|arguments| {
                         Some(TodoChange::SetDone {
                             todo: TodoId(arguments.id),
                             done: arguments.done,
@@ -385,7 +405,7 @@ fn parse_request(
                     }),
                 ),
                 REMOVE_TODO if tools.todo_list => todos(
-                    serde_json::from_value::<RemoveTodoArguments>(arguments).map(|arguments| {
+                    tool_arguments::<RemoveTodoArguments>(arguments).map(|arguments| {
                         Some(TodoChange::Remove {
                             todo: TodoId(arguments.id),
                         })
@@ -399,6 +419,11 @@ fn parse_request(
             &format!("method not found: {method}"),
         )),
     }
+}
+
+/// A tool's arguments, or why they are invalid, for the agent to read.
+fn tool_arguments<T: serde::de::DeserializeOwned>(arguments: Value) -> Result<T, String> {
+    serde_json::from_value(arguments).map_err(|error| error.to_string())
 }
 
 async fn answer(request: McpRequest, access: Access, calls: &mpsc::Sender<HarnessCall>) -> Value {
@@ -422,7 +447,7 @@ async fn answer(request: McpRequest, access: Access, calls: &mpsc::Sender<Harnes
         }
         McpRequest::Ping => json!({}),
         McpRequest::ListTools => {
-            let mut tools = vec![read_chat_tool()];
+            let mut tools = vec![read_chat_tool(), name_branch_tool()];
             if access.tools.todo_list {
                 tools.extend(todo_tools());
             }
@@ -433,8 +458,11 @@ async fn answer(request: McpRequest, access: Access, calls: &mpsc::Sender<Harnes
                 ToolCall::ReadChat(Ok(arguments)) => read_chat(chat, arguments, calls)
                     .await
                     .map_err(|error| error.to_string()),
+                ToolCall::NameBranch(Ok(arguments)) => name_branch(chat, arguments, calls).await,
                 ToolCall::Todos(Ok(change)) => change_todos(chat, change, calls).await,
-                ToolCall::ReadChat(Err(error)) | ToolCall::Todos(Err(error)) => Err(error),
+                ToolCall::ReadChat(Err(error))
+                | ToolCall::NameBranch(Err(error))
+                | ToolCall::Todos(Err(error)) => Err(error),
             };
             match text {
                 Ok(text) => json!({
@@ -452,7 +480,8 @@ async fn answer(request: McpRequest, access: Access, calls: &mpsc::Sender<Harnes
 
 fn instructions(tools: Tools) -> String {
     let mut text = "Tools of the leiser harness. Use read_chat to read entries of this \
-        chat that a handoff left out."
+        chat that a handoff left out, and name_branch to name the branch of this chat's \
+        worktree."
         .to_owned();
     if tools.todo_list {
         text.push_str(
@@ -469,7 +498,7 @@ async fn read_chat(
     arguments: ReadChatArguments,
     calls: &mpsc::Sender<HarnessCall>,
 ) -> Result<String, ReadError> {
-    let stopped = || ReadError::Unavailable("the harness service has stopped".to_owned());
+    let stopped = || ReadError::Unavailable(STOPPED.to_owned());
     let (reply, answer) = oneshot::channel();
     calls
         .send(HarnessCall::ReadChat(ChatRead {
@@ -481,6 +510,47 @@ async fn read_chat(
         .await
         .map_err(|_| stopped())?;
     answer.await.map_err(|_| stopped())?
+}
+
+const STOPPED: &str = "the harness service has stopped";
+
+async fn name_branch(
+    chat: ChatId,
+    arguments: NameBranchArguments,
+    calls: &mpsc::Sender<HarnessCall>,
+) -> Result<String, String> {
+    let (reply, answer) = oneshot::channel();
+    calls
+        .send(HarnessCall::NameBranch(BranchNaming {
+            chat,
+            name: arguments.name,
+            reply,
+        }))
+        .await
+        .map_err(|_| STOPPED.to_owned())?;
+    answer.await.map_err(|_| STOPPED.to_owned())?
+}
+
+fn name_branch_tool() -> Value {
+    json!({
+        "name": NAME_BRANCH,
+        "title": "Name branch",
+        "description": "Names the branch of this chat's worktree once you know the task. \
+            The name must follow the repository's branch pattern, which this tool \
+            names when a name does not fit. Only for chats in their own worktree.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "The new branch name, such as feat/login-form.",
+                },
+            },
+            "required": ["name"],
+            "additionalProperties": false,
+        },
+        "annotations": { "readOnlyHint": false, "destructiveHint": false, "openWorldHint": false },
+    })
 }
 
 /// Reads or changes the chat's todo list and answers with what happened

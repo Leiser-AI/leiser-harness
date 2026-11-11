@@ -81,6 +81,8 @@ fn quoted(transcript: &[TranscriptEntry]) -> Vec<Quoted<'_>> {
                     | AgentEvent::TurnInterrupted
                     | AgentEvent::SessionEnded => return None,
                 },
+                // The harness's own scripts; the agent did not run them.
+                TranscriptEntry::ScriptFinished { .. } => return None,
             };
             Some((index, entry))
         })

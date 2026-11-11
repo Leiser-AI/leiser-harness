@@ -18,6 +18,8 @@ type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 const FAKE_AGENT_CLI: &str = env!("CARGO_BIN_EXE_fake-agent-cli");
 
 const AGENT_ACCESS_ON: &str = "[agent_access]\ntodo_list = true\n";
+/// The harness MCP server's tools that every agent session gets.
+const ALWAYS_ON_TOOLS: &str = "read_chat,name_branch";
 
 fn start_service(script: &Script) -> TestResult<TestService> {
     Ok(TestService::start(Path::new(FAKE_AGENT_CLI), script)?)
@@ -314,7 +316,7 @@ async fn without_agent_access_the_agent_gets_no_todo_tools() -> TestResult {
     let [tools, added] = messages.as_slice() else {
         return Err(format!("expected two messages, got {messages:?}").into());
     };
-    assert_eq!(tools, "read_chat");
+    assert_eq!(tools, ALWAYS_ON_TOOLS);
     assert!(added.starts_with("rpc error"), "{added}");
     assert_eq!(todos(&service, chat).await?, []);
     Ok(())
@@ -331,7 +333,7 @@ async fn agent_access_switched_off_in_the_config_gives_no_todo_tools() -> TestRe
 
     let messages = turn(&service, &mut events, chat, "Plan the work.").await?;
 
-    assert_eq!(messages, ["read_chat"]);
+    assert_eq!(messages, [ALWAYS_ON_TOOLS]);
     Ok(())
 }
 
@@ -356,6 +358,7 @@ async fn with_agent_access_the_agent_gets_the_todo_tools() -> TestResult {
         [
             "add_todo",
             "list_todos",
+            "name_branch",
             "read_chat",
             "remove_todo",
             "set_todo_done"
@@ -492,9 +495,9 @@ async fn an_invalid_repository_config_is_reported() -> TestResult {
         })
         .await;
 
-    let Err(CommandError::RepositoryConfig { path, .. }) = result else {
-        return Err(format!("expected RepositoryConfig, got {result:?}").into());
-    };
-    assert!(path.ends_with(".leiser/config.toml"), "{}", path.display());
+    assert!(
+        matches!(result, Err(CommandError::RepositoryConfig { .. })),
+        "{result:?}"
+    );
     Ok(())
 }

@@ -7,6 +7,7 @@ import type {
   AgentCli,
   Branch,
   ChatId,
+  Checkout,
   ChatOverview,
   ChatStatus,
   Command,
@@ -48,6 +49,16 @@ function describe(error: CommandError): string {
       return "The harness service does not know this repository.";
     case "unknown_chat":
       return "The harness service does not know this chat.";
+    case "chat_in_another_repository":
+      return "That chat belongs to another repository.";
+    case "not_in_a_worktree":
+      return "That chat works in the main checkout, not in a worktree.";
+    case "setting_up":
+      return "The chat's worktree is still being set up.";
+    case "worktree":
+      return `Could not create the chat's worktree: ${error.reason}`;
+    case "repository_config":
+      return `The repository's .leiser/config.toml is invalid: ${error.reason}`;
     case "turn_running":
       return "A turn is running; queue the message or interrupt the turn.";
     case "no_turn_running":
@@ -60,8 +71,6 @@ function describe(error: CommandError): string {
       return "A todo needs a text.";
     case "unknown_todo":
       return `Todo ${error.todo} no longer exists.`;
-    case "repository_config":
-      return `${error.path} is invalid: ${error.reason}`;
     case "storage":
       return `The harness service could not store the chat: ${error.reason}`;
     case "service_stopped":
@@ -91,9 +100,15 @@ export async function addRepository(path: string): Promise<RepositoryId> {
   return response.type === "repository_added" ? response.repository : unexpected(response);
 }
 
-export async function startChat(repository: RepositoryId): Promise<ChatId> {
-  const response = await execute({ type: "start_chat", repository, checkout: "main" });
+/** Starts a chat; without a checkout, in a new worktree. */
+export async function startChat(repository: RepositoryId, checkout?: Checkout): Promise<ChatId> {
+  const response = await execute({ type: "start_chat", repository, checkout });
   return response.type === "chat_started" ? response.chat : unexpected(response);
+}
+
+export async function markChatDone(chat: ChatId): Promise<void> {
+  const response = await execute({ type: "mark_chat_done", chat });
+  if (response.type !== "chat_marked_done") unexpected(response);
 }
 
 export async function sendMessage(chat: ChatId, text: string): Promise<void> {
