@@ -28,6 +28,9 @@
 //! (its `auto` falls back to asking where the model or plan lacks it).
 //! Claude Code's sandbox is switched on with `--settings` in every mode,
 //! together with the hard blocks as deny rules (see [`deny_rules`]).
+//! Supervised and Auto-accept edits still ask before each command (see
+//! [`asks_before_commands`]): the sandbox alone would let Claude Code run
+//! sandboxed commands without asking.
 //! Whatever needs approval reaches the driver as a `can_use_tool` control
 //! request (`--permission-prompt-tool stdio`, as the Agent SDK passes) and
 //! stays open until the developer answers; `AskUserQuestion` arrives the
@@ -112,6 +115,16 @@ fn permission_mode_argument(mode: PermissionMode) -> &'static str {
     }
 }
 
+/// Whether Claude Code asks before each shell command in `mode`: Supervised
+/// and Auto-accept edits do, Auto and Full access run sandboxed commands
+/// without asking.
+fn asks_before_commands(mode: PermissionMode) -> bool {
+    match mode {
+        PermissionMode::Supervised | PermissionMode::AutoAcceptEdits => true,
+        PermissionMode::Auto | PermissionMode::FullAccess => false,
+    }
+}
+
 /// Claude Code's settings that switch its sandbox on: shell commands run in
 /// it and may not leave it. Native Windows has no Claude Code sandbox, so
 /// there it is asked for but not required. They also switch off Claude
@@ -122,12 +135,17 @@ fn permission_mode_argument(mode: PermissionMode) -> &'static str {
 /// `--settings` ranks above the repository's own settings files, which
 /// stay in force: Claude Code merges list keys such as `permissions.deny`
 /// across all of them, and a deny rule holds in every permission mode.
-fn sandbox_settings() -> String {
+///
+/// With the sandbox on, Claude Code runs sandboxed commands without asking
+/// unless `autoAllowBashIfSandboxed` is false; `ask_for_commands` sets it
+/// false.
+fn sandbox_settings(ask_for_commands: bool) -> String {
     serde_json::json!({
         "sandbox": {
             "enabled": true,
             "failIfUnavailable": !cfg!(windows),
             "allowUnsandboxedCommands": false,
+            "autoAllowBashIfSandboxed": !ask_for_commands,
         },
         "attribution": { "commit": "", "pr": "" },
         "includeCoAuthoredBy": false,
@@ -340,13 +358,14 @@ fn arguments(spec: &SessionSpec, resume: Option<&AgentSessionId>) -> Vec<String>
         .iter()
         .map(|&argument| argument.to_owned())
         .collect();
-    match spec.access {
+    let ask_for_commands = match spec.access {
         Access::Chat => {
             arguments.extend(CHAT_ARGUMENTS.iter().map(|&argument| argument.to_owned()));
             arguments.extend([
                 "--permission-mode".to_owned(),
                 permission_mode_argument(spec.permission_mode).to_owned(),
             ]);
+            asks_before_commands(spec.permission_mode)
         }
         Access::ReadOnly => {
             arguments.extend(
@@ -354,9 +373,12 @@ fn arguments(spec: &SessionSpec, resume: Option<&AgentSessionId>) -> Vec<String>
                     .iter()
                     .map(|&argument| argument.to_owned()),
             );
+            // A read-only session declines every prompt, so asking keeps
+            // sandboxed commands from writing to the repository.
+            true
         }
-    }
-    arguments.extend(["--settings".to_owned(), sandbox_settings()]);
+    };
+    arguments.extend(["--settings".to_owned(), sandbox_settings(ask_for_commands)]);
     // Both options take several values; each is followed by another option
     // or ends the arguments.
     if let Some(url) = &spec.harness_mcp_url {
@@ -1130,6 +1152,9 @@ mod tests {
 
         assert_eq!(after("--permission-mode").as_deref(), Some("plan"));
         assert_eq!(after("--permission-prompts").as_deref(), Some("none"));
+        let settings: Value =
+            serde_json::from_str(&after("--settings").unwrap_or_default()).unwrap_or_default();
+        assert_eq!(settings["sandbox"]["autoAllowBashIfSandboxed"], false);
         assert_eq!(
             arguments
                 .iter()
@@ -1177,6 +1202,24 @@ mod tests {
             assert_eq!(settings["attribution"]["commit"], "", "{mode:?}");
             assert_eq!(settings["attribution"]["pr"], "", "{mode:?}");
             assert_eq!(settings["includeCoAuthoredBy"], false, "{mode:?}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn supervised_and_auto_accept_edits_ask_before_each_command() -> serde_json::Result<()> {
+        for (mode, runs_without_asking) in [
+            (PermissionMode::Supervised, false),
+            (PermissionMode::AutoAcceptEdits, false),
+            (PermissionMode::Auto, true),
+            (PermissionMode::FullAccess, true),
+        ] {
+            let settings: Value =
+                serde_json::from_str(&option(mode, "--settings").unwrap_or_default())?;
+            assert_eq!(
+                settings["sandbox"]["autoAllowBashIfSandboxed"], runs_without_asking,
+                "{mode:?}"
+            );
         }
         Ok(())
     }
