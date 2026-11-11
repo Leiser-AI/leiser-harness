@@ -5,7 +5,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use leiser_service::{
-    AgentEvent, ChatId, Checkout, Command, CommandError, Response, ServiceConfig, ServiceHandle,
+    AgentCli, AgentEvent, ChatId, Checkout, Command, CommandError, Response, ServiceConfig,
+    ServiceHandle,
 };
 use leiser_testkit::{FakeDriver, Script, Step, TestRepo, collect_turn};
 
@@ -15,9 +16,10 @@ const FAKE_AGENT_CLI: &str = env!("CARGO_BIN_EXE_fake-agent-cli");
 
 fn start_service(script: &Script) -> TestResult<ServiceHandle> {
     let driver = FakeDriver::new(Path::new(FAKE_AGENT_CLI), script)?;
-    Ok(leiser_service::start(ServiceConfig {
-        driver: Arc::new(driver),
-    }))
+    Ok(leiser_service::start(ServiceConfig::new(
+        AgentCli::ClaudeCode,
+        Arc::new(driver),
+    ))?)
 }
 
 async fn start_chat(service: &ServiceHandle, repo: &TestRepo) -> TestResult<ChatId> {

@@ -13,6 +13,23 @@ pub struct RepositoryId(pub(crate) u64);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ChatId(pub(crate) u64);
 
+/// An agent CLI the harness service can run a chat on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentCli {
+    ClaudeCode,
+    Codex,
+}
+
+impl std::fmt::Display for AgentCli {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::ClaudeCode => "Claude Code",
+            Self::Codex => "Codex",
+        })
+    }
+}
+
 /// Where a chat works.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -34,7 +51,15 @@ pub enum Command {
     },
     /// Sends the developer's message to the chat's agent session, starting
     /// the agent session if the chat has none yet.
+    ///
+    /// When the chat changed agent CLI since its last message, the message
+    /// goes to that agent CLI's earlier agent session if it still runs,
+    /// with a handoff of the chat's messages since; otherwise to a new
+    /// agent session with a handoff of the chat so far.
     SendMessage { chat: ChatId, text: String },
+    /// Changes the agent CLI that the chat's next message goes to. A new
+    /// chat starts on the service's default agent CLI.
+    ChangeAgentCli { chat: ChatId, agent_cli: AgentCli },
 }
 
 /// The answer to a successful [`Command`].
@@ -44,6 +69,7 @@ pub enum Response {
     RepositoryAdded { repository: RepositoryId },
     ChatStarted { chat: ChatId },
     MessageSent,
+    AgentCliChanged,
 }
 
 /// Why a [`Command`] failed.
@@ -56,6 +82,8 @@ pub enum CommandError {
     UnknownRepository(RepositoryId),
     #[error("unknown chat {0:?}")]
     UnknownChat(ChatId),
+    #[error("no driver is configured for {0}")]
+    AgentCliNotConfigured(AgentCli),
     #[error("the agent CLI failed: {reason}")]
     AgentCli { reason: String },
     #[error("the harness service has stopped")]
@@ -78,6 +106,13 @@ pub enum AgentEvent {
     Message { text: String },
     /// The agent called a tool.
     ToolCall { name: String, detail: String },
+    /// A command the agent ran has finished.
+    CommandFinished {
+        command: String,
+        /// `None` when the command was stopped before it exited.
+        exit_code: Option<i32>,
+        output: String,
+    },
     /// The agent waits for the developer's approval.
     ApprovalRequested {
         request: String,

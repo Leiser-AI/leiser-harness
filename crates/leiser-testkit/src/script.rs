@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 /// The turns the fake agent CLI plays back, one per message it receives.
 /// Every turn ends with [`AgentEvent::TurnEnded`]; a message after the last
-/// turn gets an empty turn.
+/// turn gets an empty turn. A new agent session starts at the first turn.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Script {
     pub turns: Vec<Vec<Step>>,
@@ -35,6 +35,17 @@ pub enum Step {
     EchoUserMessage,
     /// Answers with the directory the fake agent CLI runs in.
     ReportWorkingDirectory,
+    /// Answers with the names of the harness MCP server's tools, joined
+    /// by commas.
+    ListHarnessTools,
+    /// Calls a tool of the harness MCP server and answers with the text it
+    /// returned, prefixed with `error: ` when the tool reported an error.
+    CallHarnessTool {
+        name: String,
+        arguments: serde_json::Value,
+    },
+    /// Ends the agent session once this turn has ended.
+    EndSession,
 }
 
 impl Step {

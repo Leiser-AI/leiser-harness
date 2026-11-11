@@ -6,11 +6,13 @@
 //! network are needed.
 
 mod fake_driver;
+mod harness_mcp_client;
 mod repo;
 mod script;
 mod turn;
 
 pub use fake_driver::FakeDriver;
+pub use harness_mcp_client::{HarnessMcpClient, McpClientError, ToolOutput};
 pub use repo::TestRepo;
 pub use script::{FakeInput, Script, Step};
 pub use turn::{TurnError, collect_turn};

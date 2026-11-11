@@ -9,11 +9,19 @@ use tokio::sync::mpsc;
 
 use crate::AgentEvent;
 
+/// The name the agent CLI must give the harness MCP server, so agents see
+/// its tools as, for example, `mcp__leiser__read_chat` in Claude Code.
+pub const HARNESS_MCP_SERVER: &str = "leiser";
+
 /// What an agent session needs to start.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionSpec {
     /// The directory the agent CLI runs in.
     pub working_directory: PathBuf,
+    /// The harness MCP server's address for this agent session (a
+    /// streamable HTTP endpoint on localhost). The driver must configure
+    /// the agent CLI to use it under the name [`HARNESS_MCP_SERVER`].
+    pub harness_mcp_url: String,
 }
 
 /// Input for a running agent session.

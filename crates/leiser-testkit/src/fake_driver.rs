@@ -47,6 +47,7 @@ impl Driver for FakeDriver {
     fn start(&self, spec: SessionSpec) -> Result<AgentSession, DriverError> {
         let mut child = Command::new(&self.program)
             .arg(&self.script_file)
+            .arg(&spec.harness_mcp_url)
             .current_dir(&spec.working_directory)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
