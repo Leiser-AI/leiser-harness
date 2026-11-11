@@ -14,7 +14,7 @@ use leiser_service::{
 };
 use leiser_testkit::{
     FAKE_LOGIN_FILE, FakeDriver, FakeLogin, Script, Step, TestRepo, TestService, UNSET,
-    collect_turn,
+    collect_turn, next_event,
 };
 use tokio::sync::broadcast;
 
@@ -215,6 +215,18 @@ async fn change(
             subscription,
         })
         .await
+}
+
+/// Fails unless the turn's only message echoes a handoff that quotes
+/// `quoted`, followed by `message`.
+fn assert_handoff_echo(messages: &[String], quoted: &str, message: &str) -> TestResult {
+    let [echo] = messages else {
+        return Err(format!("expected one message, got {messages:?}").into());
+    };
+    assert!(echo.starts_with("<handoff>"), "{echo}");
+    assert!(echo.contains(quoted), "{echo}");
+    assert!(echo.ends_with(message), "{echo}");
+    Ok(())
 }
 
 fn report(variable: &str) -> Step {
@@ -797,16 +809,11 @@ async fn choosing_the_codex_default_login_continues_a_claude_chat_on_codex_with_
     assert_eq!(chat_subscription(&service, chat).await?, None);
     // Codex played its own first turn: a new agent session took the
     // message, with the chat so far as a handoff.
-    let [echo] = messages.as_slice() else {
-        return Err(format!("expected one message, got {messages:?}").into());
-    };
-    assert!(echo.starts_with("<handoff>"), "{echo}");
-    assert!(
-        echo.contains("Plan: parse the config with serde."),
-        "{echo}"
-    );
-    assert!(echo.ends_with("Now add tests."), "{echo}");
-    Ok(())
+    assert_handoff_echo(
+        &messages,
+        "Plan: parse the config with serde.",
+        "Now add tests.",
+    )
 }
 
 #[tokio::test]
@@ -830,13 +837,7 @@ async fn choosing_the_claude_default_login_moves_a_codex_chat_back_to_claude_cod
     assert_eq!(chat_agent_cli(&service, chat).await?, AgentCli::ClaudeCode);
     // Claude Code's agent session plays its second turn and gets what it
     // missed on Codex as a handoff.
-    let [echo] = messages.as_slice() else {
-        return Err(format!("expected one message, got {messages:?}").into());
-    };
-    assert!(echo.starts_with("<handoff>"), "{echo}");
-    assert!(echo.contains("done on Codex"), "{echo}");
-    assert!(echo.ends_with("three"), "{echo}");
-    Ok(())
+    assert_handoff_echo(&messages, "done on Codex", "three")
 }
 
 #[tokio::test]
@@ -859,6 +860,39 @@ async fn choosing_a_codex_subscription_runs_the_next_turn_on_it() -> TestResult 
         vec![home(&service, work).await?.display().to_string()]
     );
     assert_eq!(chat_subscription(&service, chat).await?, Some(work));
+    Ok(())
+}
+
+#[tokio::test]
+async fn choosing_another_provider_while_a_turn_waits_for_an_approval_is_refused() -> TestResult {
+    let claude_code = Script::new().turn([Step::RequestApproval {
+        description: "Run `ls`".to_owned(),
+    }]);
+    let harness = claude_and_codex_service(&claude_code, &Script::new())?;
+    let service = harness.connect();
+    let repo = TestRepo::new()?;
+    let chat = start_chat(&service, &repo).await?;
+    let mut events = service.subscribe();
+    service
+        .execute(Command::SendMessage {
+            chat,
+            text: "look".to_owned(),
+        })
+        .await?;
+    loop {
+        if let Event::Agent {
+            event: AgentEvent::ApprovalRequested { .. },
+            ..
+        } = next_event(&mut events, chat).await?
+        {
+            break;
+        }
+    }
+
+    let result = change(&service, chat, Provider::OpenAi, None).await;
+
+    assert_eq!(result, Err(CommandError::TurnRunning { chat }));
+    assert_eq!(chat_agent_cli(&service, chat).await?, AgentCli::ClaudeCode);
     Ok(())
 }
 
