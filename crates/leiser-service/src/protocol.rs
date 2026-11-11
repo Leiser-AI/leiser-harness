@@ -140,6 +140,9 @@ pub enum Command {
     },
     /// Removes a todo from the chat's todo list.
     RemoveTodo { chat: ChatId, todo: TodoId },
+    /// Reads the harness service's version and whether an update of it
+    /// waits for running turns to end.
+    ReadServiceStatus,
     /// Lists the CLI extensions each agent CLI loads from the repository:
     /// instruction files, skills, MCP servers and hooks. They belong to the
     /// agent CLI; nothing is converted between agent CLIs.
@@ -210,6 +213,12 @@ pub enum Response {
     },
     TodoUpdated,
     TodoRemoved,
+    ServiceStatus {
+        /// The version of the running harness service.
+        version: String,
+        /// An update of the harness service waits until no turn runs.
+        update_waiting: bool,
+    },
     CliExtensions {
         extensions: Vec<CliExtension>,
         /// Files that hold CLI extensions but could not be parsed, so their
@@ -583,10 +592,14 @@ pub enum Event {
     /// The chat's todo list changed, by the developer or an agent; `todos`
     /// is the whole list after the change.
     TodosChanged { chat: ChatId, todos: Vec<Todo> },
+    /// An update of the harness service waits until no turn runs. Then the
+    /// service restarts on the new version and resumes every agent session.
+    ServiceUpdateWaiting,
 }
 
 impl Event {
-    /// The chat the event belongs to; `None` for a repository's event.
+    /// The chat the event belongs to; `None` for events of a repository or
+    /// of the whole harness service.
     #[must_use]
     pub fn chat(&self) -> Option<ChatId> {
         match self {
@@ -598,7 +611,9 @@ impl Event {
             | Self::ScriptFinished { chat, .. }
             | Self::StatusChanged { chat, .. }
             | Self::TodosChanged { chat, .. } => Some(*chat),
-            Self::RepoCheckStarted { .. } | Self::RepoCheckFinished { .. } => None,
+            Self::RepoCheckStarted { .. }
+            | Self::RepoCheckFinished { .. }
+            | Self::ServiceUpdateWaiting => None,
         }
     }
 }

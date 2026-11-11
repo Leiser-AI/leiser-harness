@@ -28,6 +28,7 @@ export type Command =
   | { type: "read_chat"; chat: ChatId }
   | { type: "run_repo_check"; repository: RepositoryId }
   | { type: "read_repo_check"; repository: RepositoryId }
+  | { type: "read_service_status" }
   | { type: "list_todos"; chat: ChatId }
   | { type: "add_todo"; chat: ChatId; text: string }
   | { type: "set_todo_done"; chat: ChatId; todo: TodoId; done: boolean }
@@ -56,6 +57,7 @@ export type Response =
   | { type: "chat"; status: ChatStatus; branch: Branch; transcript: TranscriptEntry[] }
   | { type: "repo_check_started" }
   | { type: "repo_check"; check: RepoCheck }
+  | { type: "service_status"; version: string; update_waiting: boolean }
   | { type: "todos"; todos: Todo[] }
   | { type: "todo_added"; todo: TodoId }
   | { type: "todo_updated" }
@@ -203,4 +205,11 @@ export type ServiceEvent =
   | { type: "status_changed"; chat: ChatId; status: ChatStatus }
   | { type: "repo_check_started"; repository: RepositoryId }
   | { type: "repo_check_finished"; repository: RepositoryId }
-  | { type: "todos_changed"; chat: ChatId; todos: Todo[] };
+  | { type: "todos_changed"; chat: ChatId; todos: Todo[] }
+  | { type: "service_update_waiting" };
+
+/** The app's connection to the harness service (not part of the service's protocol). */
+export type ServiceConnection =
+  | { state: "connecting" }
+  | { state: "connected"; service_version: string }
+  | { state: "unavailable"; reason: string };

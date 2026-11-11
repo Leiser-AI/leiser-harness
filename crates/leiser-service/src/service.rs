@@ -133,11 +133,19 @@ pub fn start(config: ServiceConfig) -> Result<Service, StartError> {
     )?;
     state.resume_all();
     let (stop, stopped) = oneshot::channel();
-    let task =
-        tokio::spawn(state.run(receiver, session_messages, call_requests, finished, stopped));
+    let (update, update_requests) = mpsc::channel(1);
+    let task = tokio::spawn(state.run(
+        receiver,
+        session_messages,
+        call_requests,
+        finished,
+        update_requests,
+        stopped,
+    ));
     Ok(Service {
         handle: ServiceHandle { commands, events },
         stop,
+        update,
         task,
     })
 }
@@ -148,6 +156,7 @@ pub fn start(config: ServiceConfig) -> Result<Service, StartError> {
 pub struct Service {
     handle: ServiceHandle,
     stop: oneshot::Sender<()>,
+    update: mpsc::Sender<()>,
     task: JoinHandle<()>,
 }
 
@@ -165,6 +174,20 @@ impl Service {
     pub async fn shutdown(self) {
         // The loop may have stopped already; then there is nothing to stop.
         let _ = self.stop.send(());
+        let _ = self.task.await;
+    }
+
+    /// Makes way for an update of the harness service without interrupting
+    /// a turn (ADR 0005): announces [`Event::ServiceUpdateWaiting`], keeps
+    /// running every turn, also queued messages, and stops once no turn
+    /// runs. Returns when it has stopped; the caller then starts the new
+    /// version on the same data, which resumes every agent session.
+    ///
+    /// Messages the developer sends meanwhile still start their turns, and
+    /// the update waits for them too.
+    pub async fn stop_for_update(self) {
+        // The loop may have stopped already; then it is done waiting.
+        let _ = self.update.send(()).await;
         let _ = self.task.await;
     }
 }
@@ -199,6 +222,12 @@ impl ServiceHandle {
     #[must_use]
     pub fn subscribe(&self) -> broadcast::Receiver<Event> {
         self.events.subscribe()
+    }
+
+    /// Waits until the harness service has stopped, for example for an
+    /// update.
+    pub async fn stopped(&self) {
+        self.commands.closed().await;
     }
 }
 
@@ -421,6 +450,11 @@ struct State {
     generation: u64,
     /// Counts status changes, so the sidebar can put the latest first.
     status_changes: u64,
+    /// Background work (worktrees, scripts) that has not finished yet.
+    background_running: usize,
+    /// An update of the harness service waits until no turn, worktree or
+    /// script runs.
+    update_waiting: bool,
 }
 
 impl State {
@@ -532,6 +566,8 @@ impl State {
             next_id: stored.next_id,
             generation: 0,
             status_changes,
+            background_running: 0,
+            update_waiting: false,
         })
     }
 
@@ -557,6 +593,7 @@ impl State {
         mut sessions: mpsc::Receiver<SessionMessage>,
         mut calls: mpsc::Receiver<HarnessCall>,
         mut background: mpsc::Receiver<Background>,
+        mut updates: mpsc::Receiver<()>,
         mut stopped: oneshot::Receiver<()>,
     ) {
         loop {
@@ -569,11 +606,32 @@ impl State {
                 Some(finished) = background.recv() => self.on_background(finished).await,
                 // Never closes: the harness MCP server holds a sender.
                 Some(call) = calls.recv() => self.on_call(call),
+                Some(()) = updates.recv(), if !self.update_waiting => {
+                    self.update_waiting = true;
+                    self.emit(Event::ServiceUpdateWaiting);
+                }
                 Some((command, reply)) = commands.recv() => self.execute(command, reply).await,
                 else => break,
             }
             self.note_status_changes();
+            // Checked after every step, so a turn that ends and starts the
+            // next queued message keeps the update waiting.
+            if self.update_waiting && self.nothing_running() {
+                tracing::info!("nothing runs; stopping for the update");
+                break;
+            }
         }
+    }
+
+    /// Whether the service can stop without interrupting anything: no turn
+    /// runs, also none that waits for an approval, and no worktree or
+    /// script is being set up or run.
+    fn nothing_running(&self) -> bool {
+        self.background_running == 0
+            && self
+                .chats
+                .values()
+                .all(|chat| !chat.turn_running() && matches!(chat.setup, Setup::Done))
     }
 
     async fn execute(&mut self, command: Command, reply: Reply) {
@@ -625,6 +683,10 @@ impl State {
             Command::RemoveTodo { chat, todo } => self
                 .change_todos(chat, TodoChange::Remove { todo })
                 .map(|_| Response::TodoRemoved),
+            Command::ReadServiceStatus => Ok(Response::ServiceStatus {
+                version: env!("CARGO_PKG_VERSION").to_owned(),
+                update_waiting: self.update_waiting,
+            }),
             Command::ListCliExtensions { repository } => self.list_cli_extensions(repository).await,
             Command::ReadCliExtensionFile { repository, file } => {
                 self.read_cli_extension_file(repository, file).await
@@ -857,7 +919,7 @@ impl State {
     /// Creates the chat's worktree in the background; the chat starts, and
     /// `reply` gets its answer, once it exists.
     fn create_worktree(
-        &self,
+        &mut self,
         pending: PendingWorktree,
         repository_path: PathBuf,
         base_branch: Option<String>,
@@ -868,6 +930,7 @@ impl State {
             .map_or_else(|| "repository".into(), std::ffi::OsStr::to_os_string);
         let parent = self.worktrees_dir.join(name);
         let background = self.background.clone();
+        self.background_running += 1;
         tokio::spawn(async move {
             let result = worktree::create(
                 &repository_path,
@@ -889,6 +952,7 @@ impl State {
     }
 
     async fn on_background(&mut self, finished: Background) {
+        self.background_running = self.background_running.saturating_sub(1);
         match finished {
             Background::WorktreeCreated {
                 pending,
@@ -938,7 +1002,7 @@ impl State {
 
     /// Runs a script of the repository in the chat's working directory;
     /// its end comes back as [`Background::ScriptFinished`].
-    fn run_script(&self, id: ChatId, script: RepositoryScript, text: String) {
+    fn run_script(&mut self, id: ChatId, script: RepositoryScript, text: String) {
         let Some(chat) = self.chats.get(&id) else {
             return;
         };
@@ -948,6 +1012,7 @@ impl State {
         let working_directory = chat.working_directory.clone();
         let background = self.background.clone();
         self.emit(Event::ScriptStarted { chat: id, script });
+        self.background_running += 1;
         tokio::spawn(async move {
             let finished = script::run(&text, &working_directory, &repository).await;
             // The service has stopped; the script ran in vain.
@@ -1055,7 +1120,7 @@ impl State {
         Ok(Response::ChatMarkedDone)
     }
 
-    fn run_done_script(&self, id: ChatId, repository: RepositoryId) {
+    fn run_done_script(&mut self, id: ChatId, repository: RepositoryId) {
         let Some(path) = self.repositories.get(&repository) else {
             return;
         };

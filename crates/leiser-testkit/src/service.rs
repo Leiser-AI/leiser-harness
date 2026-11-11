@@ -143,6 +143,36 @@ impl TestService {
     }
 }
 
+impl TestService {
+    /// Updates the harness service as a new version would: waits until no
+    /// turn runs ([`Service::stop_for_update`]), then starts the service
+    /// again on the same data directory and agent CLIs.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`StartError`] when the service cannot start again.
+    pub async fn update(self) -> Result<Self, StartError> {
+        let Self {
+            service,
+            drivers,
+            data,
+        } = self;
+        service.stop_for_update().await;
+        let service = start(&drivers, &data)?;
+        Ok(Self {
+            service,
+            drivers,
+            data,
+        })
+    }
+
+    /// The harness service's data directory.
+    #[must_use]
+    pub fn data_dir(&self) -> &Path {
+        self.data.path()
+    }
+}
+
 fn start(drivers: &Drivers, data: &TempDir) -> Result<Service, StartError> {
     let (agent_cli, driver) = &drivers.default;
     let mut config = drivers.others.iter().fold(
