@@ -399,9 +399,14 @@ impl State {
                 return Err(CommandError::TurnRunning { chat: *other });
             }
         }
-        remove(&repository, &working_directory, id).await?;
+        check_removable(&working_directory, id).await?;
+        // The agent CLIs run in the worktree; Windows cannot delete a
+        // directory a process still works in.
         for other in &sharing {
             self.end_session(*other);
+        }
+        remove(&repository, &working_directory).await?;
+        for other in &sharing {
             if let Some(chat) = self.chats.get_mut(other) {
                 chat.place = Place::RemovedWorktree;
                 chat.done = true;
@@ -449,19 +454,12 @@ async fn base_branch(repository: &Path) -> Result<String, CommandError> {
         .ok_or(CommandError::NoBaseBranch)
 }
 
-/// Removes the worktree at `working_directory` and its branch, unless it
-/// has uncommitted changes or commits on no remote.
-async fn remove(
-    repository: &Path,
-    working_directory: &Path,
-    id: ChatId,
-) -> Result<(), CommandError> {
-    let failed = |error: crate::git::GitError| CommandError::Worktree {
-        reason: error.to_string(),
-    };
+/// Fails when the worktree at `working_directory` has uncommitted changes
+/// or commits on no remote.
+async fn check_removable(working_directory: &Path, id: ChatId) -> Result<(), CommandError> {
     let changes = crate::git::run(working_directory, &["status", "--porcelain"])
         .await
-        .map_err(failed)?;
+        .map_err(|error| failed(&error))?;
     if !changes.is_empty() {
         return Err(CommandError::WorktreeHasChanges { chat: id });
     }
@@ -470,21 +468,72 @@ async fn remove(
         &["rev-list", "--count", "HEAD", "--not", "--remotes"],
     )
     .await
-    .map_err(failed)?;
+    .map_err(|error| failed(&error))?;
     if unpushed != "0" {
         return Err(CommandError::WorktreeHasUnpushedCommits { chat: id });
     }
+    Ok(())
+}
+
+/// How long [`remove_directory`] keeps trying while the agent CLIs that ran in the
+/// worktree exit.
+const REMOVE_ATTEMPTS: u32 = 50;
+const REMOVE_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Removes the worktree at `working_directory` and its branch, after
+/// [`check_removable`] passed.
+async fn remove(repository: &Path, working_directory: &Path) -> Result<(), CommandError> {
     let branch = crate::git::current_branch(working_directory).await;
-    let path = working_directory.display().to_string();
-    // `--force` only for ignored files such as build output: the checks
-    // above found nothing else.
-    crate::git::run(repository, &["worktree", "remove", "--force", &path])
-        .await
-        .map_err(failed)?;
+    remove_directory(repository, working_directory).await?;
     if let Branch::Named { name } = branch {
         crate::git::run(repository, &["branch", "-D", &name])
             .await
-            .map_err(failed)?;
+            .map_err(|error| failed(&error))?;
     }
     Ok(())
+}
+
+/// Deletes the worktree's directory and git's record of it. On Windows a
+/// directory cannot be deleted while a process still works in it, and git
+/// may already have deleted the files inside, `.git` among them, before it
+/// fails; so later attempts delete what is left and let git forget it.
+async fn remove_directory(repository: &Path, working_directory: &Path) -> Result<(), CommandError> {
+    let path = working_directory.display().to_string();
+    let mut last_error = String::new();
+    for _ in 0..REMOVE_ATTEMPTS {
+        let attempt = if working_directory.join(".git").exists() {
+            // `--force` only for ignored files such as build output:
+            // `check_removable` found nothing else.
+            crate::git::run(repository, &["worktree", "remove", "--force", &path])
+                .await
+                .map(drop)
+                .map_err(|error| error.to_string())
+        } else if working_directory.exists() {
+            let directory = working_directory.to_path_buf();
+            match tokio::task::spawn_blocking(move || std::fs::remove_dir_all(directory)).await {
+                Ok(result) => result.map_err(|error| error.to_string()),
+                Err(error) => Err(error.to_string()),
+            }
+        } else {
+            Ok(())
+        };
+        match attempt {
+            Ok(()) if !working_directory.exists() => {
+                crate::git::run(repository, &["worktree", "prune"])
+                    .await
+                    .map_err(|error| failed(&error))?;
+                return Ok(());
+            }
+            Ok(()) => {}
+            Err(error) => last_error = error,
+        }
+        tokio::time::sleep(REMOVE_RETRY_DELAY).await;
+    }
+    Err(CommandError::Worktree { reason: last_error })
+}
+
+fn failed(error: &crate::git::GitError) -> CommandError {
+    CommandError::Worktree {
+        reason: error.to_string(),
+    }
 }
