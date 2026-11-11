@@ -7,6 +7,13 @@ all-features = true
 [advisories]
 version = 2
 yanked = "deny"
+ignore = [
+  # `proc-macro-error` is unmaintained, not vulnerable. It is a proc macro
+  # pulled in only on Linux through Tauri's gtk-rs 0.18 (glib-macros); v1
+  # ships for macOS and Windows only. No upgrade exists until Tauri replaces
+  # gtk-rs 0.18. Re-check on the next Tauri update.
+  { id = "RUSTSEC-2024-0370", reason = "unmaintained proc macro, Linux-only via Tauri's gtk-rs 0.18; no upgrade available" },
+]
 
 [licenses]
 version = 2
