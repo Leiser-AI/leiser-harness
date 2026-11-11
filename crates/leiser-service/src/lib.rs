@@ -14,6 +14,10 @@
 //! The CLI extensions an agent CLI loads from a repository (skills, MCP
 //! servers, hooks, instruction files) can be listed, read and saved in the
 //! agent CLI's own files; they are not part of the harness (ADR 0003).
+//!
+//! Each chat has a todo list, kept on disk like its transcript. Agent
+//! sessions get tools for it only where the repository's
+//! `.leiser/config.toml` switches agent access on.
 
 mod claude_code;
 mod cli_extensions;
@@ -28,6 +32,7 @@ mod repo_config;
 mod script;
 mod service;
 mod store;
+mod todos;
 mod version;
 mod worktree;
 
@@ -42,8 +47,8 @@ pub use installed::Environment;
 pub use protocol::{
     AgentCli, AgentEvent, Answer, Branch, ChatId, ChatOverview, ChatStatus, Checkout, CliExtension,
     CliExtensionKind, Command, CommandError, Event, PermissionMode, Question, QuestionOption,
-    QueueReason, RepositoryId, RepositoryOverview, RepositoryScript, Response, TranscriptEntry,
-    UnreadableCliExtensionFile,
+    QueueReason, RepositoryId, RepositoryOverview, RepositoryScript, Response, Todo, TodoId,
+    TranscriptEntry, UnreadableCliExtensionFile,
 };
 pub use service::{Service, ServiceConfig, ServiceHandle, StartError, start};
 pub use store::StorageError;

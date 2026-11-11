@@ -3,6 +3,7 @@
 
 export type RepositoryId = number;
 export type ChatId = number;
+export type TodoId = number;
 
 export type AgentCli = "claude_code" | "codex";
 export type Checkout =
@@ -28,6 +29,10 @@ export type Command =
   | { type: "list_repositories" }
   | { type: "list_chats" }
   | { type: "read_chat"; chat: ChatId }
+  | { type: "list_todos"; chat: ChatId }
+  | { type: "add_todo"; chat: ChatId; text: string }
+  | { type: "set_todo_done"; chat: ChatId; todo: TodoId; done: boolean }
+  | { type: "remove_todo"; chat: ChatId; todo: TodoId }
   | { type: "list_cli_extensions"; repository: RepositoryId }
   | { type: "read_cli_extension_file"; repository: RepositoryId; file: string }
   | {
@@ -60,6 +65,10 @@ export type Response =
       open_requests: string[];
       transcript: TranscriptEntry[];
     }
+  | { type: "todos"; todos: Todo[] }
+  | { type: "todo_added"; todo: TodoId }
+  | { type: "todo_updated" }
+  | { type: "todo_removed" }
   | { type: "cli_extensions"; extensions: CliExtension[]; unreadable: UnreadableCliExtensionFile[] }
   | { type: "cli_extension_file"; text: string }
   | { type: "cli_extension_file_saved" };
@@ -80,6 +89,8 @@ export type CommandError =
   | { type: "repository_config"; reason: string }
   | { type: "agent_cli_not_configured"; agent_cli: AgentCli }
   | { type: "agent_cli"; reason: string }
+  | { type: "empty_todo" }
+  | { type: "unknown_todo"; chat: ChatId; todo: TodoId }
   | { type: "storage"; reason: string }
   | { type: "not_a_cli_extension_file"; file: string }
   | { type: "cli_extension_file_changed"; file: string }
@@ -100,6 +111,12 @@ export interface ChatOverview {
   status: ChatStatus;
   /** The worktree the chat works in; `null` in the main checkout. */
   worktree: string | null;
+}
+
+export interface Todo {
+  id: TodoId;
+  text: string;
+  done: boolean;
 }
 
 /** A skill, MCP server, hook or instruction file an agent CLI loads. */
@@ -182,4 +199,5 @@ export type ServiceEvent =
       output: string;
     }
   | { type: "status_changed"; chat: ChatId; status: ChatStatus }
-  | { type: "request_answered"; chat: ChatId; request: string; answer: Answer };
+  | { type: "request_answered"; chat: ChatId; request: string; answer: Answer }
+  | { type: "todos_changed"; chat: ChatId; todos: Todo[] };

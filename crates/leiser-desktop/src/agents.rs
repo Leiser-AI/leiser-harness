@@ -50,9 +50,12 @@ pub fn service_config(
 /// Where the fake agent CLI's chats keep their data and worktrees.
 const FAKE_DIR: &str = "fake-agent-cli";
 
-/// A driver that answers every message with a tool call, its result and
-/// the message itself. Of every three turns, the second first asks for an
-/// approval and the third asks a question, to try the cards.
+/// A driver that answers every message with a tool call, its result, the
+/// message itself and a todo it adds through the harness MCP server. In a
+/// repository without agent access to the todo list, the harness MCP
+/// server refuses the todo, and the answer says so. Of every three turns,
+/// the second first asks for an approval and the third asks a question,
+/// to try the cards.
 fn fake_driver(program: &std::path::Path) -> io::Result<FakeDriver> {
     let approval = Step::RequestApproval {
         description: "Run `cargo test --workspace`".to_owned(),
@@ -90,6 +93,10 @@ fn fake_driver(program: &std::path::Path) -> io::Result<FakeDriver> {
         },
         Step::message("Fake agent CLI here. You wrote:"),
         Step::EchoUserMessage,
+        Step::CallHarnessTool {
+            name: "add_todo".to_owned(),
+            arguments: serde_json::json!({ "text": "Added by the fake agent CLI" }),
+        },
     ];
     let script = (0..FAKE_TURNS).fold(Script::new(), |script, number| {
         let first = match number % 3 {

@@ -10,8 +10,9 @@
 //! the `session_id` field of Claude Code's output lines.
 //!
 //! The harness MCP server is passed with `--mcp-config` as an HTTP server,
-//! and its read-only `read_chat` tool is allowed with `--allowedTools`, so
-//! it never waits for an approval.
+//! and all its tools are allowed with `--allowedTools`, so they never wait
+//! for an approval: they only read the chat and change its todo list, which
+//! the repository switched on for agents.
 //!
 //! Interrupt uses Claude Code's control protocol. Steering is not supported
 //! yet, so the harness service queues steered messages: it is not verified
@@ -269,7 +270,7 @@ fn arguments(spec: &SessionSpec, resume: Option<&AgentSessionId>) -> Vec<String>
         "--mcp-config".to_owned(),
         harness_mcp_config(&spec.harness_mcp_url),
         "--allowedTools".to_owned(),
-        format!("mcp__{HARNESS_MCP_SERVER}__read_chat"),
+        format!("mcp__{HARNESS_MCP_SERVER}"),
     ]);
     if let Some(session) = resume {
         arguments.extend(["--resume".to_owned(), session.as_str().to_owned()]);

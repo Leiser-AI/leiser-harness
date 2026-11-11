@@ -1,5 +1,6 @@
 //! Contract tests: the real Codex behaves like the fake agent CLI for
-//! start, send, read events, approve, queue, steer, interrupt and resume.
+//! start, send, read events, approve, queue, steer, interrupt and resume, and
+//! uses the harness MCP server's todo tools only where agent access is on.
 //!
 //! Each contract runs twice: against the fake agent CLI, in CI, and against
 //! the developer's installed Codex, only on demand, because it needs a
@@ -402,7 +403,103 @@ async fn a_declined_commands_feedback_reaches_the_agent(driver: Arc<dyn Driver>)
     Ok(())
 }
 
+/// Writes the repository's `.leiser/config.toml`.
+fn configure(repo: &TestRepo, config: &str) -> TestResult {
+    std::fs::create_dir(repo.path().join(".leiser"))?;
+    std::fs::write(repo.path().join(".leiser/config.toml"), config)?;
+    Ok(())
+}
+
+/// Asks the agent to check todo 1 and add a todo through the harness MCP
+/// server, and to do nothing when the server has no todo tools.
+const TODO_PROMPT: &str = "Use the tools of the MCP server named leiser: call \
+     set_todo_done with id 1 and done true, then call add_todo with the text \
+     \"Ship it\". If the server has no such tools, do nothing. Then reply with \
+     the single word done. Do not run commands or read files.";
+
+async fn todos(chat: &Chat) -> TestResult<Vec<(String, bool)>> {
+    let Response::Todos { todos } = chat.execute(Command::ListTodos { chat: chat.id }).await?
+    else {
+        return Err("expected Todos".into());
+    };
+    Ok(todos
+        .into_iter()
+        .map(|todo| (todo.text, todo.done))
+        .collect())
+}
+
+/// Runs [`TODO_PROMPT`] and returns the todo list after the turn.
+async fn ask_for_todo_changes(chat: &mut Chat) -> TestResult<Vec<(String, bool)>> {
+    chat.execute(Command::AddTodo {
+        chat: chat.id,
+        text: "Write the failing test".to_owned(),
+    })
+    .await?;
+    chat.send(TODO_PROMPT).await?;
+    let turn = collect_turn_within(&mut chat.events, chat.id, TURN_TIMEOUT).await?;
+    assert_eq!(turn.last(), Some(&AgentEvent::TurnEnded), "{turn:?}");
+    assert!(
+        !turn
+            .iter()
+            .any(|event| matches!(event, AgentEvent::ApprovalRequested { .. })),
+        "no approval for the todo tools: {turn:?}"
+    );
+    todos(chat).await
+}
+
+async fn the_agent_changes_the_todo_list_when_agent_access_is_on(
+    driver: Arc<dyn Driver>,
+) -> TestResult {
+    let repo = TestRepo::new()?;
+    configure(&repo, "[agent_access]\ntodo_list = true\n")?;
+    let mut chat = Chat::start(driver, &repo).await?;
+
+    let todos = ask_for_todo_changes(&mut chat).await?;
+
+    assert_eq!(
+        todos,
+        [
+            ("Write the failing test".to_owned(), true),
+            ("Ship it".to_owned(), false)
+        ]
+    );
+    Ok(())
+}
+
+async fn the_agent_gets_no_todo_tools_without_agent_access(driver: Arc<dyn Driver>) -> TestResult {
+    let repo = TestRepo::new()?;
+    let mut chat = Chat::start(driver, &repo).await?;
+
+    let todos = ask_for_todo_changes(&mut chat).await?;
+
+    assert_eq!(todos, [("Write the failing test".to_owned(), false)]);
+    Ok(())
+}
+
 // --- The fake agent CLI, in CI ---
+
+fn todo_script() -> Script {
+    Script::new().turn([
+        Step::CallHarnessTool {
+            name: "set_todo_done".to_owned(),
+            arguments: serde_json::json!({ "id": 1, "done": true }),
+        },
+        Step::CallHarnessTool {
+            name: "add_todo".to_owned(),
+            arguments: serde_json::json!({ "text": "Ship it" }),
+        },
+    ])
+}
+
+#[tokio::test]
+async fn fake_the_agent_changes_the_todo_list_when_agent_access_is_on() -> TestResult {
+    the_agent_changes_the_todo_list_when_agent_access_is_on(fake(&todo_script())?).await
+}
+
+#[tokio::test]
+async fn fake_the_agent_gets_no_todo_tools_without_agent_access() -> TestResult {
+    the_agent_gets_no_todo_tools_without_agent_access(fake(&todo_script())?).await
+}
 
 #[tokio::test]
 async fn fake_a_message_gets_an_answer_and_the_turn_ends() -> TestResult {
@@ -519,6 +616,18 @@ async fn codex_an_interrupted_turn_ends_as_interrupted_and_the_chat_goes_on() ->
 #[ignore = "needs Codex and a subscription; see the module docs"]
 async fn codex_a_steered_message_reaches_the_running_turn_and_a_queued_one_waits() -> TestResult {
     a_steered_message_reaches_the_running_turn_and_a_queued_one_waits(codex(), CODEX_SETTLE).await
+}
+
+#[tokio::test]
+#[ignore = "needs Codex and a subscription; see the module docs"]
+async fn codex_the_agent_changes_the_todo_list_when_agent_access_is_on() -> TestResult {
+    the_agent_changes_the_todo_list_when_agent_access_is_on(codex()).await
+}
+
+#[tokio::test]
+#[ignore = "needs Codex and a subscription; see the module docs"]
+async fn codex_the_agent_gets_no_todo_tools_without_agent_access() -> TestResult {
+    the_agent_gets_no_todo_tools_without_agent_access(codex()).await
 }
 
 #[tokio::test]

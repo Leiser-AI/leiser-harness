@@ -17,11 +17,16 @@
 //! setup_script = "pnpm install"
 //! # Runs in a worktree when the last chat in it is done.
 //! done_script = "cargo clean"
+//!
+//! [agent_access]
+//! # Agent sessions may read and change the chat's todo list through the
+//! # harness MCP server. Default: false, only the developer uses it.
+//! todo_list = true
 //! ```
 //!
 //! A repository without the file uses the defaults. Sections other
-//! features read may be present; unknown keys inside `[worktree]` are
-//! refused, so a typo does not go unnoticed.
+//! features read may be present; unknown keys inside `[worktree]` and
+//! `[agent_access]` are refused, so a typo does not go unnoticed.
 
 use std::fmt;
 use std::io;
@@ -55,6 +60,17 @@ pub(crate) struct RepositoryConfig {
     pub permission_mode: PermissionMode,
     #[serde(default)]
     pub worktree: WorktreeConfig,
+    #[serde(default)]
+    pub agent_access: AgentAccess,
+}
+
+/// Which harness features agent sessions may use. Off by default: only the
+/// developer uses them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct AgentAccess {
+    /// The chat's todo list, through the harness MCP server.
+    pub todo_list: bool,
 }
 
 /// How chats of the repository get and leave their worktrees.

@@ -14,6 +14,17 @@ pub struct RepositoryId(pub(crate) u64);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ChatId(pub(crate) u64);
 
+/// A todo of a chat's todo list. Numbered per chat from 1; a removed
+/// todo's id is never used again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct TodoId(pub(crate) u64);
+
+impl std::fmt::Display for TodoId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
 /// An agent CLI the harness service can run a chat on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -158,6 +169,19 @@ pub enum Command {
     ListChats,
     /// Reads a chat's status, branch and transcript.
     ReadChat { chat: ChatId },
+    /// Reads a chat's todo list.
+    ListTodos { chat: ChatId },
+    /// Adds a todo at the end of the chat's todo list. Its text is trimmed
+    /// and must not be empty.
+    AddTodo { chat: ChatId, text: String },
+    /// Checks a todo (`done`) or unchecks it.
+    SetTodoDone {
+        chat: ChatId,
+        todo: TodoId,
+        done: bool,
+    },
+    /// Removes a todo from the chat's todo list.
+    RemoveTodo { chat: ChatId, todo: TodoId },
     /// Lists the CLI extensions each agent CLI loads from the repository:
     /// instruction files, skills, MCP servers and hooks. They belong to the
     /// agent CLI; nothing is converted between agent CLIs.
@@ -227,6 +251,14 @@ pub enum Response {
         open_requests: Vec<String>,
         transcript: Vec<TranscriptEntry>,
     },
+    Todos {
+        todos: Vec<Todo>,
+    },
+    TodoAdded {
+        todo: TodoId,
+    },
+    TodoUpdated,
+    TodoRemoved,
     CliExtensions {
         extensions: Vec<CliExtension>,
         /// Files that hold CLI extensions but could not be parsed, so their
@@ -237,6 +269,15 @@ pub enum Response {
         text: String,
     },
     CliExtensionFileSaved,
+}
+
+/// One entry of a chat's todo list.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Todo {
+    pub id: TodoId,
+    pub text: String,
+    /// Whether the todo is checked.
+    pub done: bool,
 }
 
 /// A skill, MCP server, hook or instruction file an agent CLI loads by
@@ -453,6 +494,10 @@ pub enum CommandError {
     AnswerDoesNotFit { chat: ChatId, request: String },
     #[error("the agent CLI failed: {reason}")]
     AgentCli { reason: String },
+    #[error("a todo needs a text")]
+    EmptyTodo,
+    #[error("chat {chat:?} has no todo {todo}")]
+    UnknownTodo { chat: ChatId, todo: TodoId },
     #[error("the harness service could not store the chat: {reason}")]
     Storage { reason: String },
     #[error("{} holds no CLI extension of this repository", file.display())]
@@ -505,6 +550,9 @@ pub enum Event {
         request: String,
         answer: Answer,
     },
+    /// The chat's todo list changed, by the developer or an agent; `todos`
+    /// is the whole list after the change.
+    TodosChanged { chat: ChatId, todos: Vec<Todo> },
 }
 
 impl Event {
@@ -519,7 +567,8 @@ impl Event {
             | Self::RequestAnswered { chat, .. }
             | Self::ScriptStarted { chat, .. }
             | Self::ScriptFinished { chat, .. }
-            | Self::StatusChanged { chat, .. } => *chat,
+            | Self::StatusChanged { chat, .. }
+            | Self::TodosChanged { chat, .. } => *chat,
         }
     }
 }
