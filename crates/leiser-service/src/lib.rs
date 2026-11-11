@@ -14,6 +14,11 @@
 //! never a summary. Every agent session also gets the harness MCP server,
 //! whose `read_chat` tool reads the entries a handoff left out.
 //!
+//! When a repository is added, and on demand, the harness service runs
+//! the `repo-check` skill in a read-only agent session and keeps the Must
+//! and Should findings of its report. It never fixes them. A repository's
+//! `.leiser/config.toml` can switch single checks off.
+//!
 //! The CLI extensions an agent CLI loads from a repository (skills, MCP
 //! servers, hooks, instruction files) can be listed, read and saved in the
 //! agent CLI's own files; they are not part of the harness (ADR 0003).
@@ -33,6 +38,7 @@ mod installed;
 mod local_interface;
 mod program;
 mod protocol;
+mod repo_check;
 mod repo_config;
 mod script;
 mod service;
@@ -44,7 +50,7 @@ mod worktree;
 pub use claude_code::ClaudeCodeDriver;
 pub use codex::CodexDriver;
 pub use driver::{
-    AgentSession, AgentSessionId, Driver, DriverError, HARNESS_MCP_SERVER, SessionInput,
+    Access, AgentSession, AgentSessionId, Driver, DriverError, HARNESS_MCP_SERVER, SessionInput,
     SessionSpec,
 };
 pub use harness_mcp::HarnessMcpError;
@@ -55,9 +61,10 @@ pub use local_interface::{
 };
 pub use program::{ArgsError, SERVICE_LOG_FILE, ServiceProgram};
 pub use protocol::{
-    AgentCli, AgentEvent, Answer, Branch, ChatId, ChatOverview, ChatStatus, Checkout, CliExtension,
-    CliExtensionKind, Command, CommandError, Event, PermissionMode, Question, QuestionOption,
-    QueueReason, RepositoryId, RepositoryOverview, RepositoryScript, Response, Todo, TodoId,
+    AgentCli, AgentEvent, Answer, Branch, ChatId, ChatOverview, ChatStatus, CheckId, Checkout,
+    CliExtension, CliExtensionKind, Command, CommandError, Event, Finding, InvalidCheckId, OptOuts,
+    PermissionMode, Question, QuestionOption, QueueReason, RepoCheck, RepoCheckReport,
+    RepositoryId, RepositoryOverview, RepositoryScript, Response, SwitchedOffCheck, Todo, TodoId,
     TranscriptEntry, UnreadableCliExtensionFile,
 };
 pub use service::{Service, ServiceConfig, ServiceHandle, StartError, start};

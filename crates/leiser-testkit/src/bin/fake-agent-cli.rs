@@ -3,13 +3,14 @@
 //! Usage:
 //!
 //! ```text
-//! fake-agent-cli --script <script.json> --sessions <dir> --session-id <id> [--harness-mcp <url>] [--permission-mode <mode>]
-//! fake-agent-cli --script <script.json> --sessions <dir> --resume <id> [--harness-mcp <url>] [--permission-mode <mode>]
+//! fake-agent-cli --script <script.json> --sessions <dir> --session-id <id> [--harness-mcp <url>] [--permission-mode <mode>] [--access read-only]
+//! fake-agent-cli --script <script.json> --sessions <dir> --resume <id> [--harness-mcp <url>] [--permission-mode <mode>] [--access read-only]
 //! ```
 //!
 //! Scripted calls to the harness MCP server go to `--harness-mcp`.
 //! `--permission-mode` takes the harness's spelling (default `auto`); the
-//! fake agent CLI only reports it.
+//! fake agent CLI only reports it. With `--access read-only` it declines to
+//! write files.
 //!
 //! Reads one [`FakeInput`] per line on standard input and answers each
 //! message with the next scripted turn, written as one [`AgentEvent`] per
@@ -41,7 +42,8 @@ const GATE_POLL: Duration = Duration::from_millis(10);
 enum FakeError {
     #[error(
         "usage: fake-agent-cli --script <script.json> --sessions <dir> \
-         (--session-id <id> | --resume <id>) [--harness-mcp <url>] [--permission-mode <mode>]"
+         (--session-id <id> | --resume <id>) [--harness-mcp <url>] [--permission-mode <mode>] \
+         [--access read-only]"
     )]
     Usage,
     #[error("the script calls the harness MCP server, but no --harness-mcp was given")]
@@ -92,6 +94,7 @@ struct Args {
     session: SessionArg,
     harness_mcp: Option<String>,
     permission_mode: PermissionMode,
+    read_only: bool,
 }
 
 fn parse_args() -> Result<Args, FakeError> {
@@ -100,6 +103,7 @@ fn parse_args() -> Result<Args, FakeError> {
     let mut session = None;
     let mut harness_mcp = None;
     let mut permission_mode = PermissionMode::default();
+    let mut read_only = false;
     let mut args = std::env::args_os().skip(1);
     while let Some(flag) = args.next() {
         let value = args.next().ok_or(FakeError::Usage)?;
@@ -114,6 +118,7 @@ fn parse_args() -> Result<Args, FakeError> {
                 permission_mode = serde_json::from_value(serde_json::Value::String(text()?))
                     .map_err(|_| FakeError::Usage)?;
             }
+            Some("--access") if value == "read-only" => read_only = true,
             _ => return Err(FakeError::Usage),
         }
     }
@@ -124,6 +129,7 @@ fn parse_args() -> Result<Args, FakeError> {
             session,
             harness_mcp,
             permission_mode,
+            read_only,
         }),
         _ => Err(FakeError::Usage),
     }
@@ -206,6 +212,7 @@ fn run() -> Result<(), FakeError> {
                     harness_mcp: args.harness_mcp.as_deref(),
                     permission_mode: args.permission_mode,
                     requests: &mut requests,
+                    read_only: args.read_only,
                     forget_session: false,
                     inputs: &inputs,
                     out: &mut out,
@@ -280,6 +287,8 @@ struct Turn<'a, W> {
     permission_mode: PermissionMode,
     /// How many requests the agent session has sent, for their ids.
     requests: &'a mut u64,
+    /// Whether the agent session declines to write files.
+    read_only: bool,
     /// Set by [`Step::ForgetSession`].
     forget_session: bool,
     inputs: &'a Receiver<Result<FakeInput, FakeError>>,
@@ -365,6 +374,15 @@ impl<W: Write> Turn<'_, W> {
                 return self.wait_for_answer(&request);
             }
             Step::AskQuestions { questions } => return self.ask(questions),
+            Step::WriteFile { path, contents } => {
+                let text = if self.read_only {
+                    "declined: read-only".to_owned()
+                } else {
+                    std::fs::write(&path, contents)?;
+                    format!("wrote {}", path.display())
+                };
+                AgentEvent::Message { text }
+            }
         };
         emit(self.out, &event)?;
         Ok(None)

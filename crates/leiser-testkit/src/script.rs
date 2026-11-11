@@ -107,6 +107,10 @@ pub enum Step {
     /// with `answered: <id>=<answer>|<answer>, ...` or as a declined
     /// approval does.
     AskQuestions { questions: Vec<Question> },
+    /// Writes `contents` to `path`, relative to the working directory, and
+    /// answers `wrote <path>`. A read-only agent session declines, as a
+    /// real agent CLI would, and answers `declined: read-only`.
+    WriteFile { path: PathBuf, contents: String },
 }
 
 impl Step {

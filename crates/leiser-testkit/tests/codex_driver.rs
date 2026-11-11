@@ -9,7 +9,9 @@ use std::error::Error;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
-use leiser_service::{CodexDriver, Driver, DriverError, PermissionMode, SessionSpec, Version};
+use leiser_service::{
+    Access, CodexDriver, Driver, DriverError, PermissionMode, SessionSpec, Version,
+};
 use leiser_testkit::TestRepo;
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
@@ -31,7 +33,8 @@ async fn codex_starts_only_at_or_above_the_minimum_version_and_says_why_not() ->
     let spec = SessionSpec {
         working_directory: repo.path().to_path_buf(),
         // No harness MCP server listens there; these tests do not use it.
-        harness_mcp_url: "http://127.0.0.1:9/mcp/none".to_owned(),
+        harness_mcp_url: Some("http://127.0.0.1:9/mcp/none".to_owned()),
+        access: Access::Chat,
         permission_mode: PermissionMode::Supervised,
     };
     let too_old = fake_codex(dir.path(), "old", "codex-cli 0.99.9")?;

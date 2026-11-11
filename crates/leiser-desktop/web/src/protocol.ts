@@ -29,6 +29,8 @@ export type Command =
   | { type: "list_repositories" }
   | { type: "list_chats" }
   | { type: "read_chat"; chat: ChatId }
+  | { type: "run_repo_check"; repository: RepositoryId }
+  | { type: "read_repo_check"; repository: RepositoryId }
   | { type: "read_service_status" }
   | { type: "list_todos"; chat: ChatId }
   | { type: "add_todo"; chat: ChatId; text: string }
@@ -66,6 +68,8 @@ export type Response =
       open_requests: string[];
       transcript: TranscriptEntry[];
     }
+  | { type: "repo_check_started" }
+  | { type: "repo_check"; check: RepoCheck }
   | { type: "service_status"; version: string; update_waiting: boolean }
   | { type: "todos"; todos: Todo[] }
   | { type: "todo_added"; todo: TodoId }
@@ -93,11 +97,45 @@ export type CommandError =
   | { type: "empty_todo" }
   | { type: "unknown_todo"; chat: ChatId; todo: TodoId }
   | { type: "storage"; reason: string }
+  | { type: "repo_check_not_configured" }
+  | { type: "repo_check_running"; repository: RepositoryId }
   | { type: "not_a_cli_extension_file"; file: string }
   | { type: "cli_extension_file_changed"; file: string }
   | { type: "invalid_cli_extension_file"; file: string; reason: string }
   | { type: "cli_extension_file_access"; file: string; reason: string }
   | { type: "service_stopped" };
+
+/** A rule of `repo-check`, such as `D3`. */
+export type CheckId = string;
+
+export type RepoCheck =
+  | { state: "not_run" }
+  | { state: "running" }
+  | { state: "done"; report: RepoCheckReport; opt_outs: OptOuts }
+  | { state: "unreadable"; reason: string; output: string }
+  | { state: "failed"; reason: string };
+
+export interface RepoCheckReport {
+  commit: string | null;
+  summary: string;
+  must: Finding[];
+  should: Finding[];
+}
+
+export interface Finding {
+  title: string;
+  checks: CheckId[];
+  details: string;
+}
+
+export type OptOuts =
+  | { type: "applied"; checks: SwitchedOffCheck[] }
+  | { type: "unreadable"; reason: string };
+
+export interface SwitchedOffCheck {
+  check: CheckId;
+  reason: string;
+}
 
 export interface RepositoryOverview {
   repository: RepositoryId;
@@ -201,6 +239,8 @@ export type ServiceEvent =
     }
   | { type: "status_changed"; chat: ChatId; status: ChatStatus }
   | { type: "request_answered"; chat: ChatId; request: string; answer: Answer }
+  | { type: "repo_check_started"; repository: RepositoryId }
+  | { type: "repo_check_finished"; repository: RepositoryId }
   | { type: "todos_changed"; chat: ChatId; todos: Todo[] }
   | { type: "service_update_waiting" };
 

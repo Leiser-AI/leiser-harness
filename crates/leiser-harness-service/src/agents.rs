@@ -10,7 +10,7 @@ use leiser_service::{
     AgentCli, AgentEvent, ClaudeCodeDriver, CodexDriver, Question, QuestionOption, ServiceConfig,
     ServiceProgram,
 };
-use leiser_testkit::{FakeDriver, Script, Step};
+use leiser_testkit::{FakeDriver, SAMPLE_REPO_CHECK_REPORT, Script, Step};
 
 /// Turns the fake agent CLI plays back before it only ends turns.
 const FAKE_TURNS: usize = 1000;
@@ -28,25 +28,31 @@ pub struct FakeAgentCliError(#[from] io::Error);
 
 /// The harness service's configuration. Chats start on Claude Code and can
 /// change to Codex, or run on the fake agent CLI when the program says so.
-/// Their worktrees go where the program says, by default into the data
-/// directory.
+/// `repo-check` runs on Claude Code, which has the skill, or on the fake
+/// agent CLI. Worktrees go where the program says, by default into the
+/// data directory.
 pub fn service_config(program: &ServiceProgram) -> Result<ServiceConfig, FakeAgentCliError> {
     let data_dir = program.data_dir().to_path_buf();
     let config = if let Some(fake) = program.fake_agent_cli() {
         let driver = fake_driver(fake, &data_dir.join(FAKE_STATE_DIR))?;
         ServiceConfig::new(AgentCli::ClaudeCode, Arc::new(driver), data_dir)
+            .with_repo_check(Arc::new(fake_repo_check(fake)?))
     } else {
-        ServiceConfig::new(
-            AgentCli::ClaudeCode,
-            Arc::new(ClaudeCodeDriver::installed()),
-            data_dir,
-        )
-        .with_driver(AgentCli::Codex, Arc::new(CodexDriver::installed()))
+        let claude_code = Arc::new(ClaudeCodeDriver::installed());
+        ServiceConfig::new(AgentCli::ClaudeCode, claude_code.clone(), data_dir)
+            .with_driver(AgentCli::Codex, Arc::new(CodexDriver::installed()))
+            .with_repo_check(claude_code)
     };
     Ok(match program.worktrees_dir() {
         Some(worktrees) => config.with_worktrees_dir(worktrees.to_path_buf()),
         None => config,
     })
+}
+
+/// A `repo-check` that answers with a made-up sample report.
+fn fake_repo_check(program: &Path) -> io::Result<FakeDriver> {
+    let script = Script::new().turn([Step::message(SAMPLE_REPO_CHECK_REPORT)]);
+    FakeDriver::new(program, &script)
 }
 
 /// A driver that answers every message with a tool call, its result, the

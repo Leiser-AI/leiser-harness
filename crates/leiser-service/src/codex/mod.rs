@@ -3,6 +3,8 @@
 //! standard input and output. Steer uses `turn/steer`, interrupt
 //! `turn/interrupt`; both wait for the turn's id when they come before it.
 //! Resume uses `thread/resume` with the thread's id as the agent session id.
+//! A read-only agent session runs in Codex's `read-only` sandbox.
+//!
 //! The harness MCP server is configured with `-c mcp_servers.<name>.url`,
 //! which Codex reaches over streamable HTTP.
 //!
@@ -26,8 +28,8 @@ use tokio::sync::{mpsc, oneshot};
 use self::conversation::{Conversation, Output, ProtocolError};
 use crate::installed::{self, Found, Program};
 use crate::{
-    AgentEvent, AgentSession, AgentSessionId, Driver, DriverError, Environment, HARNESS_MCP_SERVER,
-    PermissionMode, SessionInput, SessionSpec, Version,
+    Access, AgentEvent, AgentSession, AgentSessionId, Driver, DriverError, Environment,
+    HARNESS_MCP_SERVER, PermissionMode, SessionInput, SessionSpec, Version,
 };
 
 const AGENT_CLI: &str = "Codex";
@@ -185,12 +187,13 @@ impl CodexDriver {
             })?
             .to_owned();
         let mut command = Command::from(program.command());
-        let mut child = command
-            .arg("-c")
-            .arg(format!(
+        if let Some(url) = &spec.harness_mcp_url {
+            command.arg("-c").arg(format!(
                 "mcp_servers.{HARNESS_MCP_SERVER}.url={}",
-                toml_string(&spec.harness_mcp_url)
-            ))
+                toml_string(url)
+            ));
+        }
+        let mut child = command
             .arg("app-server")
             .current_dir(&spec.working_directory)
             .stdin(Stdio::piped())
@@ -210,6 +213,7 @@ impl CodexDriver {
             working_directory,
             permission_mode: spec.permission_mode,
             resume,
+            access: spec.access,
         };
         tokio::spawn(async move {
             // Ends the agent session however the conversation stopped:
@@ -258,6 +262,7 @@ struct ThreadSettings {
     permission_mode: PermissionMode,
     /// The thread to resume instead of starting a new one.
     resume: Option<String>,
+    access: Access,
 }
 
 async fn run(
@@ -272,10 +277,15 @@ async fn run(
         working_directory,
         permission_mode,
         resume,
+        access,
     } = thread;
-    let (mut conversation, output) = match resume {
+    let (conversation, output) = match resume {
         Some(thread_id) => Conversation::resume(working_directory, permission_mode, thread_id)?,
         None => Conversation::start(working_directory, permission_mode)?,
+    };
+    let mut conversation = match access {
+        Access::Chat => conversation,
+        Access::ReadOnly => conversation.read_only(),
     };
     let mut id = Some(id);
     deliver(&mut stdin, events, &mut id, output).await?;

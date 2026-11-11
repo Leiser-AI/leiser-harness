@@ -20,8 +20,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use leiser_service::{
-    AgentCli, AgentEvent, Answer, ChatId, Checkout, ClaudeCodeDriver, Command, Driver, Event,
-    PermissionMode, QueueReason, Response, ServiceHandle, SessionSpec,
+    Access, AgentCli, AgentEvent, Answer, ChatId, Checkout, ClaudeCodeDriver, Command, Driver,
+    Event, PermissionMode, QueueReason, Response, ServiceHandle, SessionInput, SessionSpec,
 };
 use leiser_testkit::{TestRepo, TestService};
 use tokio::sync::broadcast;
@@ -220,7 +220,8 @@ async fn an_agent_session_ends_when_its_input_is_dropped() -> TestResult {
     let mut session = driver().start(SessionSpec {
         working_directory: repo.path().to_path_buf(),
         // No harness MCP server listens there; these tests do not use it.
-        harness_mcp_url: "http://127.0.0.1:9/mcp/none".to_owned(),
+        harness_mcp_url: Some("http://127.0.0.1:9/mcp/none".to_owned()),
+        access: Access::Chat,
         permission_mode: PermissionMode::Supervised,
     })?;
 
@@ -235,6 +236,42 @@ async fn an_agent_session_ends_when_its_input_is_dropped() -> TestResult {
     })
     .await?;
     assert_eq!(last, Some(AgentEvent::SessionEnded));
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "needs Claude Code signed in to a subscription; run locally with --ignored"]
+async fn a_read_only_agent_session_writes_no_file() -> TestResult {
+    let repo = TestRepo::new()?;
+    let session = driver().start(SessionSpec {
+        working_directory: repo.path().to_path_buf(),
+        harness_mcp_url: None,
+        access: Access::ReadOnly,
+        // The mode a chat could run in that asks least; read-only wins.
+        permission_mode: PermissionMode::FullAccess,
+    })?;
+    session
+        .input
+        .send(SessionInput::UserMessage {
+            text: "Create the file probe.txt containing OK, with any tool you have, \
+                   then reply with only: DONE"
+                .to_owned(),
+        })
+        .await?;
+
+    let mut events = session.events;
+    let ended = tokio::time::timeout(TURN_TIMEOUT, async {
+        while let Some(event) = events.recv().await {
+            if matches!(event, AgentEvent::TurnEnded | AgentEvent::SessionEnded) {
+                return Some(event);
+            }
+        }
+        None
+    })
+    .await?;
+
+    assert_eq!(ended, Some(AgentEvent::TurnEnded));
+    assert!(!repo.path().join("probe.txt").exists());
     Ok(())
 }
 

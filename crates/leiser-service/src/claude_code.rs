@@ -14,6 +14,9 @@
 //! for an approval: they only read the chat and change its todo list, which
 //! the repository switched on for agents.
 //!
+//! A read-only agent session runs in plan mode with the editing tools
+//! switched off (see [`READ_ONLY_ARGUMENTS`]).
+//!
 //! Interrupt uses Claude Code's control protocol. Steering is not supported
 //! yet, so the harness service queues steered messages: it is not verified
 //! how Claude Code ends turns when a message arrives mid-turn.
@@ -40,7 +43,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::installed::{self, Found, Program};
 use crate::{
-    AgentEvent, AgentSession, AgentSessionId, Answer, Driver, DriverError, Environment,
+    Access, AgentEvent, AgentSession, AgentSessionId, Answer, Driver, DriverError, Environment,
     HARNESS_MCP_SERVER, PermissionMode, Question, QuestionOption, SessionInput, SessionSpec,
     Version,
 };
@@ -50,19 +53,46 @@ const CHANNEL_BUFFER: usize = 64;
 
 /// Claude Code's arguments for a long-running agent session.
 ///
-/// `--verbose` is needed for the full turn-by-turn stream. Permission
-/// prompts go to the driver over the control protocol.
-const ARGUMENTS: [&str; 10] = [
+/// `--verbose` is needed for the full turn-by-turn stream.
+const ARGUMENTS: [&str; 6] = [
     "--print",
     "--input-format",
     "stream-json",
     "--output-format",
     "stream-json",
     "--verbose",
+];
+
+/// Claude Code's arguments for a chat's agent session ([`Access::Chat`]):
+/// permission prompts go to the driver over the control protocol.
+const CHAT_ARGUMENTS: [&str; 4] = [
     "--permission-prompts",
     "host",
     "--permission-prompt-tool",
     "stdio",
+];
+
+/// Claude Code's arguments for a read-only agent session ([`Access::ReadOnly`]).
+///
+/// Plan mode is Claude Code's own read-only mode and overrides a default
+/// mode from the developer's settings. The tools that edit files are
+/// switched off on top, and so is `ExitPlanMode`, so the agent answers in
+/// text instead of asking to leave plan mode. `--strict-mcp-config` without
+/// `--mcp-config` loads no MCP server, so none of the developer's MCP
+/// servers' tools can write either. Nobody answers its prompts, so
+/// `--permission-prompts none` declines whatever would prompt.
+const READ_ONLY_ARGUMENTS: [&str; 10] = [
+    "--permission-prompts",
+    "none",
+    "--permission-mode",
+    "plan",
+    "--strict-mcp-config",
+    // Takes several values; the next option ends them.
+    "--disallowedTools",
+    "Edit",
+    "Write",
+    "NotebookEdit",
+    "ExitPlanMode",
 ];
 
 /// The tool Claude Code asks the developer questions with.
@@ -254,18 +284,33 @@ fn arguments(spec: &SessionSpec, resume: Option<&AgentSessionId>) -> Vec<String>
         .iter()
         .map(|&argument| argument.to_owned())
         .collect();
-    arguments.extend([
-        "--permission-mode".to_owned(),
-        permission_mode_argument(spec.permission_mode).to_owned(),
-        "--settings".to_owned(),
-        sandbox_settings(),
-        // Both options take several values; each is followed by another
-        // option or ends the arguments.
-        "--mcp-config".to_owned(),
-        harness_mcp_config(&spec.harness_mcp_url),
-        "--allowedTools".to_owned(),
-        format!("mcp__{HARNESS_MCP_SERVER}"),
-    ]);
+    match spec.access {
+        Access::Chat => {
+            arguments.extend(CHAT_ARGUMENTS.iter().map(|&argument| argument.to_owned()));
+            arguments.extend([
+                "--permission-mode".to_owned(),
+                permission_mode_argument(spec.permission_mode).to_owned(),
+            ]);
+        }
+        Access::ReadOnly => {
+            arguments.extend(
+                READ_ONLY_ARGUMENTS
+                    .iter()
+                    .map(|&argument| argument.to_owned()),
+            );
+        }
+    }
+    arguments.extend(["--settings".to_owned(), sandbox_settings()]);
+    // Both options take several values; each is followed by another option
+    // or ends the arguments.
+    if let Some(url) = &spec.harness_mcp_url {
+        arguments.extend([
+            "--mcp-config".to_owned(),
+            harness_mcp_config(url),
+            "--allowedTools".to_owned(),
+            format!("mcp__{HARNESS_MCP_SERVER}"),
+        ]);
+    }
     if let Some(session) = resume {
         arguments.extend(["--resume".to_owned(), session.as_str().to_owned()]);
     }
@@ -980,15 +1025,48 @@ mod tests {
 
     use super::{ControlRequest, InputLine, OutputLine, Parser, arguments, session_id};
     use crate::{
-        AgentEvent, AgentSessionId, Answer, PermissionMode, Question, QuestionOption, SessionSpec,
+        Access, AgentEvent, AgentSessionId, Answer, PermissionMode, Question, QuestionOption,
+        SessionSpec,
     };
 
     fn spec(permission_mode: PermissionMode) -> SessionSpec {
         SessionSpec {
             working_directory: "/repo".into(),
-            harness_mcp_url: "http://127.0.0.1:1/mcp/1".to_owned(),
+            harness_mcp_url: Some("http://127.0.0.1:1/mcp/1".to_owned()),
+            access: Access::Chat,
             permission_mode,
         }
+    }
+
+    #[test]
+    fn a_read_only_agent_session_runs_in_plan_mode_and_declines_prompts() {
+        let spec = SessionSpec {
+            harness_mcp_url: None,
+            access: Access::ReadOnly,
+            ..spec(PermissionMode::FullAccess)
+        };
+        let arguments = arguments(&spec, None);
+        let after = |option: &str| {
+            let index = arguments.iter().position(|argument| argument == option)?;
+            arguments.get(index + 1).cloned()
+        };
+
+        assert_eq!(after("--permission-mode").as_deref(), Some("plan"));
+        assert_eq!(after("--permission-prompts").as_deref(), Some("none"));
+        assert_eq!(
+            arguments
+                .iter()
+                .filter(|argument| *argument == "--permission-mode")
+                .count(),
+            1
+        );
+        assert!(
+            !arguments
+                .iter()
+                .any(|argument| argument == "--permission-prompt-tool")
+        );
+        assert!(!arguments.iter().any(|argument| argument == "--mcp-config"));
+        assert!(after("--settings").is_some_and(|settings| settings.contains("\"enabled\":true")));
     }
 
     /// The value after `option` in the arguments for `mode`.

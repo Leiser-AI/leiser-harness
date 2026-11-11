@@ -1,7 +1,8 @@
 // The desktop app's UI. It holds no chat state of its own: it reads
-// repositories and the selected chat from the harness service and reads
-// them again on every service event. The only thing it keeps is which chat,
-// or which repository's CLI extensions panel, is selected.
+// repositories, their repo-check results and the selected chat from the
+// harness service and reads them again on every service event. The only
+// thing it keeps is what is selected: a chat, a repository's repo-check or
+// a repository's CLI extensions panel.
 
 import type {
   AgentEvent,
@@ -13,6 +14,9 @@ import type {
   Question,
   ChatStatus,
   Checkout,
+  Finding,
+  OptOuts,
+  RepoCheck,
   RepositoryId,
   RepositoryOverview,
   RepositoryScript,
@@ -25,6 +29,8 @@ import * as service from "./service";
 import { AGENT_CLI_NAMES, type ChatView, PERMISSION_MODE_NAMES } from "./service";
 
 let selectedChat: ChatId | null = null;
+// Shown instead of a chat when set.
+let selectedCheck: RepositoryId | null = null;
 // The repository whose CLI extensions panel is open instead of a chat.
 let selectedExtensions: RepositoryId | null = null;
 // Drops answers to older reads that arrive after newer ones.
@@ -38,6 +44,7 @@ const messageInput = byId<HTMLTextAreaElement>("message");
 const sendButton = byId<HTMLButtonElement>("send");
 const interruptButton = byId<HTMLButtonElement>("interrupt");
 const errorBox = byId("error");
+const repoCheckView = byId("repo-check");
 const serviceNotice = byId("service-notice");
 const todosPanel = byId("todos");
 const todoList = byId("todo-list");
@@ -111,14 +118,36 @@ async function refresh(): Promise<void> {
     chat === null ? Promise.resolve(null) : service.listTodos(chat),
     service.serviceUpdateWaiting(),
   ]);
+  // A service older than the app has no repo-check; the rest still shows.
+  const checks = new Map(
+    (
+      await Promise.all(
+        repositories.map(async (overview) => {
+          const check = await service.readRepoCheck(overview.repository).catch(() => null);
+          return check === null ? null : ([overview.repository, check] as const);
+        }),
+      )
+    ).filter((entry) => entry !== null),
+  );
   if (read !== readCount) return;
   renderServiceNotice(updateWaiting);
-  renderSidebar(repositories, chats);
+  renderSidebar(repositories, chats, checks);
   if (selectedExtensions !== null) {
     const shown = repositories.find((overview) => overview.repository === selectedExtensions);
+    repoCheckView.hidden = true;
     renderExtensionsTopBar(shown ?? null);
+    renderTodos(null, null);
     return;
   }
+  const checked = repositories.find((overview) => overview.repository === selectedCheck);
+  const check = selectedCheck === null ? undefined : checks.get(selectedCheck);
+  if (checked && check) {
+    renderRepoCheck(checked, check);
+    renderTodos(null, null);
+    return;
+  }
+  repoCheckView.hidden = true;
+  transcript.hidden = false;
   const overview = chats.find((candidate) => candidate.chat === chat) ?? null;
   renderChat(
     view,
@@ -181,6 +210,7 @@ const SCRIPT_NAMES: Record<RepositoryScript, string> = {
 async function startAndSelect(repository: RepositoryId, checkout?: Checkout): Promise<void> {
   if (!leaveExtensions()) return;
   selectedChat = await service.startChat(repository, checkout);
+  selectedCheck = null;
   await refresh();
   messageInput.focus();
 }
@@ -226,7 +256,11 @@ function renderExtensionsTopBar(repository: RepositoryOverview | null): void {
   );
 }
 
-function renderSidebar(repositories: RepositoryOverview[], chats: ChatOverview[]): void {
+function renderSidebar(
+  repositories: RepositoryOverview[],
+  chats: ChatOverview[],
+  checks: Map<RepositoryId, RepoCheck>,
+): void {
   const list = el("ul", "repository-list");
   if (repositories.length === 0) {
     list.append(el("li", "empty", "Add a repository to start a chat."));
@@ -257,7 +291,9 @@ function renderSidebar(repositories: RepositoryOverview[], chats: ChatOverview[]
       act(async () => {
         if (selectedExtensions !== repository.repository && !leaveExtensions()) return;
         selectedChat = null;
+        selectedCheck = null;
         selectedExtensions = repository.repository;
+        repoCheckView.hidden = true;
         transcript.hidden = true;
         composer.hidden = true;
         await extensions.show(repository.repository);
@@ -269,6 +305,27 @@ function renderSidebar(repositories: RepositoryOverview[], chats: ChatOverview[]
     header.append(name, actions);
 
     const chatList = el("ul", "chat-list");
+    const check = checks.get(repository.repository);
+    if (check) {
+      const checkItem = el("li");
+      const button = el("button", "chat-link repo-check-link");
+      button.type = "button";
+      button.append(el("span", "chat-title", "repo-check"), el("span", "chat-status", checkStatus(check)));
+      if (repository.repository === selectedCheck) {
+        button.classList.add("selected");
+        button.setAttribute("aria-current", "true");
+      }
+      button.addEventListener("click", () =>
+        act(async () => {
+          if (!leaveExtensions()) return;
+          selectedCheck = repository.repository;
+          selectedChat = null;
+          await refresh();
+        }),
+      );
+      checkItem.append(button);
+      chatList.append(checkItem);
+    }
     // The service lists waiting chats first, then working, then done ones.
     for (const chat of chats.filter((overview) => overview.repository === repository.repository)) {
       const chatItem = el("li");
@@ -287,6 +344,7 @@ function renderSidebar(repositories: RepositoryOverview[], chats: ChatOverview[]
         act(async () => {
           if (!leaveExtensions()) return;
           selectedChat = chat.chat;
+          selectedCheck = null;
           await refresh();
         }),
       );
@@ -395,6 +453,114 @@ function chatActions(overview: ChatOverview): HTMLElement[] {
     actions.push(done);
   }
   return actions;
+}
+
+/** A short status for the sidebar. */
+function checkStatus(check: RepoCheck): string {
+  switch (check.state) {
+    case "not_run":
+      return "not run";
+    case "running":
+      return "running";
+    case "done":
+      return `${check.report.must.length} Must · ${check.report.should.length} Should`;
+    case "unreadable":
+      return "unreadable";
+    case "failed":
+      return "failed";
+  }
+}
+
+function renderRepoCheck(repository: RepositoryOverview, check: RepoCheck): void {
+  selectedWorking = false;
+  composer.hidden = true;
+  transcript.hidden = true;
+  repoCheckView.hidden = false;
+  const items = [labelled("Repository", repository.name), labelled("View", "repo-check")];
+  if (check.state === "done" && check.report.commit !== null) {
+    items.push(labelled("Commit", check.report.commit));
+  }
+  topBar.replaceChildren(...items);
+
+  const run = el("button", "", check.state === "not_run" ? "Run repo-check" : "Run again");
+  run.type = "button";
+  run.disabled = check.state === "running";
+  run.addEventListener("click", () =>
+    act(async () => {
+      await service.runRepoCheck(repository.repository);
+      await refresh();
+    }),
+  );
+  const intro = el("div", "repo-check-intro");
+  intro.append(
+    el("p", "muted", "repo-check only reads the repository. The harness never fixes a finding; you decide what changes."),
+    run,
+  );
+
+  const body: HTMLElement[] = [intro];
+  switch (check.state) {
+    case "not_run":
+      body.push(el("p", "empty", "repo-check has not run in this repository yet."));
+      break;
+    case "running":
+      body.push(
+        el("p", "empty", "repo-check is running. It reads the repository and the global agent configuration, which takes a few minutes."),
+      );
+      break;
+    case "failed":
+      body.push(el("p", "repo-check-problem", `repo-check did not finish: ${check.reason}`));
+      break;
+    case "unreadable": {
+      body.push(el("p", "repo-check-problem", `The answer is not a report the harness can read: ${check.reason}`));
+      body.push(el("pre", "repo-check-output", check.output));
+      break;
+    }
+    case "done":
+      body.push(el("p", "repo-check-summary", check.report.summary));
+      body.push(findingSection("Must", "Real risks now.", check.report.must));
+      body.push(findingSection("Should", "Clear wins that are cheap to make.", check.report.should));
+      body.push(...optOuts(check.opt_outs));
+      break;
+  }
+  repoCheckView.replaceChildren(...body);
+}
+
+function findingSection(rank: "Must" | "Should", meaning: string, findings: Finding[]): HTMLElement {
+  const section = el("section", `findings ${rank.toLowerCase()}`);
+  const heading = el("h2", "", rank);
+  heading.append(el("span", "muted findings-meaning", meaning));
+  section.append(heading);
+  if (findings.length === 0) {
+    section.append(el("p", "empty", `No ${rank} findings.`));
+    return section;
+  }
+  const list = el("ol", "finding-list");
+  for (const finding of findings) {
+    const item = el("li", "finding");
+    const title = el("div", "finding-title", finding.title);
+    for (const check of finding.checks) title.append(el("span", "check-id", check));
+    item.append(title, el("div", "finding-details", finding.details));
+    list.append(item);
+  }
+  section.append(list);
+  return section;
+}
+
+function optOuts(optOuts: OptOuts): HTMLElement[] {
+  if (optOuts.type === "unreadable") {
+    return [el("p", "repo-check-problem", `Nothing is switched off: ${optOuts.reason}`)];
+  }
+  if (optOuts.checks.length === 0) return [];
+  const section = el("section", "findings switched-off");
+  section.append(el("h2", "", "Switched off in .leiser/config.toml"));
+  const list = el("ul", "finding-list");
+  for (const off of optOuts.checks) {
+    const item = el("li", "finding");
+    item.append(el("span", "check-id", off.check), el("span", "", ` ${off.reason}`));
+    list.append(item);
+  }
+  section.append(list);
+  return [section];
 }
 
 function labelled(label: string, value: string): HTMLElement {

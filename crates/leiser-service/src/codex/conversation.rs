@@ -15,6 +15,8 @@ use crate::{AgentEvent, Answer, PermissionMode, Question, QuestionOption};
 /// Codex's own sandbox, in every permission mode: writes only inside the
 /// working directory, no network.
 const SANDBOX: &str = "workspace-write";
+/// Codex's own sandbox for a read-only agent session: writes nowhere.
+const READ_ONLY_SANDBOX: &str = "read-only";
 
 /// Codex's settings for a permission mode: its approval policy and who
 /// reviews approval requests (`None`: the developer).
@@ -132,6 +134,8 @@ pub(super) struct Conversation {
     /// The thread to resume instead of starting a new one.
     resume: Option<String>,
     permission_mode: PermissionMode,
+    /// The sandbox the thread runs in.
+    sandbox: &'static str,
     /// Requests from Codex waiting for the developer, by their id.
     open: HashMap<String, (RequestId, OpenRequest)>,
     phase: Phase,
@@ -154,6 +158,25 @@ impl Conversation {
         Self::open(working_directory, permission_mode, None)
     }
 
+    /// Runs the thread in Codex's read-only sandbox. Must be called before
+    /// Codex answers the handshake.
+    #[must_use]
+    pub fn read_only(mut self) -> Self {
+        self.sandbox = READ_ONLY_SANDBOX;
+        self
+    }
+
+    /// Codex's approval policy and reviewer for the thread. Nobody answers
+    /// a read-only agent session, so it never asks: what the read-only
+    /// sandbox refuses fails.
+    fn approval_settings(&self) -> (&'static str, Option<&'static str>) {
+        if self.sandbox == READ_ONLY_SANDBOX {
+            ("never", None)
+        } else {
+            approval_settings(self.permission_mode)
+        }
+    }
+
     /// Starts the handshake for resuming the thread `thread_id`.
     pub fn resume(
         working_directory: String,
@@ -172,6 +195,7 @@ impl Conversation {
             working_directory,
             resume,
             permission_mode,
+            sandbox: SANDBOX,
             open: HashMap::new(),
             phase: Phase::Initializing,
             waiting: VecDeque::new(),
@@ -408,14 +432,14 @@ impl Conversation {
                     })?);
                 self.phase = Phase::StartingThread;
                 let cwd = self.working_directory.clone();
-                let (approval_policy, approvals_reviewer) = approval_settings(self.permission_mode);
+                let (approval_policy, approvals_reviewer) = self.approval_settings();
                 if let Some(thread_id) = self.resume.clone() {
                     let params = ThreadResumeParams {
                         thread_id,
                         cwd,
                         approval_policy,
                         approvals_reviewer,
-                        sandbox: SANDBOX,
+                        sandbox: self.sandbox,
                         exclude_turns: true,
                     };
                     self.request(output, Pending::ThreadResume, params)?;
@@ -424,7 +448,7 @@ impl Conversation {
                         cwd,
                         approval_policy,
                         approvals_reviewer,
-                        sandbox: SANDBOX,
+                        sandbox: self.sandbox,
                     };
                     self.request(output, Pending::ThreadStart, params)?;
                 }
@@ -756,6 +780,22 @@ mod tests {
         assert_eq!(next[1]["params"]["cwd"], "/repo");
         assert_eq!(next[1]["params"]["approvalPolicy"], "untrusted");
         assert_eq!(next[1]["params"]["sandbox"], "workspace-write");
+        Ok(())
+    }
+
+    #[test]
+    fn a_read_only_thread_runs_in_the_read_only_sandbox_and_never_asks() -> TestResult {
+        let (conversation, _) = Conversation::start("/repo".to_owned(), PermissionMode::Auto)?;
+        let mut conversation = conversation.read_only();
+
+        let output = receive(&mut conversation, &json!({"id": 0, "result": {}}))?;
+
+        let next = lines(&output)?;
+        assert_eq!(next[1]["method"], "thread/start");
+        assert_eq!(next[1]["params"]["sandbox"], "read-only");
+        // Nobody answers a read-only agent session.
+        assert_eq!(next[1]["params"]["approvalPolicy"], "never");
+        assert_eq!(next[1]["params"].get("approvalsReviewer"), None);
         Ok(())
     }
 
