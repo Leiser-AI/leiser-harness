@@ -28,6 +28,14 @@ program, set `LEISER_CLAUDE_CODE` or `LEISER_CODEX` to its path.
 `repo-check` runs on Claude Code, read-only, when a repository is added and
 on demand; it needs the `repo-check` skill in `~/.claude/skills/`.
 
+The top bar's Terminal button opens a terminal panel on the right with a
+shell in the chat's checkout (its worktree, or the main checkout): the login
+shell on macOS, PowerShell on Windows. Each chat keeps its own shell while
+another chat is selected or the panel is hidden. The shells run in the app,
+not in the harness service (ADR 0008): they end with "End shell", when the
+shell exits, and when the app quits. The PTY code is in
+`crates/leiser-terminal`; the screen is xterm.js.
+
 ## Run it
 
 Needs Node.js (LTS) and, on Linux, WebKitGTK (see `.github/workflows/ci.yml`).
