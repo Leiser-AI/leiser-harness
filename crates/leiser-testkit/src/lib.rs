@@ -16,7 +16,7 @@ mod turn;
 pub use fake_driver::FakeDriver;
 pub use gate::Gate;
 pub use harness_mcp_client::{HarnessMcpClient, McpClientError, ToolOutput};
-pub use repo::TestRepo;
+pub use repo::{DEFAULT_BRANCH, TestRepo};
 pub use script::{FakeInput, Script, Step};
 pub use service::{TestService, TestServiceError};
 pub use turn::{TurnError, collect_turn, collect_turn_within, next_event};

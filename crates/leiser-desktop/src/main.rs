@@ -31,7 +31,10 @@ fn main() -> Result<(), tauri::Error> {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
-            let config = agents::service_config(app.path().app_data_dir()?)?;
+            // Not in the app data directory: its path has a space on macOS,
+            // which some build tools in a worktree trip over.
+            let worktrees = app.path().home_dir()?.join(".leiser").join("worktrees");
+            let config = agents::service_config(app.path().app_data_dir()?, worktrees)?;
             // `start` spawns the service's command loop on the current
             // runtime, which lives as long as the app.
             let service = tauri::async_runtime::block_on(async { leiser_service::start(config) })?;
