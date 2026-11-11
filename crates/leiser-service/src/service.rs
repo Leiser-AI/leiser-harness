@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::JoinHandle;
 
+use crate::checkpoint::{self, CheckpointError};
 use crate::cli_extensions::{self, CliExtensionError};
 use crate::handoff::{self, Handoff, ReadError};
 use crate::harness_mcp::{
@@ -17,18 +18,19 @@ use crate::keychain::KeychainError;
 use crate::repo_check::{self, Outcome};
 use crate::repo_config::RepositoryConfig;
 use crate::store::{
-    AgentSessionV2, ChatSubscriptionV3, ChatV3, HandoffV2, RepositoryV1, StateV3, StorageError,
-    Store,
+    AgentSessionV2, ChatSubscriptionV3, ChatV3, CheckpointsV1, HandoffV2, RepositoryV1, StateV3,
+    StorageError, Store, TurnCheckpointsV1,
 };
 use crate::subscriptions::{SubscriptionError, Subscriptions};
 use crate::todos::{TodoChange, TodoError, TodoList};
 use crate::worktree::{self, WorktreeError};
 use crate::{
     Access, AgentCli, AgentEvent, AgentSessionId, Answer, Branch, ChatId, ChatOverview, ChatStatus,
-    Checkout, Command, CommandError, Driver, Event, Keychain, LoginAnswer, LoginOutcome,
-    LoginProcess, OptOuts, OsKeychain, PermissionMode, Provider, QueueReason, RepoCheck,
-    RepositoryId, RepositoryOverview, RepositoryScript, Response, SessionInput, SessionSpec,
-    SignIn, SubscriptionAccess, SubscriptionId, SubscriptionKind, TodoId, TranscriptEntry, script,
+    Checkout, CheckpointMoment, Command, CommandError, DiffRange, Driver, Event, Keychain,
+    LoginAnswer, LoginOutcome, LoginProcess, OptOuts, OsKeychain, PermissionMode, Provider,
+    QueueReason, RepoCheck, RepositoryId, RepositoryOverview, RepositoryScript, Response,
+    SessionInput, SessionSpec, SignIn, SubscriptionAccess, SubscriptionId, SubscriptionKind,
+    TodoId, TranscriptEntry, TurnCheckpoints, script,
 };
 
 /// Commands waiting for the command loop. Small, so callers feel back
@@ -292,6 +294,20 @@ struct Chat {
     todos: TodoList,
 }
 
+/// A chat's checkpoints.
+#[derive(Default)]
+struct ChatCheckpoints {
+    /// Per turn, oldest first.
+    turns: Vec<TurnCheckpoints>,
+    /// The running turn, whose checkpoint before is captured and whose
+    /// checkpoint after comes when it ends. A turn cut short by a restart
+    /// keeps no checkpoint after.
+    open: Option<u64>,
+    /// The checkpoint the developer last restored the files to, which the
+    /// next message tells the agent about.
+    restored: Option<(u64, CheckpointMoment)>,
+}
+
 /// An agent session that can be resumed.
 struct Resumable {
     id: AgentSessionId,
@@ -533,6 +549,7 @@ struct State {
     repositories: BTreeMap<RepositoryId, PathBuf>,
     repo_checks: BTreeMap<RepositoryId, CheckState>,
     chats: BTreeMap<ChatId, Chat>,
+    checkpoints: BTreeMap<ChatId, ChatCheckpoints>,
     subscriptions: Subscriptions,
     logins: BTreeMap<SubscriptionId, Login>,
     next_id: u64,
@@ -633,6 +650,7 @@ impl State {
             config.codex_home,
             config.keychain,
         );
+        let checkpoints = stored_checkpoints(&store, chats.keys())?;
         let status_changes = chats
             .values()
             .map(|chat| chat.shown.1)
@@ -650,6 +668,7 @@ impl State {
             repositories,
             repo_checks,
             chats,
+            checkpoints,
             subscriptions,
             logins: BTreeMap::new(),
             next_id: stored.next_id,
@@ -801,10 +820,7 @@ impl State {
             Command::RemoveTodo { chat, todo } => self
                 .change_todos(chat, TodoChange::Remove { todo })
                 .map(|_| Response::TodoRemoved),
-            Command::ReadServiceStatus => Ok(Response::ServiceStatus {
-                version: env!("CARGO_PKG_VERSION").to_owned(),
-                update_waiting: self.update_waiting,
-            }),
+            Command::ReadServiceStatus => Ok(self.service_status()),
             Command::ListCliExtensions { repository } => self.list_cli_extensions(repository).await,
             Command::ReadCliExtensionFile { repository, file } => {
                 self.read_cli_extension_file(repository, file).await
@@ -818,9 +834,21 @@ impl State {
                 self.save_cli_extension_file(repository, file, text, previous)
                     .await
             }
+            Command::ListCheckpoints { chat } => self.list_checkpoints(chat).await,
+            Command::ReadDiff { chat, range } => self.read_diff(chat, range).await,
+            Command::RestoreCheckpoint { chat, turn, moment } => {
+                self.restore(chat, turn, moment).await
+            }
         };
         // The caller may have stopped waiting; nothing to do then.
         let _ = reply.send(result);
+    }
+
+    fn service_status(&self) -> Response {
+        Response::ServiceStatus {
+            version: env!("CARGO_PKG_VERSION").to_owned(),
+            update_waiting: self.update_waiting,
+        }
     }
 
     fn next_id(&mut self) -> u64 {
@@ -1377,6 +1405,23 @@ impl State {
         if chat.turn_running() {
             return Err(CommandError::TurnRunning { chat: id });
         }
+        // Before the agent session opens: an agent CLI may start working,
+        // or end, as soon as it runs.
+        self.checkpoint_before(id, &text).await;
+        let started = self.start_turn(id, text).await;
+        if started.is_err() {
+            self.forget_open_checkpoint(id);
+        }
+        started
+    }
+
+    /// Sends the developer's message to the chat's agent session, which
+    /// starts a turn; opens the agent session first if needed.
+    async fn start_turn(&mut self, id: ChatId, text: String) -> Result<Response, CommandError> {
+        let chat = self
+            .chats
+            .get(&id)
+            .ok_or(CommandError::UnknownChat { chat: id })?;
         let pending = chat.handoff;
         let was_done = chat.done;
         let in_worktree = chat.place == Place::Worktree;
@@ -1409,7 +1454,12 @@ impl State {
         };
         // Quotes the chat up to, not including, this message.
         let handoff = pending.and_then(|pending| handoff::render(&transcript, pending));
-        let message = [branch_note, handoff, Some(text.clone())]
+        let restore_note = self
+            .checkpoints
+            .get_mut(&id)
+            .and_then(|checkpoints| checkpoints.restored.take())
+            .map(|(turn, moment)| restore_note(turn, moment));
+        let message = [branch_note, restore_note, handoff, Some(text.clone())]
             .into_iter()
             .flatten()
             .collect::<Vec<_>>()
@@ -2262,6 +2312,11 @@ impl State {
             }
             _ => None,
         };
+        if session_ended.is_some() {
+            // Before the turn's end goes out, so whoever sees it can read
+            // the turn's changes.
+            self.checkpoint_after(id).await;
+        }
         if session_ended == Some(false)
             && let Some(Chat {
                 session: Some(session),
@@ -2380,12 +2435,14 @@ impl State {
         };
         session.turn = Turn::Running { queued };
         let mut input = session.input.clone();
+        self.checkpoint_before(id, &text).await;
         if mode_changed {
             match self.reopen_with_turn(id, &text) {
                 Ok(reopened) => input = reopened,
                 Err(error) => {
                     // The queued messages go with the ended agent session.
                     tracing::error!(chat = ?id, %error, "could not resume the agent session in its new permission mode");
+                    self.forget_open_checkpoint(id);
                     return;
                 }
             }
@@ -2439,6 +2496,214 @@ impl State {
         self.chats.get_mut(&chat).filter(|state| {
             state.session.as_ref().map(|session| session.generation) == Some(generation)
         })
+    }
+
+    /// Captures the checkpoint before the turn that `text` starts. A
+    /// failure is logged; the turn runs without checkpoints.
+    async fn checkpoint_before(&mut self, id: ChatId, text: &str) {
+        let Some(chat) = self.chats.get(&id) else {
+            return;
+        };
+        let checkpoints = self.checkpoints.entry(id).or_default();
+        let turn = checkpoints.turns.last().map_or(1, |last| last.turn + 1);
+        let reference = checkpoint::ref_name(id.0, turn, CheckpointMoment::Before);
+        let message = format!(
+            "leiser-harness checkpoint: chat {}, before turn {turn}",
+            id.0
+        );
+        match checkpoint::capture(&chat.working_directory, &reference, &message).await {
+            Ok(before) => {
+                checkpoints.turns.push(TurnCheckpoints {
+                    turn,
+                    title: title(text).unwrap_or_default(),
+                    before,
+                    after: None,
+                });
+                checkpoints.open = Some(turn);
+                self.save_checkpoints(id);
+            }
+            Err(error) => {
+                tracing::warn!(chat = ?id, %error, "could not capture a checkpoint before a turn");
+            }
+        }
+    }
+
+    /// Captures the checkpoint after the chat's turn that has just ended.
+    async fn checkpoint_after(&mut self, id: ChatId) {
+        let (Some(chat), Some(checkpoints)) = (self.chats.get(&id), self.checkpoints.get_mut(&id))
+        else {
+            return;
+        };
+        let Some(turn) = checkpoints.open.take() else {
+            return;
+        };
+        let reference = checkpoint::ref_name(id.0, turn, CheckpointMoment::After);
+        let message = format!(
+            "leiser-harness checkpoint: chat {}, after turn {turn}",
+            id.0
+        );
+        match checkpoint::capture(&chat.working_directory, &reference, &message).await {
+            Ok(after) => {
+                if let Some(ended) = checkpoints.turns.iter_mut().find(|t| t.turn == turn) {
+                    ended.after = Some(after);
+                }
+                self.save_checkpoints(id);
+            }
+            Err(error) => {
+                tracing::warn!(chat = ?id, %error, "could not capture a checkpoint after a turn");
+            }
+        }
+    }
+
+    /// Forgets the checkpoint before a turn that did not start after all.
+    /// Its ref stays until the next turn's checkpoint replaces it.
+    fn forget_open_checkpoint(&mut self, id: ChatId) {
+        let Some(checkpoints) = self.checkpoints.get_mut(&id) else {
+            return;
+        };
+        if let Some(turn) = checkpoints.open.take() {
+            checkpoints
+                .turns
+                .retain(|checkpoint| checkpoint.turn != turn);
+            self.save_checkpoints(id);
+        }
+    }
+
+    /// Stores the chat's checkpoints. A failure is logged: the commits stay
+    /// under their refs, only the list of them may be older after a
+    /// restart.
+    fn save_checkpoints(&self, id: ChatId) {
+        let Some(checkpoints) = self.checkpoints.get(&id) else {
+            return;
+        };
+        let stored = CheckpointsV1 {
+            turns: checkpoints
+                .turns
+                .iter()
+                .map(TurnCheckpointsV1::from)
+                .collect(),
+        };
+        if let Err(error) = self.store.save_checkpoints(id.0, &stored) {
+            tracing::error!(chat = ?id, %error, "could not store the chat's checkpoints");
+        }
+    }
+
+    /// The checkpoints of the chat's turn.
+    fn turn_checkpoints(
+        &self,
+        id: ChatId,
+        turn: u64,
+        moment: CheckpointMoment,
+    ) -> Result<&TurnCheckpoints, CommandError> {
+        self.checkpoints
+            .get(&id)
+            .and_then(|checkpoints| checkpoints.turns.iter().find(|t| t.turn == turn))
+            .ok_or(CommandError::UnknownCheckpoint {
+                chat: id,
+                turn,
+                moment,
+            })
+    }
+
+    async fn list_checkpoints(&self, id: ChatId) -> Result<Response, CommandError> {
+        let chat = self
+            .chats
+            .get(&id)
+            .ok_or(CommandError::UnknownChat { chat: id })?;
+        let base = self.branch_base(chat).await?;
+        Ok(Response::Checkpoints {
+            branch_base: base.name,
+            turns: self
+                .checkpoints
+                .get(&id)
+                .map(|checkpoints| checkpoints.turns.clone())
+                .unwrap_or_default(),
+        })
+    }
+
+    async fn read_diff(&self, id: ChatId, range: DiffRange) -> Result<Response, CommandError> {
+        let chat = self
+            .chats
+            .get(&id)
+            .ok_or(CommandError::UnknownChat { chat: id })?;
+        let (from, to) = match range {
+            DiffRange::Turn { turn } => {
+                let checkpoints = self.turn_checkpoints(id, turn, CheckpointMoment::Before)?;
+                (checkpoints.before.clone(), checkpoints.after.clone())
+            }
+            DiffRange::Branch => (self.branch_base(chat).await?.commit, None),
+        };
+        let files = checkpoint::diff(&chat.working_directory, &from, to.as_deref()).await?;
+        Ok(Response::Diff { files })
+    }
+
+    /// The base the chat's branch is compared to, from its repository's
+    /// config.
+    async fn branch_base(&self, chat: &Chat) -> Result<checkpoint::BranchBase, CommandError> {
+        let repository = self.repository_path(chat.repository)?;
+        let config = RepositoryConfig::load(&repository).map_err(|error| {
+            CommandError::RepositoryConfig {
+                reason: error.to_string(),
+            }
+        })?;
+        Ok(checkpoint::branch_base(
+            &chat.working_directory,
+            config.worktree.base_branch.as_deref(),
+        )
+        .await?)
+    }
+
+    async fn restore(
+        &mut self,
+        id: ChatId,
+        turn: u64,
+        moment: CheckpointMoment,
+    ) -> Result<Response, CommandError> {
+        let chat = self
+            .chats
+            .get(&id)
+            .ok_or(CommandError::UnknownChat { chat: id })?;
+        if let Setup::Running { .. } = chat.setup {
+            return Err(CommandError::SettingUp { chat: id });
+        }
+        let checkpoints = self.turn_checkpoints(id, turn, moment)?;
+        let commit = match moment {
+            CheckpointMoment::Before => checkpoints.before.clone(),
+            CheckpointMoment::After => {
+                checkpoints
+                    .after
+                    .clone()
+                    .ok_or(CommandError::UnknownCheckpoint {
+                        chat: id,
+                        turn,
+                        moment,
+                    })?
+            }
+        };
+        let working_directory = chat.working_directory.clone();
+        // Every chat in the working directory would lose its turn's files.
+        let sharing: Vec<ChatId> = self
+            .chats
+            .iter()
+            .filter(|(_, other)| other.working_directory == working_directory)
+            .map(|(other, _)| *other)
+            .collect();
+        if let Some(running) = sharing
+            .iter()
+            .find(|other| self.chats.get(other).is_some_and(Chat::turn_running))
+        {
+            return Err(CommandError::TurnRunning { chat: *running });
+        }
+        checkpoint::restore(&working_directory, &commit).await?;
+        for other in sharing {
+            self.checkpoints.entry(other).or_default().restored = Some((turn, moment));
+        }
+        self.emit(Event::CheckpointRestored {
+            chat: id,
+            turn,
+            moment,
+        });
+        Ok(Response::CheckpointRestored)
     }
 
     fn save(&self) -> Result<(), CommandError> {
@@ -2526,6 +2791,14 @@ impl From<CliExtensionError> for CommandError {
     }
 }
 
+impl From<CheckpointError> for CommandError {
+    fn from(error: CheckpointError) -> Self {
+        Self::Checkpoint {
+            reason: error.to_string(),
+        }
+    }
+}
+
 impl From<SubscriptionError> for CommandError {
     fn from(error: SubscriptionError) -> Self {
         match error {
@@ -2605,6 +2878,16 @@ async fn forward(
     }
 }
 
+/// Tells the agent that the developer put the files back to a checkpoint,
+/// so it does not edit from what it remembers of them.
+fn restore_note(turn: u64, moment: CheckpointMoment) -> String {
+    format!(
+        "[leiser harness] The developer restored the files of this working directory to how \
+         they were {moment} turn {turn} of this chat. Changes made since then may be gone; \
+         read a file again before you edit it."
+    )
+}
+
 /// A chat's title: the first line of the developer's first message.
 fn title(text: &str) -> Option<String> {
     text.lines()
@@ -2632,6 +2915,27 @@ fn stored_repo_checks(
                 }
             };
             Some((*id, CheckState::Finished(outcome)))
+        })
+        .collect()
+}
+
+/// The checkpoints of every chat that has some. A file that cannot be read
+/// stops the start, as a todo list does: an empty list would overwrite it.
+fn stored_checkpoints<'a>(
+    store: &Store,
+    chats: impl Iterator<Item = &'a ChatId>,
+) -> Result<BTreeMap<ChatId, ChatCheckpoints>, StorageError> {
+    chats
+        .map(|chat| {
+            let turns = store.checkpoints(chat.0)?.turns;
+            Ok((
+                *chat,
+                ChatCheckpoints {
+                    turns: turns.into_iter().map(TurnCheckpoints::from).collect(),
+                    open: None,
+                    restored: None,
+                },
+            ))
         })
         .collect()
 }
