@@ -224,6 +224,9 @@ export type CommandError =
   | { type: "host_account_unverified"; name: string; reason: string }
   | { type: "no_branch"; chat: ChatId }
   | { type: "push_failed"; reason: string }
+  | { type: "protected_branch"; branch: string }
+  | { type: "force_push"; branch: string }
+  | { type: "ai_attribution"; commit: string; line: string }
   | { type: "pull_request_exists"; chat: ChatId; number: number }
   | { type: "pull_request_opening"; chat: ChatId }
   | { type: "empty_pull_request_title" }

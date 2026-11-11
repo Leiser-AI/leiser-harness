@@ -33,6 +33,11 @@
 //! never the global one, and checks with the [`GitHost`] that a push signs
 //! in as that account before it pushes.
 //!
+//! Hard blocks hold in every permission mode: the harness service never
+//! pushes to `main` or `development`, never force-pushes and never pushes
+//! a commit with AI attribution, and every agent session gets the same
+//! blocks as deny rules on top of the repository's own agent CLI settings.
+//!
 //! Each chat has a todo list, kept on disk like its transcript. Agent
 //! sessions get tools for it only where the repository's
 //! `.leiser/config.toml` switches agent access on.
@@ -50,6 +55,7 @@ mod driver;
 mod git;
 mod git_host;
 mod handoff;
+mod hard_blocks;
 mod harness_mcp;
 mod host_accounts;
 mod installed;

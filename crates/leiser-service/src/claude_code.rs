@@ -26,7 +26,8 @@
 //!
 //! Permission modes map onto `--permission-mode`; Claude Code has all four
 //! (its `auto` falls back to asking where the model or plan lacks it).
-//! Claude Code's sandbox is switched on with `--settings` in every mode.
+//! Claude Code's sandbox is switched on with `--settings` in every mode,
+//! together with the hard blocks as deny rules (see [`deny_rules`]).
 //! Whatever needs approval reaches the driver as a `can_use_tool` control
 //! request (`--permission-prompt-tool stdio`, as the Agent SDK passes) and
 //! stays open until the developer answers; `AskUserQuestion` arrives the
@@ -115,7 +116,12 @@ fn permission_mode_argument(mode: PermissionMode) -> &'static str {
 /// it and may not leave it. Native Windows has no Claude Code sandbox, so
 /// there it is asked for but not required. They also switch off Claude
 /// Code's AI attribution in commits and pull requests: `attribution`, and
-/// the older `includeCoAuthoredBy` it replaces.
+/// the older `includeCoAuthoredBy` it replaces. And they deny what the
+/// hard blocks forbid ([`deny_rules`]).
+///
+/// `--settings` ranks above the repository's own settings files, which
+/// stay in force: Claude Code merges list keys such as `permissions.deny`
+/// across all of them, and a deny rule holds in every permission mode.
 fn sandbox_settings() -> String {
     serde_json::json!({
         "sandbox": {
@@ -125,8 +131,42 @@ fn sandbox_settings() -> String {
         },
         "attribution": { "commit": "", "pr": "" },
         "includeCoAuthoredBy": false,
+        "permissions": { "deny": deny_rules() },
     })
     .to_string()
+}
+
+/// The names AI attribution in a commit message uses for Claude Code and
+/// Codex, as they write them.
+const AI_ATTRIBUTION_NAMES: [&str; 2] = ["Claude", "Codex"];
+
+/// The hard blocks as Claude Code deny rules: `git push` to a protected
+/// branch, a force push, and a commit whose message or author carries AI
+/// attribution. A `*` matches any text; a trailing ` *` also matches
+/// nothing.
+fn deny_rules() -> Vec<String> {
+    let mut rules = Vec::new();
+    for branch in crate::hard_blocks::PROTECTED_BRANCHES {
+        for target in [format!(" {branch}"), format!(":{branch}")] {
+            rules.push(format!("Bash(git push *{target})"));
+            rules.push(format!("Bash(git push *{target} *)"));
+        }
+        rules.push(format!("Bash(git push *refs/heads/{branch})"));
+        rules.push(format!("Bash(git push *refs/heads/{branch} *)"));
+    }
+    for force in ["-f*", "* -f*", "*--force*", "*--mirror*", "* +*"] {
+        rules.push(format!("Bash(git push {force})"));
+    }
+    for name in AI_ATTRIBUTION_NAMES {
+        for trailer in ["Co-authored-by", "Co-Authored-By"] {
+            rules.push(format!("Bash(git commit *{trailer}: {name}*)"));
+        }
+        rules.push(format!("Bash(git commit *Generated with*{name}*)"));
+    }
+    for email in ["noreply@anthropic.com", "noreply@openai.com"] {
+        rules.push(format!("Bash(git commit *{email}*)"));
+    }
+    rules
 }
 
 /// Starts agent sessions on the developer's installed Claude Code.
@@ -1166,6 +1206,111 @@ mod tests {
             );
         }
         Ok(())
+    }
+
+    /// Whether a Claude Code rule `pattern` (the part in `Bash(...)`)
+    /// matches `command`: `*` matches any text, and a trailing ` *` also
+    /// matches nothing.
+    fn matches(pattern: &str, command: &str) -> bool {
+        fn glob(pattern: &[u8], text: &[u8]) -> bool {
+            match pattern.split_first() {
+                None => text.is_empty(),
+                Some((b'*', rest)) => (0..=text.len()).any(|skip| glob(rest, &text[skip..])),
+                Some((first, rest)) => text
+                    .split_first()
+                    .is_some_and(|(next, text)| next == first && glob(rest, text)),
+            }
+        }
+        glob(pattern.as_bytes(), command.as_bytes())
+            || pattern
+                .strip_suffix(" *")
+                .is_some_and(|bare| glob(bare.as_bytes(), command.as_bytes()))
+    }
+
+    /// Whether the deny rules in the settings for `spec` deny `command`.
+    fn denied(spec: &SessionSpec, command: &str) -> Result<bool, Box<dyn std::error::Error>> {
+        let arguments = arguments(spec, None);
+        let index = arguments
+            .iter()
+            .position(|argument| argument == "--settings")
+            .ok_or("no --settings")?;
+        let settings: Value = serde_json::from_str(&arguments[index + 1])?;
+        let rules = settings["permissions"]["deny"]
+            .as_array()
+            .ok_or("no deny rules")?;
+        Ok(rules.iter().filter_map(Value::as_str).any(|rule| {
+            rule.strip_prefix("Bash(")
+                .and_then(|rule| rule.strip_suffix(')'))
+                .is_some_and(|pattern| matches(pattern, command))
+        }))
+    }
+
+    #[test]
+    fn every_agent_session_denies_what_the_hard_blocks_forbid()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let specs = [
+            spec(PermissionMode::Supervised),
+            spec(PermissionMode::AutoAcceptEdits),
+            spec(PermissionMode::Auto),
+            spec(PermissionMode::FullAccess),
+            SessionSpec {
+                harness_mcp_url: None,
+                access: Access::ReadOnly,
+                ..spec(PermissionMode::Auto)
+            },
+        ];
+        for spec in &specs {
+            for command in [
+                "git push origin main",
+                "git push origin development",
+                "git push -u origin development --tags",
+                "git push origin HEAD:main",
+                "git push origin feat/x:refs/heads/development",
+                "git push --force",
+                "git push -f origin feat/x",
+                "git push origin feat/x --force-with-lease",
+                "git push origin +feat/x",
+                "git push --mirror origin",
+                "git commit -m \"Fix\n\nCo-Authored-By: Claude <noreply@anthropic.com>\"",
+                "git commit -m \"Fix\n\nCo-authored-by: Codex <codex@example.invalid>\"",
+                "git commit -m \"Fix\n\n🤖 Generated with [Claude Code](https://claude.com)\"",
+                "git commit --amend --author \"Claude <noreply@anthropic.com>\"",
+            ] {
+                assert!(
+                    denied(spec, command)?,
+                    "{:?}: {command}",
+                    spec.permission_mode
+                );
+            }
+            for command in [
+                "git push origin feat/main-menu",
+                "git push --follow-tags origin feat/development-notes",
+                "git push -u origin feat/x",
+                "git commit -m \"Fix the main menu\"",
+                "git commit -m \"Fix\n\nCo-authored-by: Ada <ada@example.invalid>\"",
+                "git status",
+            ] {
+                assert!(
+                    !denied(spec, command)?,
+                    "{:?}: {command}",
+                    spec.permission_mode
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn the_repositorys_own_settings_stay_in_force() {
+        for mode in [PermissionMode::Supervised, PermissionMode::FullAccess] {
+            let arguments = arguments(&spec(mode), None);
+            for option in ["--setting-sources", "--bare"] {
+                assert!(
+                    !arguments.iter().any(|argument| argument == option),
+                    "{mode:?}: {option}"
+                );
+            }
+        }
     }
 
     fn can_use_tool(id: &str, tool: &str, input: &Value) -> String {

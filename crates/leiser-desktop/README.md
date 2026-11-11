@@ -42,7 +42,10 @@ chat's branch and opens a pull request into the repository's base branch
 a chat has at most one, and "Push" updates it. Selecting a chat checks its
 open pull request once; the "PR #N" button checks it again. Once it is
 merged, the chat offers to remove its worktree and local branch; the chat
-stays readable. On the fake git host, write the pull request's number to
+stays readable. In every permission mode the harness service refuses a
+push to `main` or `development`, a force push and a push of a commit with
+AI attribution; every agent session gets the same hard blocks as deny
+rules. On the fake git host, write the pull request's number to
 `fake-git-host-merged` in the host account's `gh` config directory
 (`host-accounts/<id>/gh` in the data directory) to have it reported merged.
 
