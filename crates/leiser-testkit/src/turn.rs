@@ -11,7 +11,7 @@ const TURN_TIMEOUT: Duration = Duration::from_secs(10);
 /// Why [`collect_turn`] returned no turn.
 #[derive(Debug, thiserror::Error)]
 pub enum TurnError {
-    #[error("no turn end or event came within {TURN_TIMEOUT:?}")]
+    #[error("no turn end or event came in time")]
     Timeout,
     #[error("the agent session ended before the turn did")]
     SessionEnded,
@@ -32,7 +32,21 @@ pub async fn collect_turn(
     events: &mut broadcast::Receiver<Event>,
     chat: ChatId,
 ) -> Result<Vec<AgentEvent>, TurnError> {
-    tokio::time::timeout(TURN_TIMEOUT, async {
+    collect_turn_within(events, chat, TURN_TIMEOUT).await
+}
+
+/// [`collect_turn`] with its own timeout, for real agent CLIs, which take
+/// longer than the fake one.
+///
+/// # Errors
+///
+/// As [`collect_turn`].
+pub async fn collect_turn_within(
+    events: &mut broadcast::Receiver<Event>,
+    chat: ChatId,
+    timeout: Duration,
+) -> Result<Vec<AgentEvent>, TurnError> {
+    tokio::time::timeout(timeout, async {
         let mut turn = Vec::new();
         loop {
             let Event::Agent { chat: from, event } = events.recv().await? else {

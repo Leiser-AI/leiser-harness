@@ -52,7 +52,8 @@ pub enum Step {
     EchoUserMessage,
     /// Answers with the directory the fake agent CLI runs in.
     ReportWorkingDirectory,
-    /// Waits for a steered message, which [`Step::EchoSteer`] can answer.
+    /// Waits for a steered message, unless one already came this turn;
+    /// [`Step::EchoSteer`] can answer it.
     WaitForSteer,
     /// Answers with the text of the last steered message of this turn.
     EchoSteer,

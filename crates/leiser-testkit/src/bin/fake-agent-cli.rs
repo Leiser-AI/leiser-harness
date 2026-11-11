@@ -155,6 +155,11 @@ impl<W: Write> Turn<'_, W> {
     }
 
     fn wait_for_steer(&mut self) -> Result<Option<Outcome>, FakeError> {
+        // A steer may have come before this step, as with a real agent CLI
+        // that is steered right after the turn starts.
+        if self.steer.is_some() {
+            return Ok(None);
+        }
         let Ok(input) = self.inputs.recv() else {
             return Ok(Some(Outcome::InputClosed));
         };
