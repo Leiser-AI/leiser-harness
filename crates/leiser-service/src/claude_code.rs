@@ -5,6 +5,10 @@
 //! Protocol sources: <https://code.claude.com/docs/en/headless> and the
 //! message types of the Agent SDK,
 //! <https://code.claude.com/docs/en/agent-sdk/typescript>.
+//!
+//! Interrupt uses Claude Code's control protocol. Steering is not supported
+//! yet, so the harness service queues steered messages: it is not verified
+//! how Claude Code ends turns when a message arrives mid-turn.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -134,8 +138,22 @@ impl Driver for ClaudeCodeDriver {
 }
 
 async fn write_input(mut stdin: ChildStdin, mut input: mpsc::Receiver<SessionInput>) {
-    while let Some(SessionInput::UserMessage { text }) = input.recv().await {
-        let Ok(mut line) = serde_json::to_vec(&InputLine::user_message(&text)) else {
+    let mut requests: u64 = 0;
+    while let Some(input) = input.recv().await {
+        let line = match &input {
+            SessionInput::UserMessage { text } => InputLine::user_message(text),
+            SessionInput::Interrupt => {
+                requests += 1;
+                InputLine::ControlRequest {
+                    request_id: format!("leiser-{requests}"),
+                    request: ControlRequest::Interrupt,
+                }
+            }
+            // The driver does not support steering, so the harness service
+            // queues steered messages and never sends this.
+            SessionInput::Steer { .. } => continue,
+        };
+        let Ok(mut line) = serde_json::to_vec(&line) else {
             return;
         };
         line.push(b'\n');
@@ -206,7 +224,11 @@ impl Parser {
                 // The developer's own message, replayed.
                 UserContent::Text(_) => Vec::new(),
             },
-            OutputLine::Result {} => vec![AgentEvent::TurnEnded],
+            OutputLine::Result {
+                terminal_reason:
+                    Some(TerminalReason::AbortedStreaming | TerminalReason::AbortedTools),
+            } => vec![AgentEvent::TurnInterrupted],
+            OutputLine::Result { .. } => vec![AgentEvent::TurnEnded],
             OutputLine::RateLimitEvent { rate_limit_info } => {
                 rate_limit_info.into_event(now).into_iter().collect()
             }
@@ -266,6 +288,20 @@ enum InputLine<'a> {
         message: UserMessage<'a>,
         parent_tool_use_id: Option<&'a str>,
     },
+    /// A request of Claude Code's control protocol. Its answer, a
+    /// `control_response` line, is not needed.
+    ControlRequest {
+        request_id: String,
+        request: ControlRequest,
+    },
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "subtype", rename_all = "snake_case")]
+enum ControlRequest {
+    /// Stops the running turn, which then ends with a result whose
+    /// terminal reason is `aborted_streaming` or `aborted_tools`.
+    Interrupt,
 }
 
 impl<'a> InputLine<'a> {
@@ -309,11 +345,27 @@ enum OutputLine {
         #[serde(default)]
         parent_tool_use_id: Option<String>,
     },
-    /// Ends every turn, also a failed one.
-    Result {},
+    /// Ends every turn, also a failed or interrupted one.
+    Result {
+        #[serde(default)]
+        terminal_reason: Option<TerminalReason>,
+    },
     RateLimitEvent {
         rate_limit_info: RateLimitInfo,
     },
+    #[serde(other)]
+    Other,
+}
+
+/// Why a turn ended.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum TerminalReason {
+    /// Interrupted while the model wrote.
+    AbortedStreaming,
+    /// Interrupted while a tool ran.
+    AbortedTools,
+    /// `completed`, errors and reasons added later.
     #[serde(other)]
     Other,
 }
@@ -480,7 +532,7 @@ impl RateLimitInfo {
 
 #[cfg(test)]
 mod tests {
-    use super::{InputLine, OutputLine, Parser};
+    use super::{ControlRequest, InputLine, OutputLine, Parser};
     use crate::AgentEvent;
 
     /// The events of `lines`, read in order by one parser.
@@ -503,6 +555,35 @@ mod tests {
             r#"{"type":"user","message":{"role":"user","content":"hi"},"parent_tool_use_id":null}"#
         );
         Ok(())
+    }
+
+    #[test]
+    fn an_interrupt_is_written_as_a_control_request() -> serde_json::Result<()> {
+        let line = InputLine::ControlRequest {
+            request_id: "leiser-1".to_owned(),
+            request: ControlRequest::Interrupt,
+        };
+
+        assert_eq!(
+            serde_json::to_string(&line)?,
+            r#"{"type":"control_request","request_id":"leiser-1","request":{"subtype":"interrupt"}}"#
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn an_aborted_turn_ends_as_interrupted() {
+        for reason in ["aborted_streaming", "aborted_tools"] {
+            let line = format!(
+                r#"{{"type":"result","subtype":"error_during_execution","is_error":true,"terminal_reason":"{reason}"}}"#
+            );
+
+            assert_eq!(
+                events(&[&line]),
+                vec![AgentEvent::TurnInterrupted],
+                "{reason}"
+            );
+        }
     }
 
     #[test]
@@ -580,7 +661,7 @@ mod tests {
 
     #[test]
     fn every_result_ends_the_turn_also_a_failed_one() {
-        let success = r#"{"type":"result","subtype":"success","is_error":false,"result":"ok"}"#;
+        let success = r#"{"type":"result","subtype":"success","is_error":false,"result":"ok","terminal_reason":"completed"}"#;
         let failure = r#"{"type":"result","subtype":"error_during_execution","is_error":true,"errors":["x"]}"#;
 
         assert_eq!(events(&[success]), vec![AgentEvent::TurnEnded]);

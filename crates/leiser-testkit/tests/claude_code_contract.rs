@@ -1,6 +1,6 @@
 //! Contract tests: the real Claude Code behaves like the fake agent CLI for
-//! start, send and read events, so the service tests with the fake agent
-//! CLI also hold for Claude Code.
+//! start, send, read events, queue, steer and interrupt, so the service
+//! tests with the fake agent CLI also hold for Claude Code.
 //!
 //! They need Claude Code signed in to one of the developer's subscriptions,
 //! so they are ignored by default and never run in CI. Run them locally:
@@ -19,13 +19,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use leiser_service::{
-    AgentEvent, ChatId, Checkout, ClaudeCodeDriver, Command, Driver, Event, Response,
+    AgentEvent, ChatId, Checkout, ClaudeCodeDriver, Command, Driver, Event, QueueReason, Response,
     ServiceConfig, ServiceHandle, SessionSpec,
 };
 use leiser_testkit::TestRepo;
 use tokio::sync::broadcast;
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
+
+/// A prompt whose turn runs long enough to be interrupted or queued behind.
+const LONG_TURN: &str = "Write a 1500-word story about a lighthouse keeper. Do not use any tools.";
 
 /// A real model is slower than the fake agent CLI.
 const TURN_TIMEOUT: Duration = Duration::from_secs(180);
@@ -79,7 +82,9 @@ async fn collect_turn(
     tokio::time::timeout(TURN_TIMEOUT, async {
         let mut turn = Vec::new();
         loop {
-            let Event::Agent { chat: from, event } = events.recv().await?;
+            let Event::Agent { chat: from, event } = events.recv().await? else {
+                continue;
+            };
             if from != chat {
                 continue;
             }
@@ -87,7 +92,7 @@ async fn collect_turn(
                 AgentEvent::SessionEnded => {
                     return Err(format!("the agent session ended during the turn: {turn:?}").into());
                 }
-                AgentEvent::TurnEnded => {
+                AgentEvent::TurnEnded | AgentEvent::TurnInterrupted => {
                     turn.push(event);
                     return Ok(turn);
                 }
@@ -195,5 +200,70 @@ async fn an_agent_session_ends_when_its_input_is_dropped() -> TestResult {
     })
     .await?;
     assert_eq!(last, Some(AgentEvent::SessionEnded));
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "needs Claude Code signed in to a subscription; run locally with --ignored"]
+async fn an_interrupted_turn_ends_as_interrupted_and_the_chat_goes_on() -> TestResult {
+    let repo = TestRepo::new()?;
+    let (service, chat) = start_chat(&repo).await?;
+    let mut events = service.subscribe();
+    send(&service, chat, LONG_TURN).await?;
+    // Claude Code writes whole messages, not parts, so there is no event
+    // that marks the turn as running; a moment is enough.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    let response = service.execute(Command::InterruptTurn { chat }).await?;
+
+    assert_eq!(response, Response::InterruptRequested);
+    let turn = collect_turn(&mut events, chat).await?;
+    assert_eq!(turn.last(), Some(&AgentEvent::TurnInterrupted), "{turn:?}");
+    send(&service, chat, "Reply with only: OK").await?;
+    let turn = collect_turn(&mut events, chat).await?;
+    assert_eq!(turn.last(), Some(&AgentEvent::TurnEnded), "{turn:?}");
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "needs Claude Code signed in to a subscription; run locally with --ignored"]
+async fn queued_and_steered_messages_wait_for_the_running_turn() -> TestResult {
+    let repo = TestRepo::new()?;
+    let (service, chat) = start_chat(&repo).await?;
+    let mut events = service.subscribe();
+    send(&service, chat, LONG_TURN).await?;
+
+    let queued = service
+        .execute(Command::QueueMessage {
+            chat,
+            text: "Reply with only: QUEUED-1".to_owned(),
+        })
+        .await?;
+    let steered = service
+        .execute(Command::SteerMessage {
+            chat,
+            text: "Reply with only: STEERED-2".to_owned(),
+        })
+        .await?;
+
+    assert_eq!(
+        queued,
+        Response::MessageQueued {
+            reason: QueueReason::Requested
+        }
+    );
+    assert_eq!(
+        steered,
+        Response::MessageQueued {
+            reason: QueueReason::SteerUnsupported
+        }
+    );
+    // Each message gets its own turn, in order.
+    let first = collect_turn(&mut events, chat).await?;
+    assert_eq!(first.last(), Some(&AgentEvent::TurnEnded), "{first:?}");
+    let second = collect_turn(&mut events, chat).await?;
+    assert!(messages(&second).contains("QUEUED-1"), "{second:?}");
+    let third = collect_turn(&mut events, chat).await?;
+    assert!(messages(&third).contains("STEERED-2"), "{third:?}");
     Ok(())
 }
