@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 use tokio::sync::mpsc;
 
-use crate::AgentEvent;
+use crate::{AgentEvent, Version};
 
 /// What an agent session needs to start.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,4 +50,19 @@ pub enum DriverError {
     Spawn(#[source] std::io::Error),
     #[error("the agent CLI did not provide its standard streams")]
     MissingStreams,
+    #[error("could not read the version of {agent_cli} from `--version`: {output:?}")]
+    UnreadableVersion {
+        agent_cli: &'static str,
+        output: String,
+    },
+    #[error(
+        "{agent_cli} {found} is too old: the harness needs at least {minimum} because {reason}. \
+         Update {agent_cli} and try again."
+    )]
+    UnsupportedVersion {
+        agent_cli: &'static str,
+        found: Version,
+        minimum: Version,
+        reason: &'static str,
+    },
 }
