@@ -5,8 +5,8 @@ use std::error::Error;
 use std::sync::Arc;
 
 use leiser_service::{
-    AgentCli, ClaudeCodeDriver, Command, CommandError, Driver, DriverError, Response, SessionSpec,
-    Version,
+    Access, AgentCli, ClaudeCodeDriver, Command, CommandError, Driver, DriverError, Response,
+    SessionSpec, Version,
 };
 use leiser_testkit::{TestRepo, TestService};
 
@@ -23,7 +23,8 @@ async fn claude_code_below_the_minimum_version_is_refused_with_the_reason() -> T
     let result = driver.start(SessionSpec {
         working_directory: repo.path().to_path_buf(),
         // No harness MCP server listens there; these tests do not use it.
-        harness_mcp_url: "http://127.0.0.1:9/mcp/none".to_owned(),
+        harness_mcp_url: Some("http://127.0.0.1:9/mcp/none".to_owned()),
+        access: Access::Chat,
     });
 
     let Err(DriverError::UnsupportedVersion {
@@ -92,7 +93,8 @@ async fn a_program_that_is_not_claude_code_is_refused() -> TestResult {
     let result = driver.start(SessionSpec {
         working_directory: repo.path().to_path_buf(),
         // No harness MCP server listens there; these tests do not use it.
-        harness_mcp_url: "http://127.0.0.1:9/mcp/none".to_owned(),
+        harness_mcp_url: Some("http://127.0.0.1:9/mcp/none".to_owned()),
+        access: Access::Chat,
     });
 
     assert!(

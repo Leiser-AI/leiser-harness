@@ -3,11 +3,12 @@
 //! Usage:
 //!
 //! ```text
-//! fake-agent-cli --script <script.json> --sessions <dir> --session-id <id> [--harness-mcp <url>]
-//! fake-agent-cli --script <script.json> --sessions <dir> --resume <id> [--harness-mcp <url>]
+//! fake-agent-cli --script <script.json> --sessions <dir> --session-id <id> [--harness-mcp <url>] [--access read-only]
+//! fake-agent-cli --script <script.json> --sessions <dir> --resume <id> [--harness-mcp <url>] [--access read-only]
 //! ```
 //!
-//! Scripted calls to the harness MCP server go to `--harness-mcp`.
+//! Scripted calls to the harness MCP server go to `--harness-mcp`. With
+//! `--access read-only` it declines to write files.
 //!
 //! Reads one [`FakeInput`] per line on standard input and answers each
 //! message with the next scripted turn, written as one [`AgentEvent`] per
@@ -39,7 +40,7 @@ const GATE_POLL: Duration = Duration::from_millis(10);
 enum FakeError {
     #[error(
         "usage: fake-agent-cli --script <script.json> --sessions <dir> \
-         (--session-id <id> | --resume <id>) [--harness-mcp <url>]"
+         (--session-id <id> | --resume <id>) [--harness-mcp <url>] [--access read-only]"
     )]
     Usage,
     #[error("the script calls the harness MCP server, but no --harness-mcp was given")]
@@ -87,6 +88,7 @@ struct Args {
     sessions: PathBuf,
     session: SessionArg,
     harness_mcp: Option<String>,
+    read_only: bool,
 }
 
 fn parse_args() -> Result<Args, FakeError> {
@@ -94,6 +96,7 @@ fn parse_args() -> Result<Args, FakeError> {
     let mut sessions = None;
     let mut session = None;
     let mut harness_mcp = None;
+    let mut read_only = false;
     let mut args = std::env::args_os().skip(1);
     while let Some(flag) = args.next() {
         let value = args.next().ok_or(FakeError::Usage)?;
@@ -104,6 +107,7 @@ fn parse_args() -> Result<Args, FakeError> {
             Some("--session-id") => session = Some(SessionArg::New(text()?)),
             Some("--resume") => session = Some(SessionArg::Resume(text()?)),
             Some("--harness-mcp") => harness_mcp = Some(text()?),
+            Some("--access") if value == "read-only" => read_only = true,
             _ => return Err(FakeError::Usage),
         }
     }
@@ -113,6 +117,7 @@ fn parse_args() -> Result<Args, FakeError> {
             sessions,
             session,
             harness_mcp,
+            read_only,
         }),
         _ => Err(FakeError::Usage),
     }
@@ -192,6 +197,7 @@ fn run() -> Result<(), FakeError> {
                     steer: None,
                     supports_steer: script.supports_steer,
                     harness_mcp: args.harness_mcp.as_deref(),
+                    read_only: args.read_only,
                     forget_session: false,
                     inputs: &inputs,
                     out: &mut out,
@@ -261,6 +267,8 @@ struct Turn<'a, W> {
     supports_steer: bool,
     /// The harness MCP server's address, if the agent session got one.
     harness_mcp: Option<&'a str>,
+    /// Whether the agent session declines to write files.
+    read_only: bool,
     /// Set by [`Step::ForgetSession`].
     forget_session: bool,
     inputs: &'a Receiver<Result<FakeInput, FakeError>>,
@@ -327,6 +335,15 @@ impl<W: Write> Turn<'_, W> {
             Step::ForgetSession => {
                 self.forget_session = true;
                 return Ok(None);
+            }
+            Step::WriteFile { path, contents } => {
+                let text = if self.read_only {
+                    "declined: read-only".to_owned()
+                } else {
+                    std::fs::write(&path, contents)?;
+                    format!("wrote {}", path.display())
+                };
+                AgentEvent::Message { text }
             }
         };
         emit(self.out, &event)?;

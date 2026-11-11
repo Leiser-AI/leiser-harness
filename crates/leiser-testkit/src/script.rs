@@ -86,6 +86,10 @@ pub enum Step {
     /// Ends the agent session once this turn has ended and forgets it, as
     /// an agent CLI whose session expired would: resuming it fails.
     ForgetSession,
+    /// Writes `contents` to `path`, relative to the working directory, and
+    /// answers `wrote <path>`. A read-only agent session declines, as a
+    /// real agent CLI would, and answers `declined: read-only`.
+    WriteFile { path: PathBuf, contents: String },
 }
 
 impl Step {

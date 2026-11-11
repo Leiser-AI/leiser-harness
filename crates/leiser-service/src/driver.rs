@@ -24,7 +24,22 @@ pub struct SessionSpec {
     /// The harness MCP server's address for this agent session (a
     /// streamable HTTP endpoint on localhost). The driver must configure
     /// the agent CLI to use it under the name [`HARNESS_MCP_SERVER`].
-    pub harness_mcp_url: String,
+    /// `None` for an agent session that belongs to no chat, such as a
+    /// `repo-check`: it gets no harness MCP server.
+    pub harness_mcp_url: Option<String>,
+    /// What the agent session may change.
+    pub access: Access,
+}
+
+/// What an agent session may change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Access {
+    /// A chat's agent session, within the limits the driver sets for chats.
+    Chat,
+    /// Reads files and git metadata only: the agent CLI's own read-only
+    /// mode, with every tool that edits files switched off. Used for
+    /// `repo-check`, which must not change the repository.
+    ReadOnly,
 }
 
 /// The agent CLI's own id of an agent session, used to resume it.

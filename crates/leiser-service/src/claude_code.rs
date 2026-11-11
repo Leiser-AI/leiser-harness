@@ -14,6 +14,9 @@
 //! for an approval: they only read the chat and change its todo list, which
 //! the repository switched on for agents.
 //!
+//! A read-only agent session runs in plan mode with the editing tools
+//! switched off (see [`READ_ONLY_ARGUMENTS`]).
+//!
 //! Interrupt uses Claude Code's control protocol. Steering is not supported
 //! yet, so the harness service queues steered messages: it is not verified
 //! how Claude Code ends turns when a message arrives mid-turn.
@@ -30,8 +33,8 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::installed::{self, Found, Program};
 use crate::{
-    AgentEvent, AgentSession, AgentSessionId, Driver, DriverError, Environment, HARNESS_MCP_SERVER,
-    SessionInput, SessionSpec, Version,
+    Access, AgentEvent, AgentSession, AgentSessionId, Driver, DriverError, Environment,
+    HARNESS_MCP_SERVER, SessionInput, SessionSpec, Version,
 };
 
 const AGENT_CLI: &str = "Claude Code";
@@ -51,6 +54,27 @@ const ARGUMENTS: [&str; 8] = [
     "--verbose",
     "--permission-prompts",
     "none",
+];
+
+/// Claude Code's arguments for a read-only agent session ([`Access::ReadOnly`]).
+///
+/// Plan mode is Claude Code's own read-only mode and overrides a default
+/// mode from the developer's settings. The tools that edit files are
+/// switched off on top, and so is `ExitPlanMode`, so the agent answers in
+/// text instead of asking to leave plan mode. `--strict-mcp-config` without
+/// `--mcp-config` loads no MCP server, so none of the developer's MCP
+/// servers' tools can write either. Anything else that would prompt is
+/// declined by `--permission-prompts none`.
+const READ_ONLY_ARGUMENTS: [&str; 8] = [
+    "--permission-mode",
+    "plan",
+    "--strict-mcp-config",
+    // Takes several values; the next option ends them.
+    "--disallowedTools",
+    "Edit",
+    "Write",
+    "NotebookEdit",
+    "ExitPlanMode",
 ];
 
 /// Starts agent sessions on the developer's installed Claude Code.
@@ -178,13 +202,18 @@ impl ClaudeCodeDriver {
         Self::check_version(&program)?;
         let mut command = Command::from(program.command());
         command.args(ARGUMENTS);
+        if spec.access == Access::ReadOnly {
+            command.args(READ_ONLY_ARGUMENTS);
+        }
         // Both options take several values; each is followed by another
         // option or ends the arguments.
-        command
-            .arg("--mcp-config")
-            .arg(harness_mcp_config(&spec.harness_mcp_url))
-            .arg("--allowedTools")
-            .arg(format!("mcp__{HARNESS_MCP_SERVER}"));
+        if let Some(url) = &spec.harness_mcp_url {
+            command
+                .arg("--mcp-config")
+                .arg(harness_mcp_config(url))
+                .arg("--allowedTools")
+                .arg(format!("mcp__{HARNESS_MCP_SERVER}"));
+        }
         if let Some(session) = resume {
             command.arg("--resume").arg(session.as_str());
         }
