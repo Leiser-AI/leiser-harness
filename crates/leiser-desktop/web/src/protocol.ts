@@ -27,7 +27,16 @@ export type Command =
   | { type: "answer_request"; chat: ChatId; request: string; answer: Answer }
   | { type: "list_repositories" }
   | { type: "list_chats" }
-  | { type: "read_chat"; chat: ChatId };
+  | { type: "read_chat"; chat: ChatId }
+  | { type: "list_cli_extensions"; repository: RepositoryId }
+  | { type: "read_cli_extension_file"; repository: RepositoryId; file: string }
+  | {
+      type: "save_cli_extension_file";
+      repository: RepositoryId;
+      file: string;
+      text: string;
+      previous: string;
+    };
 
 export type Response =
   | { type: "repository_added"; repository: RepositoryId }
@@ -50,7 +59,10 @@ export type Response =
       applied_permission_mode: PermissionMode;
       open_requests: string[];
       transcript: TranscriptEntry[];
-    };
+    }
+  | { type: "cli_extensions"; extensions: CliExtension[]; unreadable: UnreadableCliExtensionFile[] }
+  | { type: "cli_extension_file"; text: string }
+  | { type: "cli_extension_file_saved" };
 
 export type CommandError =
   | { type: "not_a_git_repository"; path: string }
@@ -69,6 +81,10 @@ export type CommandError =
   | { type: "agent_cli_not_configured"; agent_cli: AgentCli }
   | { type: "agent_cli"; reason: string }
   | { type: "storage"; reason: string }
+  | { type: "not_a_cli_extension_file"; file: string }
+  | { type: "cli_extension_file_changed"; file: string }
+  | { type: "invalid_cli_extension_file"; file: string; reason: string }
+  | { type: "cli_extension_file_access"; file: string; reason: string }
   | { type: "service_stopped" };
 
 export interface RepositoryOverview {
@@ -84,6 +100,30 @@ export interface ChatOverview {
   status: ChatStatus;
   /** The worktree the chat works in; `null` in the main checkout. */
   worktree: string | null;
+}
+
+/** A skill, MCP server, hook or instruction file an agent CLI loads. */
+export interface CliExtension {
+  agent_cli: AgentCli;
+  kind: CliExtensionKind;
+  name: string;
+  /** Where the agent CLI loads it from, relative to the repository. */
+  path: string;
+  /** The file that holds it, symlinks resolved; read and save by this. */
+  file: string;
+}
+
+export type CliExtensionKind =
+  | { type: "instruction_file"; imported_by: string | null }
+  | { type: "skill"; description: string | null }
+  | { type: "mcp_server"; launch: string | null }
+  | { type: "hook"; matcher: string | null; commands: string[] };
+
+export interface UnreadableCliExtensionFile {
+  agent_cli: AgentCli;
+  path: string;
+  file: string;
+  reason: string;
 }
 
 export type Branch =
