@@ -25,9 +25,11 @@ use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::{mpsc, oneshot};
 
 use self::conversation::{Conversation, Output, ProtocolError};
+use crate::installed::{self, Program};
 use crate::{
-    AgentCli, AgentEvent, AgentSession, AgentSessionId, Driver, DriverError, HARNESS_MCP_SERVER,
-    LoginProcess, OPENAI_API_KEY, SessionInput, SessionSpec, SubscriptionAccess, Version,
+    AgentCli, AgentEvent, AgentSession, AgentSessionId, Driver, DriverError, Environment,
+    HARNESS_MCP_SERVER, LoginProcess, OPENAI_API_KEY, SessionInput, SessionSpec,
+    SubscriptionAccess, Version,
 };
 
 /// Keeps a subscription's login in its shadow home's `auth.json`, never in
@@ -47,7 +49,7 @@ const EXIT_GRACE: Duration = Duration::from_secs(5);
 /// Starts agent sessions on the developer's installed Codex.
 #[derive(Debug)]
 pub struct CodexDriver {
-    program: PathBuf,
+    program: Program,
 }
 
 impl CodexDriver {
@@ -56,56 +58,59 @@ impl CodexDriver {
     const MINIMUM_VERSION_REASON: &str = "older versions lack app-server protocol methods \
          and fields the driver uses, such as `turn/steer`";
 
+    /// The variable that names the Codex program to run.
+    pub const PROGRAM_VARIABLE: &str = installed::CODEX.variable;
+
     /// A driver that runs `program` as Codex.
     #[must_use]
     pub fn new(program: impl Into<PathBuf>) -> Self {
         Self {
-            program: program.into(),
+            program: Program::Given(program.into()),
         }
     }
 
-    /// A driver that runs `codex` from `PATH`.
+    /// A driver that runs the developer's installed Codex, looked up in the
+    /// harness service's environment whenever an agent session starts: the
+    /// program [`Self::PROGRAM_VARIABLE`] names, `codex` on `PATH`, or in
+    /// common install directories.
     #[must_use]
     pub fn installed() -> Self {
-        Self::new("codex")
+        Self::installed_in(Environment::current())
     }
 
-    /// The Codex program this driver runs.
+    /// Like [`Self::installed`], looked up in `environment`.
     #[must_use]
-    pub fn program(&self) -> &Path {
-        &self.program
+    pub fn installed_in(environment: Environment) -> Self {
+        Self {
+            program: Program::Installed {
+                install: &installed::CODEX,
+                environment,
+            },
+        }
+    }
+
+    /// The Codex program an agent session would start now.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DriverError::NotInstalled`] when the driver finds none.
+    pub fn program(&self) -> Result<PathBuf, DriverError> {
+        self.program.resolve()
     }
 
     /// Asks the program for its version.
     ///
     /// # Errors
     ///
-    /// Returns [`DriverError::Spawn`] when the program cannot run and
+    /// Returns [`DriverError::NotInstalled`] when there is no program,
+    /// [`DriverError::Spawn`] when it cannot run and
     /// [`DriverError::UnreadableVersion`] when its answer is not a version.
     pub fn version(&self) -> Result<Version, DriverError> {
-        let output = std::process::Command::new(&self.program)
-            .arg("--version")
-            .stdin(Stdio::null())
-            .stderr(Stdio::null())
-            .output()
-            .map_err(DriverError::Spawn)?;
-        let text = String::from_utf8_lossy(&output.stdout);
-        // Codex answers `codex-cli 0.167.1`.
-        let mut words = text.split_whitespace();
-        words
-            .next()
-            .filter(|program| program.starts_with("codex"))
-            .and(words.next())
-            .and_then(Version::parse)
-            .filter(|_| output.status.success())
-            .ok_or_else(|| DriverError::UnreadableVersion {
-                agent_cli: AGENT_CLI,
-                output: text.trim().chars().take(200).collect(),
-            })
+        version_of(&self.program()?)
     }
 
-    fn check_version(&self) -> Result<(), DriverError> {
-        let found = self.version()?;
+    fn check_version(program: &Path) -> Result<(), DriverError> {
+        let found = version_of(program)?;
         if found < Self::MINIMUM_VERSION {
             return Err(DriverError::UnsupportedVersion {
                 agent_cli: AGENT_CLI,
@@ -116,6 +121,33 @@ impl CodexDriver {
         }
         Ok(())
     }
+}
+
+/// Asks `program` for its version.
+fn version_of(program: &Path) -> Result<Version, DriverError> {
+    let mut command = std::process::Command::new(program);
+    if let Some(path) = installed::path_for(program) {
+        command.env("PATH", path);
+    }
+    let output = command
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .map_err(DriverError::Spawn)?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    // Codex answers `codex-cli 0.167.1`.
+    let mut words = text.split_whitespace();
+    words
+        .next()
+        .filter(|program| program.starts_with("codex"))
+        .and(words.next())
+        .and_then(Version::parse)
+        .filter(|_| output.status.success())
+        .ok_or_else(|| DriverError::UnreadableVersion {
+            agent_cli: AGENT_CLI,
+            output: text.trim().chars().take(200).collect(),
+        })
 }
 
 impl Driver for CodexDriver {
@@ -142,8 +174,12 @@ impl Driver for CodexDriver {
 
     /// Runs `codex login` in the subscription's shadow home.
     fn login(&self, access: &SubscriptionAccess) -> Result<LoginProcess, DriverError> {
-        self.check_version()?;
-        let mut command = Command::new(&self.program);
+        let program = self.program()?;
+        Self::check_version(&program)?;
+        let mut command = Command::new(&program);
+        if let Some(path) = installed::path_for(&program) {
+            command.env("PATH", path);
+        }
         command.arg("-c").arg(FILE_CREDENTIAL_STORE).arg("login");
         access.environment(AgentCli::Codex).apply(&mut command);
         LoginProcess::spawn(command)
@@ -172,7 +208,8 @@ impl CodexDriver {
         spec: &SessionSpec,
         resume: Option<String>,
     ) -> Result<AgentSession, DriverError> {
-        self.check_version()?;
+        let program = self.program()?;
+        Self::check_version(&program)?;
         let working_directory = spec
             .working_directory
             .to_str()
@@ -183,7 +220,7 @@ impl CodexDriver {
                 ))
             })?
             .to_owned();
-        let mut child = session_command(&self.program, spec)
+        let mut child = session_command(&program, spec)
             .current_dir(&spec.working_directory)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -224,6 +261,9 @@ impl CodexDriver {
 /// its streams.
 fn session_command(program: &Path, spec: &SessionSpec) -> Command {
     let mut command = Command::new(program);
+    if let Some(path) = installed::path_for(program) {
+        command.env("PATH", path);
+    }
     command.arg("-c").arg(format!(
         "mcp_servers.{HARNESS_MCP_SERVER}.url={}",
         toml_string(&spec.harness_mcp_url)

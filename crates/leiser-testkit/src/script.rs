@@ -6,8 +6,9 @@ use leiser_service::AgentEvent;
 use serde::{Deserialize, Serialize};
 
 /// The turns the fake agent CLI plays back, one per message it receives.
-/// Every turn ends with [`AgentEvent::TurnEnded`], or with
-/// [`AgentEvent::TurnInterrupted`] when it is interrupted; a message after
+/// Every turn ends with [`AgentEvent::TurnEnded`], with
+/// [`AgentEvent::TurnInterrupted`] when it is interrupted, or with
+/// [`AgentEvent::TurnFailed`] at [`Step::FailTurn`]; a message after
 /// the last turn gets an empty turn. A resumed agent session continues
 /// with the turn after the last one it played.
 ///
@@ -100,6 +101,10 @@ pub enum Step {
         name: String,
         arguments: serde_json::Value,
     },
+    /// Ends the turn with [`AgentEvent::TurnFailed`], as an agent CLI
+    /// whose model request failed would. Later steps of the turn are not
+    /// played.
+    FailTurn { reason: String },
     /// Ends the agent session once this turn has ended and forgets it, as
     /// an agent CLI whose session expired would: resuming it fails.
     ForgetSession,

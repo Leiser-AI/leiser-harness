@@ -74,7 +74,7 @@ impl SubscriptionAccess {
     /// The environment that puts `agent_cli` on this subscription. Removes
     /// inherited variables that would sign the agent CLI in otherwise.
     #[must_use]
-    pub fn environment(&self, agent_cli: AgentCli) -> Environment {
+    pub fn environment(&self, agent_cli: AgentCli) -> SubscriptionEnvironment {
         let (home, api_key, sign_ins) = match agent_cli {
             AgentCli::ClaudeCode => (CLAUDE_CONFIG_DIR, ANTHROPIC_API_KEY, CLAUDE_CODE_SIGN_INS),
             AgentCli::Codex => (CODEX_HOME, OPENAI_API_KEY, CODEX_SIGN_INS),
@@ -87,21 +87,21 @@ impl SubscriptionAccess {
             .into_iter()
             .filter(|name| !set.iter().any(|(set, _)| set == name))
             .collect();
-        Environment { set, remove }
+        SubscriptionEnvironment { set, remove }
     }
 }
 
 /// Environment variables for an agent CLI process. May hold an API key, so
 /// its `Debug` output shows only the names.
 #[derive(Clone, PartialEq, Eq)]
-pub struct Environment {
+pub struct SubscriptionEnvironment {
     /// Variables to set.
     pub set: Vec<(&'static str, OsString)>,
     /// Inherited variables to remove.
     pub remove: Vec<&'static str>,
 }
 
-impl Environment {
+impl SubscriptionEnvironment {
     /// Applies the environment to a command.
     pub fn apply(&self, command: &mut tokio::process::Command) {
         for name in &self.remove {
@@ -122,9 +122,9 @@ impl Environment {
     }
 }
 
-impl std::fmt::Debug for Environment {
+impl std::fmt::Debug for SubscriptionEnvironment {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Environment")
+        f.debug_struct("SubscriptionEnvironment")
             .field(
                 "set",
                 &self.set.iter().map(|(name, _)| name).collect::<Vec<_>>(),
@@ -360,6 +360,20 @@ pub trait Driver: Send + Sync + std::fmt::Debug {
 pub enum DriverError {
     #[error("could not start the agent CLI: {0}")]
     Spawn(#[source] std::io::Error),
+    #[error(
+        "{agent_cli} was not found: looked for `{program}` on PATH{}. \
+         Install {agent_cli}, or set {variable} to the path of its program.",
+        and_in(searched)
+    )]
+    NotInstalled {
+        agent_cli: &'static str,
+        /// The program's name.
+        program: &'static str,
+        /// The variable that names the program to run.
+        variable: &'static str,
+        /// Where the driver looked besides `PATH`.
+        searched: Vec<PathBuf>,
+    },
     #[error("the agent CLI did not provide its standard streams")]
     MissingStreams,
     #[error("could not read the version of {agent_cli} from `--version`: {output:?}")]
@@ -377,4 +391,16 @@ pub enum DriverError {
         minimum: Version,
         reason: &'static str,
     },
+}
+
+/// ` and in <paths>`, or nothing when there are none.
+fn and_in(paths: &[PathBuf]) -> String {
+    if paths.is_empty() {
+        return String::new();
+    }
+    let paths: Vec<_> = paths
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect();
+    format!(" and in {}", paths.join(", "))
 }

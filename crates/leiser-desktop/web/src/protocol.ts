@@ -42,6 +42,15 @@ export type Command =
       chat: ChatId;
       provider: Provider;
       subscription: SubscriptionId | null;
+    }
+  | { type: "list_cli_extensions"; repository: RepositoryId }
+  | { type: "read_cli_extension_file"; repository: RepositoryId; file: string }
+  | {
+      type: "save_cli_extension_file";
+      repository: RepositoryId;
+      file: string;
+      text: string;
+      previous: string;
     };
 
 export type Response =
@@ -69,7 +78,10 @@ export type Response =
   | { type: "login_started" }
   | { type: "login_answered" }
   | { type: "subscriptions"; subscriptions: SubscriptionOverview[] }
-  | { type: "subscription_changed" };
+  | { type: "subscription_changed" }
+  | { type: "cli_extensions"; extensions: CliExtension[]; unreadable: UnreadableCliExtensionFile[] }
+  | { type: "cli_extension_file"; text: string }
+  | { type: "cli_extension_file_saved" };
 
 export type CommandError =
   | { type: "not_a_git_repository"; path: string }
@@ -96,6 +108,10 @@ export type CommandError =
   | { type: "no_login_running"; subscription: SubscriptionId }
   | { type: "keychain"; reason: string }
   | { type: "repository_config"; reason: string }
+  | { type: "not_a_cli_extension_file"; file: string }
+  | { type: "cli_extension_file_changed"; file: string }
+  | { type: "invalid_cli_extension_file"; file: string; reason: string }
+  | { type: "cli_extension_file_access"; file: string; reason: string }
   | { type: "service_stopped" };
 
 export interface RepositoryOverview {
@@ -122,6 +138,30 @@ export interface ChatOverview {
   worktree: string | null;
 }
 
+/** A skill, MCP server, hook or instruction file an agent CLI loads. */
+export interface CliExtension {
+  agent_cli: AgentCli;
+  kind: CliExtensionKind;
+  name: string;
+  /** Where the agent CLI loads it from, relative to the repository. */
+  path: string;
+  /** The file that holds it, symlinks resolved; read and save by this. */
+  file: string;
+}
+
+export type CliExtensionKind =
+  | { type: "instruction_file"; imported_by: string | null }
+  | { type: "skill"; description: string | null }
+  | { type: "mcp_server"; launch: string | null }
+  | { type: "hook"; matcher: string | null; commands: string[] };
+
+export interface UnreadableCliExtensionFile {
+  agent_cli: AgentCli;
+  path: string;
+  file: string;
+  reason: string;
+}
+
 export type Branch =
   | { type: "named"; name: string }
   | { type: "detached"; commit: string }
@@ -141,6 +181,7 @@ export type AgentEvent =
   | { type: "usage_limit_reached"; limit: string; resets_in_seconds: number | null }
   | { type: "turn_ended" }
   | { type: "turn_interrupted" }
+  | { type: "turn_failed"; reason: string }
   | { type: "session_ended" };
 
 export type ServiceEvent =

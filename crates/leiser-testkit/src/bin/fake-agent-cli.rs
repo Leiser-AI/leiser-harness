@@ -225,6 +225,9 @@ fn run() -> Result<(), FakeError> {
                 match outcome {
                     Outcome::Ended => emit(&mut out, &AgentEvent::TurnEnded)?,
                     Outcome::Interrupted => emit(&mut out, &AgentEvent::TurnInterrupted)?,
+                    Outcome::Failed { reason } => {
+                        emit(&mut out, &AgentEvent::TurnFailed { reason })?;
+                    }
                     Outcome::InputClosed => return Ok(()),
                 }
                 if forget_session {
@@ -291,6 +294,7 @@ fn read_inputs() -> Receiver<Result<FakeInput, FakeError>> {
 enum Outcome {
     Ended,
     Interrupted,
+    Failed { reason: String },
     InputClosed,
 }
 
@@ -366,6 +370,7 @@ impl<W: Write> Turn<'_, W> {
                     text: format!("{prefix}{}", output.text),
                 }
             }
+            Step::FailTurn { reason } => return Ok(Some(Outcome::Failed { reason })),
             Step::ForgetSession => {
                 self.forget_session = true;
                 return Ok(None);
