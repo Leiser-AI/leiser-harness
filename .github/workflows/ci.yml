@@ -16,18 +16,25 @@ env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
 
+# Every job and the apt-get step get a time limit of several times their
+# usual length, so a hung step (such as apt-get waiting on a mirror) fails
+# instead of running for GitHub's default 6 hours, and Auto-fix sees it.
+
 jobs:
   lint:
     name: fmt + clippy
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
       # The desktop app (Tauri) links against WebKitGTK on Linux.
-      - name: Install Tauri system libraries
+      - &install-tauri-libraries
+        name: Install Tauri system libraries
         if: runner.os == 'Linux'
+        timeout-minutes: 5
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev librsvg2-dev libxdo-dev
@@ -44,21 +51,18 @@ jobs:
         # pull request and push tests on all three systems.
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
-      # The desktop app (Tauri) links against WebKitGTK on Linux.
-      - name: Install Tauri system libraries
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev librsvg2-dev libxdo-dev
+      - *install-tauri-libraries
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace
 
   ui:
     name: desktop UI (TypeScript)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: crates/leiser-desktop
@@ -75,6 +79,7 @@ jobs:
   deny:
     name: dependencies (cargo-deny)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - uses: EmbarkStudios/cargo-deny-action@v2
@@ -82,6 +87,7 @@ jobs:
   secrets:
     name: secret scan
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
         with:
