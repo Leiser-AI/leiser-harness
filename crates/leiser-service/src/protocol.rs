@@ -110,6 +110,26 @@ pub enum Command {
     ListChats,
     /// Reads a chat's status, branch and transcript.
     ReadChat { chat: ChatId },
+    /// Lists the CLI extensions each agent CLI loads from the repository:
+    /// instruction files, skills, MCP servers and hooks. They belong to the
+    /// agent CLI; nothing is converted between agent CLIs.
+    ListCliExtensions { repository: RepositoryId },
+    /// Reads a file that holds CLI extensions, by the
+    /// [`CliExtension::file`] or [`UnreadableCliExtensionFile::file`] that
+    /// [`Command::ListCliExtensions`] reported for the repository.
+    ReadCliExtensionFile {
+        repository: RepositoryId,
+        file: PathBuf,
+    },
+    /// Saves the developer's edit to such a file, in the agent CLI's own
+    /// format. Fails when the file no longer holds `previous`, the text it
+    /// was read with, and refuses JSON or TOML the agent CLI cannot parse.
+    SaveCliExtensionFile {
+        repository: RepositoryId,
+        file: PathBuf,
+        text: String,
+        previous: String,
+    },
 }
 
 /// The answer to a successful [`Command`].
@@ -147,6 +167,70 @@ pub enum Response {
         branch: Branch,
         transcript: Vec<TranscriptEntry>,
     },
+    CliExtensions {
+        extensions: Vec<CliExtension>,
+        /// Files that hold CLI extensions but could not be parsed, so their
+        /// extensions are missing above. They can still be read and saved.
+        unreadable: Vec<UnreadableCliExtensionFile>,
+    },
+    CliExtensionFile {
+        text: String,
+    },
+    CliExtensionFileSaved,
+}
+
+/// A skill, MCP server, hook or instruction file an agent CLI loads by
+/// itself from the repository.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CliExtension {
+    pub agent_cli: AgentCli,
+    pub kind: CliExtensionKind,
+    /// The file name of an instruction file, the skill's or MCP server's
+    /// name, or the event a hook runs on.
+    pub name: String,
+    /// Where the agent CLI loads it from, relative to the repository.
+    pub path: PathBuf,
+    /// The file that holds it: [`CliExtension::path`] with symlinks
+    /// resolved, relative to the repository, or absolute when a symlink
+    /// leads out of it. Two agent CLIs that load the same file report the
+    /// same `file`; read and save it by this.
+    pub file: PathBuf,
+}
+
+/// What a [`CliExtension`] is.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum CliExtensionKind {
+    /// Instructions the agent CLI gives the agent, such as `AGENTS.md`.
+    InstructionFile {
+        /// The instruction file that imports this one with `@path`
+        /// (Claude Code); `None` when the agent CLI loads it by itself.
+        imported_by: Option<PathBuf>,
+    },
+    /// A skill directory's `SKILL.md`.
+    Skill { description: Option<String> },
+    McpServer {
+        /// The command line that starts it, or the URL it is reached at.
+        launch: Option<String>,
+    },
+    /// Hook handlers for one event; the [`CliExtension::name`] is the event.
+    Hook {
+        /// Which tools or sources the hooks run for; `None` for all.
+        matcher: Option<String>,
+        /// The commands, URLs or prompts the hooks run.
+        commands: Vec<String>,
+    },
+}
+
+/// A file that holds CLI extensions but could not be parsed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnreadableCliExtensionFile {
+    pub agent_cli: AgentCli,
+    /// Where the agent CLI loads it from, relative to the repository.
+    pub path: PathBuf,
+    /// As [`CliExtension::file`].
+    pub file: PathBuf,
+    pub reason: String,
 }
 
 /// A repository as the sidebar lists it.
@@ -266,6 +350,14 @@ pub enum CommandError {
     AgentCli { reason: String },
     #[error("the harness service could not store the chat: {reason}")]
     Storage { reason: String },
+    #[error("{} holds no CLI extension of this repository", file.display())]
+    NotACliExtensionFile { file: PathBuf },
+    #[error("{} changed since it was read; read it again", file.display())]
+    CliExtensionFileChanged { file: PathBuf },
+    #[error("{} would no longer load: {reason}", file.display())]
+    InvalidCliExtensionFile { file: PathBuf, reason: String },
+    #[error("could not access {}: {reason}", file.display())]
+    CliExtensionFileAccess { file: PathBuf, reason: String },
     #[error("the harness service has stopped")]
     ServiceStopped,
 }

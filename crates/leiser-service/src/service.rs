@@ -7,6 +7,7 @@ use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::JoinHandle;
 
+use crate::cli_extensions::{self, CliExtensionError};
 use crate::handoff::{self, Handoff, ReadError};
 use crate::harness_mcp::{BranchNaming, ChatRead, HarnessCall, HarnessMcp, HarnessMcpError};
 use crate::repo_config::RepositoryConfig;
@@ -552,6 +553,19 @@ impl State {
             Command::ListChats => Ok(self.list_chats()),
             Command::ReadChat { chat } => self.read_chat(chat).await,
             Command::ChangeAgentCli { chat, agent_cli } => self.change_agent_cli(chat, agent_cli),
+            Command::ListCliExtensions { repository } => self.list_cli_extensions(repository).await,
+            Command::ReadCliExtensionFile { repository, file } => {
+                self.read_cli_extension_file(repository, file).await
+            }
+            Command::SaveCliExtensionFile {
+                repository,
+                file,
+                text,
+                previous,
+            } => {
+                self.save_cli_extension_file(repository, file, text, previous)
+                    .await
+            }
         };
         // The caller may have stopped waiting; nothing to do then.
         let _ = reply.send(result);
@@ -1082,6 +1096,47 @@ impl State {
         Ok(())
     }
 
+    async fn list_cli_extensions(
+        &self,
+        repository: RepositoryId,
+    ) -> Result<Response, CommandError> {
+        let root = self.repository_path(repository)?;
+        let listing = blocking(move || Ok(cli_extensions::list(&root))).await?;
+        Ok(Response::CliExtensions {
+            extensions: listing.extensions,
+            unreadable: listing.unreadable,
+        })
+    }
+
+    async fn read_cli_extension_file(
+        &self,
+        repository: RepositoryId,
+        file: PathBuf,
+    ) -> Result<Response, CommandError> {
+        let root = self.repository_path(repository)?;
+        let text = blocking(move || cli_extensions::read(&root, &file)).await?;
+        Ok(Response::CliExtensionFile { text })
+    }
+
+    async fn save_cli_extension_file(
+        &self,
+        repository: RepositoryId,
+        file: PathBuf,
+        text: String,
+        previous: String,
+    ) -> Result<Response, CommandError> {
+        let root = self.repository_path(repository)?;
+        blocking(move || cli_extensions::save(&root, &file, &text, &previous)).await?;
+        Ok(Response::CliExtensionFileSaved)
+    }
+
+    fn repository_path(&self, repository: RepositoryId) -> Result<PathBuf, CommandError> {
+        self.repositories
+            .get(&repository)
+            .cloned()
+            .ok_or(CommandError::UnknownRepository { repository })
+    }
+
     fn list_repositories(&self) -> Response {
         let repositories = self
             .repositories
@@ -1481,6 +1536,36 @@ impl State {
                     status_changed: chat.shown.1,
                 })
                 .collect(),
+        }
+    }
+}
+
+/// Runs file system work off the command loop's thread. The loop still
+/// waits for it, as it waits for git in [`State::read_chat`].
+async fn blocking<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T, CliExtensionError> + Send + 'static,
+) -> Result<T, CommandError> {
+    match tokio::task::spawn_blocking(work).await {
+        Ok(result) => result.map_err(CommandError::from),
+        Err(error) => Err(CommandError::CliExtensionFileAccess {
+            file: PathBuf::new(),
+            reason: error.to_string(),
+        }),
+    }
+}
+
+impl From<CliExtensionError> for CommandError {
+    fn from(error: CliExtensionError) -> Self {
+        match error {
+            CliExtensionError::NotACliExtensionFile { file } => Self::NotACliExtensionFile { file },
+            CliExtensionError::Changed { file } => Self::CliExtensionFileChanged { file },
+            CliExtensionError::Invalid { file, reason } => {
+                Self::InvalidCliExtensionFile { file, reason }
+            }
+            CliExtensionError::Io { file, source } => Self::CliExtensionFileAccess {
+                file,
+                reason: source.to_string(),
+            },
         }
     }
 }

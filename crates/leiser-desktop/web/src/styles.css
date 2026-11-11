@@ -332,3 +332,177 @@ button:disabled {
 .entry.failed {
   border-color: #d05050;
 }
+
+.repository-actions {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.new-chat.selected {
+  background: var(--user);
+}
+
+.transcript[hidden],
+.extensions[hidden],
+.extensions-editor [hidden] {
+  display: none;
+}
+
+.extensions {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(260px, 360px) 1fr;
+}
+
+.extensions-list {
+  overflow-y: auto;
+  border-right: 1px solid var(--border);
+  padding: 8px 12px 16px;
+}
+
+.extensions-list h2 {
+  font-size: 15px;
+  margin: 12px 0 4px;
+}
+
+.extensions-list h3 {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin: 10px 0 2px;
+}
+
+.extensions-note {
+  font-size: 12px;
+  color: var(--muted);
+  margin: 0 0 4px;
+}
+
+.extensions-items {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.extension {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  margin-top: 2px;
+  border: none;
+  background: none;
+  text-align: left;
+}
+
+.extension:hover {
+  background: var(--bg-card);
+}
+
+.extension.selected {
+  background: var(--user);
+}
+
+.extension.unreadable {
+  background: var(--warn);
+}
+
+.extension-name {
+  font-weight: 600;
+}
+
+.extension-shared {
+  margin-left: 6px;
+  font-size: 11px;
+  font-weight: normal;
+  color: var(--accent);
+}
+
+.extension-path,
+.extension-detail {
+  font-size: 12px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.extension-path {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.extensions-editor {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  padding: 12px 16px;
+  gap: 8px;
+}
+
+.extensions-editor-header {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 8px 12px;
+}
+
+.extensions-editor-heading {
+  flex: 1 1 260px;
+  min-width: 0;
+}
+
+.extensions-editor-title.placeholder {
+  font-family: inherit;
+  font-weight: normal;
+  color: var(--muted);
+}
+
+.extensions-editor-title {
+  font-weight: 600;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  overflow-wrap: anywhere;
+}
+
+.extensions-editor-detail {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.extensions-editor-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.extensions-editor-actions .primary {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.extensions-editor-text {
+  flex: 1;
+  min-height: 0;
+  resize: none;
+  font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  tab-size: 2;
+}
+
+.extensions-editor-status {
+  font-size: 12px;
+  color: var(--muted);
+  min-height: 18px;
+}
+
+.extensions-editor-status.failed {
+  color: #d05050;
+}
