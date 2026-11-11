@@ -20,3 +20,13 @@ serde_json = "1.0.154"
 thiserror = "2.0.21"
 tokio = { version = "1.54.1", features = ["rt", "sync", "macros", "process", "io-util", "time", "net"] }
 tracing = { version = "0.1.44", default-features = false, features = ["std"] }
+keyring-core = "1.0.1"
+toml = { version = "1.2.1", default-features = false, features = ["parse", "serde", "std"] }
+
+# The OS keychain that holds API keys: Keychain on macOS, Credential Manager
+# on Windows. Other platforms have none yet (v1 ships for macOS and Windows).
+[target.'cfg(target_os = "macos")'.dependencies]
+apple-native-keyring-store = { version = "1.0.2", features = ["keychain"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-native-keyring-store = { version = "1.1.0", default-features = false }

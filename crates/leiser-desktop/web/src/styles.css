@@ -291,3 +291,106 @@ button:disabled {
 .entry.failed {
   border-color: #d05050;
 }
+
+.sidebar-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+select,
+input {
+  font: inherit;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  padding: 3px 6px;
+}
+
+.subscription-picker {
+  font-family: inherit;
+}
+
+.subscriptions-dialog {
+  width: min(640px, 90vw);
+  max-height: 85vh;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+  color: var(--text);
+  padding: 16px 20px;
+}
+
+.subscriptions-dialog::backdrop {
+  background: rgb(0 0 0 / 35%);
+}
+
+.dialog-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.dialog-header h2 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.subscriptions-dialog h3 {
+  font-size: 14px;
+  margin: 16px 0 6px;
+}
+
+.subscription-rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.subscription-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+}
+
+.subscription-name {
+  flex: 1;
+}
+
+button.danger {
+  color: #b42318;
+}
+
+.add-subscription {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.add-subscription label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 13px;
+}
+
+.add-subscription button {
+  align-self: flex-start;
+}
+
+.login-output {
+  max-height: 160px;
+  overflow: auto;
+  white-space: pre-wrap;
+  font-size: 12px;
+  background: var(--bg-side);
+  border-radius: 6px;
+  padding: 8px;
+}
+
+.dialog-note {
+  font-size: 12px;
+  margin-top: 16px;
+}

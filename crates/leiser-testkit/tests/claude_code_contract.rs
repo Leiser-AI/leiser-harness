@@ -220,6 +220,7 @@ async fn an_agent_session_ends_when_its_input_is_dropped() -> TestResult {
         working_directory: repo.path().to_path_buf(),
         // No harness MCP server listens there; these tests do not use it.
         harness_mcp_url: "http://127.0.0.1:9/mcp/none".to_owned(),
+        subscription: None,
     })?;
 
     drop(session.input);

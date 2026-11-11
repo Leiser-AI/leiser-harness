@@ -20,6 +20,9 @@ pub struct Script {
     /// Whether the fake agent CLI takes messages mid-turn.
     #[serde(default)]
     pub supports_steer: bool,
+    /// Whether the fake agent CLI's login fails.
+    #[serde(default)]
+    pub login_fails: bool,
 }
 
 impl Script {
@@ -32,6 +35,13 @@ impl Script {
     #[must_use]
     pub fn supports_steer(mut self) -> Self {
         self.supports_steer = true;
+        self
+    }
+
+    /// Makes the fake agent CLI's login fail.
+    #[must_use]
+    pub fn failing_login(mut self) -> Self {
+        self.login_fails = true;
         self
     }
 
@@ -53,6 +63,9 @@ pub enum Step {
     EchoUserMessage,
     /// Answers with the directory the fake agent CLI runs in.
     ReportWorkingDirectory,
+    /// Answers with the value of an environment variable, or
+    /// [`UNSET`](crate::UNSET) when it is not set.
+    ReportEnvironment { variable: String },
     /// Waits for a steered message, unless one already came this turn;
     /// [`Step::EchoSteer`] can answer it.
     WaitForSteer,

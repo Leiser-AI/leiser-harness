@@ -82,7 +82,7 @@ pub async fn next_event(
     tokio::time::timeout(TURN_TIMEOUT, async {
         loop {
             let event = events.recv().await?;
-            if event.chat() == chat {
+            if event.chat() == Some(chat) {
                 return Ok(event);
             }
         }

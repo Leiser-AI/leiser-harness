@@ -24,6 +24,7 @@ async fn claude_code_below_the_minimum_version_is_refused_with_the_reason() -> T
         working_directory: repo.path().to_path_buf(),
         // No harness MCP server listens there; these tests do not use it.
         harness_mcp_url: "http://127.0.0.1:9/mcp/none".to_owned(),
+        subscription: None,
     });
 
     let Err(DriverError::UnsupportedVersion {
@@ -93,6 +94,7 @@ async fn a_program_that_is_not_claude_code_is_refused() -> TestResult {
         working_directory: repo.path().to_path_buf(),
         // No harness MCP server listens there; these tests do not use it.
         harness_mcp_url: "http://127.0.0.1:9/mcp/none".to_owned(),
+        subscription: None,
     });
 
     assert!(

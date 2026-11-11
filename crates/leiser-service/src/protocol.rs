@@ -13,6 +13,84 @@ pub struct RepositoryId(pub(crate) u64);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ChatId(pub(crate) u64);
 
+/// A subscription registered in the harness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct SubscriptionId(pub(crate) u64);
+
+/// A company that offers models. Each agent CLI runs on one provider's
+/// subscriptions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Provider {
+    Anthropic,
+    #[serde(rename = "openai")]
+    OpenAi,
+}
+
+impl std::fmt::Display for Provider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Anthropic => "Anthropic",
+            Self::OpenAi => "OpenAI",
+        })
+    }
+}
+
+impl Provider {
+    /// The agent CLI that runs on the provider's subscriptions.
+    #[must_use]
+    pub fn agent_cli(self) -> AgentCli {
+        match self {
+            Self::Anthropic => AgentCli::ClaudeCode,
+            Self::OpenAi => AgentCli::Codex,
+        }
+    }
+}
+
+/// An API key. It never shows in `Debug` output, so it cannot reach a log
+/// by accident, and the harness service keeps it only in the OS keychain.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ApiKey(String);
+
+impl ApiKey {
+    #[must_use]
+    pub fn new(key: impl Into<String>) -> Self {
+        Self(key.into())
+    }
+
+    /// The key itself, to hand to the agent CLI or the keychain.
+    #[must_use]
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for ApiKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ApiKey(<redacted>)")
+    }
+}
+
+/// How a new subscription signs in.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SignIn {
+    /// A plan signed in by the agent CLI's own login, which the harness
+    /// service runs in the subscription's config directory.
+    Login,
+    /// An API key, kept in the OS keychain.
+    ApiKey { api_key: ApiKey },
+}
+
+/// How a registered subscription signs in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubscriptionKind {
+    Login,
+    ApiKey,
+}
+
 /// An agent CLI the harness service can run a chat on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -27,6 +105,17 @@ impl std::fmt::Display for AgentCli {
             Self::ClaudeCode => "Claude Code",
             Self::Codex => "Codex",
         })
+    }
+}
+
+impl AgentCli {
+    /// The provider whose subscriptions the agent CLI runs on.
+    #[must_use]
+    pub fn provider(self) -> Provider {
+        match self {
+            Self::ClaudeCode => Provider::Anthropic,
+            Self::Codex => Provider::OpenAi,
+        }
     }
 }
 
@@ -77,8 +166,43 @@ pub enum Command {
     ListRepositories,
     /// Lists every chat with its current status.
     ListChats,
-    /// Reads a chat's status, branch and transcript.
+    /// Reads a chat's status, branch, subscription and transcript.
     ReadChat { chat: ChatId },
+    /// Registers a subscription. A login subscription gets its own config
+    /// directory, in which the agent CLI's login runs at once; see
+    /// [`Event::LoginOutput`] and [`Event::LoginFinished`]. An API key is
+    /// stored in the OS keychain. Names are unique per provider.
+    AddSubscription {
+        provider: Provider,
+        name: String,
+        sign_in: SignIn,
+    },
+    /// Renames a subscription.
+    RenameSubscription {
+        subscription: SubscriptionId,
+        name: String,
+    },
+    /// Removes a subscription with its config directory and keychain
+    /// entry, and ends the agent sessions running on it. Chats that use it
+    /// fail to send until they change to another subscription.
+    RemoveSubscription { subscription: SubscriptionId },
+    /// Runs the agent CLI's login of a login subscription again, for
+    /// example after it expired. A login still running is stopped first.
+    LogIn { subscription: SubscriptionId },
+    /// Lists every registered subscription.
+    ListSubscriptions,
+    /// Changes the subscription that the chat's next turns on `provider`
+    /// use; `None` is the agent CLI's own default login. A new chat starts
+    /// on its repository's default subscription per provider, set in its
+    /// `.leiser/config.toml`. Where the agent CLI can continue its agent
+    /// session on the new subscription (Codex), it does; otherwise the next
+    /// message goes to a new agent session with a handoff. Fails while a
+    /// turn runs.
+    ChangeSubscription {
+        chat: ChatId,
+        provider: Provider,
+        subscription: Option<SubscriptionId>,
+    },
 }
 
 /// The answer to a successful [`Command`].
@@ -113,8 +237,47 @@ pub enum Response {
         status: ChatStatus,
         /// The branch checked out where the chat works.
         branch: Branch,
+        /// The agent CLI the chat's next message goes to.
+        agent_cli: AgentCli,
+        /// The subscription the chat's agent CLI runs on; `None` is the
+        /// agent CLI's own default login.
+        subscription: Option<SubscriptionId>,
         transcript: Vec<TranscriptEntry>,
     },
+    SubscriptionAdded {
+        subscription: SubscriptionId,
+    },
+    SubscriptionRenamed,
+    SubscriptionRemoved,
+    /// The agent CLI's login runs; its output and end arrive as events.
+    LoginStarted,
+    Subscriptions {
+        subscriptions: Vec<SubscriptionOverview>,
+    },
+    /// The chat's next turns on the provider use the new subscription.
+    SubscriptionChanged,
+}
+
+/// A registered subscription.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubscriptionOverview {
+    pub subscription: SubscriptionId,
+    pub provider: Provider,
+    pub name: String,
+    pub kind: SubscriptionKind,
+    /// The agent CLI's config directory for this subscription. For Codex a
+    /// shadow home: the shared Codex home with its own `auth.json`.
+    pub home: PathBuf,
+    /// Whether the agent CLI's login runs right now.
+    pub logging_in: bool,
+}
+
+/// How a login ended.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum LoginOutcome {
+    SignedIn,
+    Failed { reason: String },
 }
 
 /// A repository as the sidebar lists it.
@@ -208,6 +371,29 @@ pub enum CommandError {
     AgentCli { reason: String },
     #[error("the harness service could not store the chat: {reason}")]
     Storage { reason: String },
+    #[error("unknown subscription {subscription:?}")]
+    UnknownSubscription { subscription: SubscriptionId },
+    #[error("no {provider} subscription is named {name:?}")]
+    UnknownSubscriptionName { provider: Provider, name: String },
+    #[error("a {provider} subscription is already named {name:?}")]
+    SubscriptionNameTaken { provider: Provider, name: String },
+    #[error("a subscription needs a name")]
+    EmptySubscriptionName,
+    #[error("an API key subscription needs a key")]
+    EmptyApiKey,
+    #[error("subscription {subscription:?} is not a {provider} subscription")]
+    WrongProvider {
+        subscription: SubscriptionId,
+        provider: Provider,
+    },
+    #[error("subscription {subscription:?} signs in with an API key, not by login")]
+    NotALoginSubscription { subscription: SubscriptionId },
+    #[error("could not set up the subscription: {reason}")]
+    SubscriptionSetup { reason: String },
+    #[error("the OS keychain failed: {reason}")]
+    Keychain { reason: String },
+    #[error("the repository's config is invalid: {reason}")]
+    RepositoryConfig { reason: String },
     #[error("the harness service has stopped")]
     ServiceStopped,
 }
@@ -228,17 +414,29 @@ pub enum Event {
     MessageSteered { chat: ChatId, text: String },
     /// A queued message was sent and starts the next turn.
     QueuedMessageSent { chat: ChatId, text: String },
+    /// A line the agent CLI's login printed, such as the address to open
+    /// when no browser opened by itself.
+    LoginOutput {
+        subscription: SubscriptionId,
+        text: String,
+    },
+    /// The agent CLI's login of a subscription has ended.
+    LoginFinished {
+        subscription: SubscriptionId,
+        outcome: LoginOutcome,
+    },
 }
 
 impl Event {
-    /// The chat the event belongs to.
+    /// The chat the event belongs to; `None` for events of no chat.
     #[must_use]
-    pub fn chat(&self) -> ChatId {
+    pub fn chat(&self) -> Option<ChatId> {
         match self {
             Self::Agent { chat, .. }
             | Self::MessageQueued { chat, .. }
             | Self::MessageSteered { chat, .. }
-            | Self::QueuedMessageSent { chat, .. } => *chat,
+            | Self::QueuedMessageSent { chat, .. } => Some(*chat),
+            Self::LoginOutput { .. } | Self::LoginFinished { .. } => None,
         }
     }
 }

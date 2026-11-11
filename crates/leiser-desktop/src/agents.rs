@@ -20,16 +20,19 @@ const FAKE_TURNS: usize = 1000;
 pub struct FakeAgentCliError(#[from] io::Error);
 
 /// The harness service's configuration. Chats start on Claude Code and can
-/// change to Codex. With `LEISER_FAKE_AGENT_CLI` set, they run on the fake
-/// agent CLI instead and keep their data apart from real chats.
+/// change to Codex; API keys go to the OS keychain and Codex subscriptions
+/// share the developer's Codex home. With `LEISER_FAKE_AGENT_CLI` set,
+/// chats run on the fake agent CLI instead and keep their data, and their
+/// shared Codex home, apart from real chats.
 pub fn service_config(data_dir: PathBuf) -> Result<ServiceConfig, FakeAgentCliError> {
     if let Some(program) = env::var_os(FAKE_AGENT_CLI_VARIABLE) {
         let driver = fake_driver(&PathBuf::from(program))?;
-        return Ok(ServiceConfig::new(
-            AgentCli::ClaudeCode,
-            Arc::new(driver),
-            data_dir.join("fake-agent-cli"),
-        ));
+        let data_dir = data_dir.join("fake-agent-cli");
+        let codex_home = data_dir.join("codex-home");
+        return Ok(
+            ServiceConfig::new(AgentCli::ClaudeCode, Arc::new(driver), data_dir)
+                .with_codex_home(codex_home),
+        );
     }
     Ok(ServiceConfig::new(
         AgentCli::ClaudeCode,

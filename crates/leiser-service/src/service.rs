@@ -1,7 +1,7 @@
 //! The harness service's state and its command loop.
 
 use std::collections::{BTreeMap, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tokio::sync::{broadcast, mpsc, oneshot};
@@ -9,11 +9,18 @@ use tokio::task::JoinHandle;
 
 use crate::handoff::{self, Handoff, ReadError};
 use crate::harness_mcp::{ChatRead, HarnessMcp, HarnessMcpError};
-use crate::store::{AgentSessionV2, ChatV2, HandoffV2, RepositoryV1, StateV2, StorageError, Store};
+use crate::keychain::KeychainError;
+use crate::repository_config;
+use crate::store::{
+    AgentSessionV2, ChatSubscriptionV3, ChatV3, HandoffV2, RepositoryV1, StateV3, StorageError,
+    Store,
+};
+use crate::subscriptions::{SubscriptionError, Subscriptions};
 use crate::{
     AgentCli, AgentEvent, AgentSessionId, ChatId, ChatOverview, ChatStatus, Checkout, Command,
-    CommandError, Driver, Event, QueueReason, RepositoryId, RepositoryOverview, Response,
-    SessionInput, SessionSpec, TranscriptEntry,
+    CommandError, Driver, Event, Keychain, LoginOutcome, LoginProcess, OsKeychain, Provider,
+    QueueReason, RepositoryId, RepositoryOverview, Response, SessionInput, SessionSpec, SignIn,
+    SubscriptionId, SubscriptionKind, TranscriptEntry,
 };
 
 /// Commands waiting for the command loop. Small, so callers feel back
@@ -26,26 +33,49 @@ const SESSION_BUFFER: usize = 256;
 /// Read-chat calls from the harness MCP server waiting for the command loop.
 const READ_BUFFER: usize = 64;
 
-/// What the harness service is started with: one driver per agent CLI and
-/// a data directory.
+/// What the harness service is started with: one driver per agent CLI, a
+/// data directory, the keychain for API keys and the shared Codex home.
 #[derive(Debug)]
 pub struct ServiceConfig {
     default_agent_cli: AgentCli,
     drivers: BTreeMap<AgentCli, Arc<dyn Driver>>,
     data_dir: PathBuf,
+    keychain: Arc<dyn Keychain>,
+    codex_home: Option<PathBuf>,
 }
 
 impl ServiceConfig {
     /// New chats start on `agent_cli`, run by `driver`. The harness service
     /// keeps repositories, chats, transcripts and agent session ids in
     /// `data_dir`, which is created if it does not exist.
+    ///
+    /// API keys go to the OS keychain, and Codex shadow homes link to the
+    /// developer's Codex home (`CODEX_HOME`, else `~/.codex`); tests replace
+    /// both with [`Self::with_keychain`] and [`Self::with_codex_home`].
     #[must_use]
     pub fn new(agent_cli: AgentCli, driver: Arc<dyn Driver>, data_dir: PathBuf) -> Self {
         Self {
             default_agent_cli: agent_cli,
             drivers: BTreeMap::from([(agent_cli, driver)]),
             data_dir,
+            keychain: Arc::new(OsKeychain),
+            codex_home: default_codex_home(),
         }
+    }
+
+    /// Keeps API keys in `keychain` instead of the OS keychain.
+    #[must_use]
+    pub fn with_keychain(mut self, keychain: Arc<dyn Keychain>) -> Self {
+        self.keychain = keychain;
+        self
+    }
+
+    /// Uses `codex_home` as the shared Codex home that every Codex
+    /// subscription's shadow home links to.
+    #[must_use]
+    pub fn with_codex_home(mut self, codex_home: PathBuf) -> Self {
+        self.codex_home = Some(codex_home);
+        self
     }
 
     /// Adds the driver of another agent CLI that chats can change to, or
@@ -164,8 +194,11 @@ struct Chat {
     /// chat has had one there.
     agent_sessions: BTreeMap<AgentCli, Resumable>,
     /// The handoff the next message carries, after the chat changed agent
-    /// CLI.
+    /// CLI or subscription.
     handoff: Option<Handoff>,
+    /// The subscription per provider; a provider without one runs on the
+    /// agent CLI's own default login.
+    subscriptions: BTreeMap<Provider, SubscriptionId>,
     /// The running agent session, if any.
     session: Option<Session>,
 }
@@ -179,6 +212,11 @@ struct Resumable {
 }
 
 impl Chat {
+    /// The subscription the chat's agent CLI runs on.
+    fn subscription(&self) -> Option<SubscriptionId> {
+        self.subscriptions.get(&self.agent_cli.provider()).copied()
+    }
+
     fn status(&self) -> ChatStatus {
         match &self.session {
             Some(Session {
@@ -240,6 +278,15 @@ enum SessionMessage {
     },
 }
 
+/// A running login. Dropping it stops the login.
+struct Login(JoinHandle<()>);
+
+impl Drop for Login {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 struct State {
     drivers: BTreeMap<AgentCli, Arc<dyn Driver>>,
     default_agent_cli: AgentCli,
@@ -250,6 +297,8 @@ struct State {
     sessions: mpsc::Sender<SessionMessage>,
     repositories: BTreeMap<RepositoryId, PathBuf>,
     chats: BTreeMap<ChatId, Chat>,
+    subscriptions: Subscriptions,
+    logins: BTreeMap<SubscriptionId, Login>,
     next_id: u64,
     generation: u64,
 }
@@ -259,7 +308,7 @@ impl State {
         config: ServiceConfig,
         harness_mcp: HarnessMcp,
         store: Store,
-        stored: StateV2,
+        stored: StateV3,
         events: broadcast::Sender<Event>,
         sessions: mpsc::Sender<SessionMessage>,
     ) -> Self {
@@ -296,6 +345,11 @@ impl State {
                             HandoffV2::NewSession => Handoff::NewSession,
                             HandoffV2::Resume { known } => Handoff::Resume { known },
                         }),
+                        subscriptions: chat
+                            .subscriptions
+                            .into_iter()
+                            .map(|chosen| (chosen.provider, SubscriptionId(chosen.subscription)))
+                            .collect(),
                         // Agent sessions did not survive the restart, so no
                         // turn runs; resumed ones wait for the next message.
                         session: None,
@@ -303,6 +357,12 @@ impl State {
                 )
             })
             .collect();
+        let subscriptions = Subscriptions::load(
+            stored.subscriptions,
+            store.subscriptions_dir(),
+            config.codex_home,
+            config.keychain,
+        );
         Self {
             drivers: config.drivers,
             default_agent_cli: config.default_agent_cli,
@@ -312,6 +372,8 @@ impl State {
             sessions,
             repositories,
             chats,
+            subscriptions,
+            logins: BTreeMap::new(),
             next_id: stored.next_id,
             generation: 0,
         }
@@ -375,6 +437,22 @@ impl State {
             Command::ListChats => Ok(self.list_chats()),
             Command::ReadChat { chat } => self.read_chat(chat).await,
             Command::ChangeAgentCli { chat, agent_cli } => self.change_agent_cli(chat, agent_cli),
+            Command::AddSubscription {
+                provider,
+                name,
+                sign_in,
+            } => self.add_subscription(provider, &name, &sign_in),
+            Command::RenameSubscription { subscription, name } => {
+                self.rename_subscription(subscription, &name)
+            }
+            Command::RemoveSubscription { subscription } => self.remove_subscription(subscription),
+            Command::LogIn { subscription } => self.log_in(subscription),
+            Command::ListSubscriptions => Ok(self.list_subscriptions()),
+            Command::ChangeSubscription {
+                chat,
+                provider,
+                subscription,
+            } => self.change_subscription(chat, provider, subscription),
         }
     }
 
@@ -414,6 +492,7 @@ impl State {
         // Worktrees follow in a later ticket; this stops compiling then.
         let Checkout::Main = checkout;
         let working_directory = path.clone();
+        let subscriptions = self.default_subscriptions(path)?;
         let chat = ChatId(self.next_id());
         self.chats.insert(
             chat,
@@ -424,6 +503,7 @@ impl State {
                 agent_cli: self.default_agent_cli,
                 agent_sessions: BTreeMap::new(),
                 handoff: None,
+                subscriptions,
                 session: None,
             },
         );
@@ -432,6 +512,30 @@ impl State {
             return Err(error);
         }
         Ok(Response::ChatStarted { chat })
+    }
+
+    /// The repository's default subscription per provider, from its
+    /// config. A name that matches no subscription fails rather than
+    /// running the chat on another plan.
+    fn default_subscriptions(
+        &self,
+        repository: &Path,
+    ) -> Result<BTreeMap<Provider, SubscriptionId>, CommandError> {
+        let config = repository_config::load(repository).map_err(|error| {
+            CommandError::RepositoryConfig {
+                reason: error.to_string(),
+            }
+        })?;
+        config
+            .subscriptions
+            .into_iter()
+            .map(
+                |(provider, name)| match self.subscriptions.named(provider, &name) {
+                    Some(subscription) => Ok((provider, subscription)),
+                    None => Err(CommandError::UnknownSubscriptionName { provider, name }),
+                },
+            )
+            .collect()
     }
 
     /// The input of the chat's agent session while a turn runs.
@@ -614,6 +718,8 @@ impl State {
         Ok(Response::Chat {
             status: chat.status(),
             branch: crate::git::current_branch(&chat.working_directory).await,
+            agent_cli: chat.agent_cli,
+            subscription: chat.subscription(),
             transcript,
         })
     }
@@ -660,6 +766,215 @@ impl State {
         Ok(Response::AgentCliChanged)
     }
 
+    fn add_subscription(
+        &mut self,
+        provider: Provider,
+        name: &str,
+        sign_in: &SignIn,
+    ) -> Result<Response, CommandError> {
+        let name = self.free_name(provider, name, None)?;
+        if let SignIn::ApiKey { api_key } = sign_in
+            && api_key.expose().trim().is_empty()
+        {
+            return Err(CommandError::EmptyApiKey);
+        }
+        if let SignIn::Login = sign_in {
+            self.login_driver(provider)?;
+        }
+        let subscription = SubscriptionId(self.next_id());
+        self.subscriptions
+            .add(subscription, provider, name, sign_in)?;
+        if let Err(error) = self.save() {
+            self.subscriptions.undo_add(subscription);
+            return Err(error);
+        }
+        if let SignIn::Login = sign_in {
+            self.start_login(subscription, provider)?;
+        }
+        Ok(Response::SubscriptionAdded { subscription })
+    }
+
+    /// `name`, trimmed, if no other subscription of the provider has it.
+    fn free_name(
+        &self,
+        provider: Provider,
+        name: &str,
+        renamed: Option<SubscriptionId>,
+    ) -> Result<String, CommandError> {
+        let name = name.trim().to_owned();
+        if name.is_empty() {
+            return Err(CommandError::EmptySubscriptionName);
+        }
+        match self.subscriptions.named(provider, &name) {
+            Some(other) if Some(other) != renamed => {
+                Err(CommandError::SubscriptionNameTaken { provider, name })
+            }
+            _ => Ok(name),
+        }
+    }
+
+    fn rename_subscription(
+        &mut self,
+        subscription: SubscriptionId,
+        name: &str,
+    ) -> Result<Response, CommandError> {
+        let provider = self
+            .subscriptions
+            .provider(subscription)
+            .ok_or(CommandError::UnknownSubscription { subscription })?;
+        let name = self.free_name(provider, name, Some(subscription))?;
+        self.subscriptions.rename(subscription, name);
+        self.save()?;
+        Ok(Response::SubscriptionRenamed)
+    }
+
+    fn remove_subscription(
+        &mut self,
+        subscription: SubscriptionId,
+    ) -> Result<Response, CommandError> {
+        let provider = self
+            .subscriptions
+            .provider(subscription)
+            .ok_or(CommandError::UnknownSubscription { subscription })?;
+        self.logins.remove(&subscription);
+        for chat in self.chats.values_mut() {
+            if chat.agent_cli.provider() == provider && chat.subscription() == Some(subscription) {
+                // Its config directory is about to go.
+                chat.session = None;
+            }
+        }
+        self.subscriptions.remove(subscription)?;
+        self.save()?;
+        Ok(Response::SubscriptionRemoved)
+    }
+
+    fn log_in(&mut self, subscription: SubscriptionId) -> Result<Response, CommandError> {
+        let provider = self
+            .subscriptions
+            .provider(subscription)
+            .ok_or(CommandError::UnknownSubscription { subscription })?;
+        if self.subscriptions.kind(subscription) != Some(SubscriptionKind::Login) {
+            return Err(CommandError::NotALoginSubscription { subscription });
+        }
+        self.start_login(subscription, provider)?;
+        Ok(Response::LoginStarted)
+    }
+
+    /// The driver of the agent CLI that logs in to the provider.
+    fn login_driver(&self, provider: Provider) -> Result<Arc<dyn Driver>, CommandError> {
+        let agent_cli = provider.agent_cli();
+        self.drivers
+            .get(&agent_cli)
+            .cloned()
+            .ok_or(CommandError::AgentCliNotConfigured { agent_cli })
+    }
+
+    /// Runs the agent CLI's login in the subscription's config directory
+    /// and reports its output and end as events. Stops a login of the
+    /// subscription that still runs.
+    fn start_login(
+        &mut self,
+        subscription: SubscriptionId,
+        provider: Provider,
+    ) -> Result<(), CommandError> {
+        self.logins.remove(&subscription);
+        let driver = self.login_driver(provider)?;
+        let access = self.subscriptions.access(subscription)?;
+        let LoginProcess {
+            mut output,
+            outcome,
+        } = driver
+            .login(&access)
+            .map_err(|error| CommandError::AgentCli {
+                reason: error.to_string(),
+            })?;
+        let events = self.events.clone();
+        let task = tokio::spawn(async move {
+            // No subscriber is not an error: the desktop app may be closed.
+            while let Some(text) = output.recv().await {
+                let _ = events.send(Event::LoginOutput { subscription, text });
+            }
+            let outcome = outcome.await.unwrap_or_else(|_| LoginOutcome::Failed {
+                reason: "the login stopped".to_owned(),
+            });
+            let _ = events.send(Event::LoginFinished {
+                subscription,
+                outcome,
+            });
+        });
+        self.logins.insert(subscription, Login(task));
+        Ok(())
+    }
+
+    fn list_subscriptions(&self) -> Response {
+        let logging_in = |subscription| {
+            self.logins
+                .get(&subscription)
+                .is_some_and(|login| !login.0.is_finished())
+        };
+        Response::Subscriptions {
+            subscriptions: self.subscriptions.overview(logging_in),
+        }
+    }
+
+    /// Changes the subscription the chat's agent CLI of `provider` runs
+    /// on. The running agent session there ends, so the next message runs
+    /// on the new subscription. An agent session the new subscription
+    /// cannot continue is forgotten: the next message goes to a new agent
+    /// session with a handoff.
+    fn change_subscription(
+        &mut self,
+        id: ChatId,
+        provider: Provider,
+        subscription: Option<SubscriptionId>,
+    ) -> Result<Response, CommandError> {
+        let chat = self
+            .chats
+            .get(&id)
+            .ok_or(CommandError::UnknownChat { chat: id })?;
+        if let Some(subscription) = subscription {
+            match self.subscriptions.provider(subscription) {
+                None => return Err(CommandError::UnknownSubscription { subscription }),
+                Some(found) if found != provider => {
+                    return Err(CommandError::WrongProvider {
+                        subscription,
+                        provider,
+                    });
+                }
+                Some(_) => {}
+            }
+        }
+        if chat.status() == ChatStatus::Working {
+            return Err(CommandError::TurnRunning { chat: id });
+        }
+        let current = chat.subscriptions.get(&provider).copied();
+        if current == subscription {
+            return Ok(Response::SubscriptionChanged);
+        }
+        let entries = self.store.transcript(id.0)?.len();
+        let Some(chat) = self.chats.get_mut(&id) else {
+            return Err(CommandError::UnknownChat { chat: id });
+        };
+        match subscription {
+            Some(subscription) => chat.subscriptions.insert(provider, subscription),
+            None => chat.subscriptions.remove(&provider),
+        };
+        let agent_cli = provider.agent_cli();
+        let on_provider = chat.agent_cli == agent_cli;
+        if on_provider {
+            // Ends the agent session; its last events are ignored.
+            chat.session = None;
+        }
+        if !Subscriptions::shares_agent_sessions(provider, current, subscription) {
+            chat.agent_sessions.remove(&agent_cli);
+            if on_provider {
+                chat.handoff = (entries > 0).then_some(Handoff::NewSession);
+            }
+        }
+        self.save()?;
+        Ok(Response::SubscriptionChanged)
+    }
+
     /// Answers a read-chat call of the harness MCP server.
     fn on_read(&self, read: ChatRead) {
         let result = self
@@ -685,6 +1000,13 @@ impl State {
                 .ok_or(CommandError::AgentCliNotConfigured {
                     agent_cli: chat.agent_cli,
                 })?;
+        let subscription = match chat.subscription() {
+            Some(subscription) if !self.subscriptions.contains(subscription) => {
+                return Err(CommandError::UnknownSubscription { subscription });
+            }
+            Some(subscription) => Some(self.subscriptions.access(subscription)?),
+            None => None,
+        };
         let harness_mcp_url =
             self.harness_mcp
                 .register(id)
@@ -694,6 +1016,7 @@ impl State {
         let spec = SessionSpec {
             working_directory: chat.working_directory.clone(),
             harness_mcp_url,
+            subscription,
         };
         let (started, resume) = match chat.agent_sessions.get(&chat.agent_cli) {
             Some(session) => (driver.resume(spec, &session.id), Resume::Untried),
@@ -878,9 +1201,10 @@ impl State {
         Ok(self.store.save(&self.snapshot())?)
     }
 
-    fn snapshot(&self) -> StateV2 {
-        StateV2 {
+    fn snapshot(&self) -> StateV3 {
+        StateV3 {
             next_id: self.next_id,
+            subscriptions: self.subscriptions.snapshot(),
             repositories: self
                 .repositories
                 .iter()
@@ -892,7 +1216,7 @@ impl State {
             chats: self
                 .chats
                 .iter()
-                .map(|(id, chat)| ChatV2 {
+                .map(|(id, chat)| ChatV3 {
                     id: id.0,
                     repository: chat.repository.0,
                     working_directory: chat.working_directory.clone(),
@@ -910,10 +1234,45 @@ impl State {
                         Handoff::NewSession => HandoffV2::NewSession,
                         Handoff::Resume { known } => HandoffV2::Resume { known },
                     }),
+                    subscriptions: chat
+                        .subscriptions
+                        .iter()
+                        .map(|(provider, subscription)| ChatSubscriptionV3 {
+                            provider: *provider,
+                            subscription: subscription.0,
+                        })
+                        .collect(),
                 })
                 .collect(),
         }
     }
+}
+
+impl From<SubscriptionError> for CommandError {
+    fn from(error: SubscriptionError) -> Self {
+        match error {
+            SubscriptionError::Keychain(error) => error.into(),
+            error => Self::SubscriptionSetup {
+                reason: error.to_string(),
+            },
+        }
+    }
+}
+
+impl From<KeychainError> for CommandError {
+    fn from(error: KeychainError) -> Self {
+        Self::Keychain {
+            reason: error.to_string(),
+        }
+    }
+}
+
+/// The developer's Codex home, as Codex itself finds it.
+fn default_codex_home() -> Option<PathBuf> {
+    std::env::var_os("CODEX_HOME")
+        .filter(|home| !home.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| std::env::home_dir().map(|home| home.join(".codex")))
 }
 
 impl From<StorageError> for CommandError {
