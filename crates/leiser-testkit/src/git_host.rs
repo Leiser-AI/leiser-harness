@@ -4,7 +4,9 @@
 //! pull requests are kept in memory, shared by the fake's clones. A pull
 //! request's head commit is whatever its branch points to on that remote;
 //! tests fail and pass its checks, make it conflict and comment on it, and
-//! see whether a poll got a full answer or `304 Not Modified`.
+//! see whether a poll got a full answer or `304 Not Modified`. Wayfinder
+//! maps are kept in memory too: tests add maps and tickets, block, close
+//! and assign tickets, and see how each poll of the maps was answered.
 
 use std::collections::BTreeMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -12,10 +14,10 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use leiser_service::{
-    CheckOutcome, CommentLocation, CommitId, GitHost, GitHostError, GitHostFuture,
-    HostAccountAccess, LoginOutcome, LoginProcess, Mergeable, NewPullRequest, OpenedPullRequest,
-    PollMemo, PolledPullRequest, PullRequestActivity, PullRequestCheck, PullRequestComment,
-    PullRequestState,
+    Blocker, CheckOutcome, CommentLocation, CommitId, GitHost, GitHostError, GitHostFuture,
+    HostAccountAccess, IssueRef, LoginOutcome, LoginProcess, MapIssue, Mergeable, NewPullRequest,
+    OpenedPullRequest, PollMemo, PolledPullRequest, PolledWayfinderMaps, PullRequestActivity,
+    PullRequestCheck, PullRequestComment, PullRequestState, TicketIssue, TicketKind,
 };
 use serde::Deserialize;
 use tokio::sync::{mpsc, oneshot};
@@ -35,8 +37,19 @@ pub const FAKE_GIT_HOST_MERGED_FILE: &str = "fake-git-host-merged";
 /// "location": {"path": "src/lib.rs", "line": 3}}]}}`.
 /// A check listed there fails on every head commit.
 pub const FAKE_GIT_HOST_ACTIVITY_FILE: &str = "fake-git-host-activity.json";
+/// A JSON file in the host account's config directory with wayfinder maps,
+/// which every poll of the maps reads after those kept in memory: for
+/// trying the wayfinder map in the desktop app. For example
+/// `{"maps": [{"number": 1, "title": "Map: v2", "tickets": [
+/// {"number": 2, "title": "Pick a store", "kind": "research"},
+/// {"number": 3, "title": "Sketch the UI", "kind": "prototype", "open": false},
+/// {"number": 4, "title": "Agree on the API", "kind": "grilling",
+/// "assignees": ["someone"], "blocked_by": [2]}]}]}`.
+pub const FAKE_GIT_HOST_WAYFINDER_FILE: &str = "fake-git-host-wayfinder.json";
 /// The memo key the fake git host keeps its one entity tag under.
 const TAG: &str = "pull";
+/// The memo key of the entity tag of the wayfinder maps.
+const MAPS_TAG: &str = "maps";
 /// The credential helper the fake git host gives bound repositories. A
 /// local remote never asks for credentials.
 pub const FAKE_CREDENTIAL_HELPER: &str = "!leiser-fake-git-host-credential";
@@ -49,7 +62,49 @@ pub struct FakeGitHost {
     pull_requests: Arc<Mutex<Vec<FakePullRequest>>>,
     activity: Arc<Mutex<BTreeMap<u64, Activity>>>,
     polls_fail: Arc<Mutex<bool>>,
+    maps: Arc<Mutex<FakeMaps>>,
+    map_polls: Arc<Mutex<Vec<FakePoll>>>,
 }
+
+/// Wayfinder maps on the fake git host, as kept in memory and in
+/// [`FAKE_GIT_HOST_WAYFINDER_FILE`].
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct FakeMaps {
+    maps: Vec<FakeMap>,
+}
+
+#[derive(Debug, Deserialize)]
+struct FakeMap {
+    number: u64,
+    title: String,
+    #[serde(default)]
+    tickets: Vec<FakeTicket>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct FakeTicket {
+    number: u64,
+    title: String,
+    #[serde(default)]
+    kind: Option<TicketKind>,
+    #[serde(default = "open")]
+    open: bool,
+    #[serde(default)]
+    assignees: Vec<String>,
+    /// Issue numbers; one that is no ticket counts as an open issue.
+    #[serde(default)]
+    blocked_by: Vec<u64>,
+}
+
+fn open() -> bool {
+    true
+}
+
+/// A map or ticket the fake git host does not have.
+#[derive(Debug, thiserror::Error)]
+#[error("no map or ticket #{0} on the fake git host")]
+pub struct UnknownIssue(pub u64);
 
 /// How the fake git host answered a poll.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -248,6 +303,149 @@ impl FakeGitHost {
             .output()
             .ok()?;
         commit_of(&String::from_utf8_lossy(&output.stdout))
+    }
+
+    /// Opens a wayfinder map: an issue labelled `wayfinder:map`.
+    pub fn add_map(&self, number: u64, title: &str) {
+        self.lock_maps().maps.push(FakeMap {
+            number,
+            title: title.to_owned(),
+            tickets: Vec::new(),
+        });
+    }
+
+    /// Adds an open, unassigned ticket at the end of map `map`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UnknownIssue`] when there is no map `map`.
+    pub fn add_ticket(
+        &self,
+        map: u64,
+        number: u64,
+        title: &str,
+        kind: Option<TicketKind>,
+    ) -> Result<(), UnknownIssue> {
+        let mut maps = self.lock_maps();
+        let found = maps
+            .maps
+            .iter_mut()
+            .find(|candidate| candidate.number == map)
+            .ok_or(UnknownIssue(map))?;
+        found.tickets.push(FakeTicket {
+            number,
+            title: title.to_owned(),
+            kind,
+            open: true,
+            assignees: Vec::new(),
+            blocked_by: Vec::new(),
+        });
+        Ok(())
+    }
+
+    /// Makes issue `blocker` block ticket `ticket`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UnknownIssue`] when there is no ticket `ticket`.
+    pub fn block(&self, ticket: u64, blocker: u64) -> Result<(), UnknownIssue> {
+        self.with_ticket(ticket, |ticket| ticket.blocked_by.push(blocker))
+    }
+
+    /// Closes ticket `ticket`, as resolving it on the git host would.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UnknownIssue`] when there is no ticket `ticket`.
+    pub fn close_ticket(&self, ticket: u64) -> Result<(), UnknownIssue> {
+        self.with_ticket(ticket, |ticket| ticket.open = false)
+    }
+
+    /// Assigns ticket `ticket` to `login`, as claiming it would.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UnknownIssue`] when there is no ticket `ticket`.
+    pub fn assign(&self, ticket: u64, login: &str) -> Result<(), UnknownIssue> {
+        self.with_ticket(ticket, |ticket| ticket.assignees.push(login.to_owned()))
+    }
+
+    /// How the fake git host answered each poll of the wayfinder maps,
+    /// oldest first.
+    #[must_use]
+    pub fn map_polls(&self) -> Vec<FakePoll> {
+        self.map_polls
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    fn lock_maps(&self) -> std::sync::MutexGuard<'_, FakeMaps> {
+        self.maps.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn with_ticket(
+        &self,
+        number: u64,
+        change: impl FnOnce(&mut FakeTicket),
+    ) -> Result<(), UnknownIssue> {
+        let mut maps = self.lock_maps();
+        let ticket = maps
+            .maps
+            .iter_mut()
+            .flat_map(|map| map.tickets.iter_mut())
+            .find(|ticket| ticket.number == number)
+            .ok_or(UnknownIssue(number))?;
+        change(ticket);
+        Ok(())
+    }
+
+    /// The maps as a poll finds them now: those in memory, then those in
+    /// the host account's file, newest first.
+    fn maps_now(&self, access: &HostAccountAccess) -> Vec<MapIssue> {
+        let from_file =
+            std::fs::read_to_string(access.config_dir.join(FAKE_GIT_HOST_WAYFINDER_FILE))
+                .ok()
+                .and_then(|text| serde_json::from_str::<FakeMaps>(&text).ok())
+                .unwrap_or_default();
+        let kept = self.lock_maps();
+        let maps: Vec<&FakeMap> = kept.maps.iter().chain(&from_file.maps).collect();
+        let tickets: BTreeMap<u64, &FakeTicket> = maps
+            .iter()
+            .flat_map(|map| &map.tickets)
+            .map(|ticket| (ticket.number, ticket))
+            .collect();
+        let url = |number: u64| format!("https://{}/fake/issues/{number}", access.git_host);
+        let mut issues: Vec<MapIssue> = maps
+            .iter()
+            .map(|map| MapIssue {
+                number: map.number,
+                title: map.title.clone(),
+                url: url(map.number),
+                tickets: map
+                    .tickets
+                    .iter()
+                    .map(|ticket| TicketIssue {
+                        number: ticket.number,
+                        title: ticket.title.clone(),
+                        url: url(ticket.number),
+                        kind: ticket.kind,
+                        open: ticket.open,
+                        assignees: ticket.assignees.clone(),
+                        blocked_by: ticket
+                            .blocked_by
+                            .iter()
+                            .map(|&number| Blocker {
+                                issue: IssueRef::Here { number },
+                                open: tickets.get(&number).is_none_or(|blocker| blocker.open),
+                            })
+                            .collect(),
+                    })
+                    .collect(),
+            })
+            .collect();
+        issues.sort_by_key(|map| std::cmp::Reverse(map.number));
+        issues
     }
 
     fn with_activity(&self, number: u64, change: impl FnOnce(&mut Activity)) {
@@ -506,6 +704,44 @@ impl GitHost for FakeGitHost {
             let mut memo = PollMemo::default();
             memo.insert(TAG, &tag);
             Ok(PolledPullRequest { activity, memo })
+        })
+    }
+
+    fn poll_wayfinder_maps<'a>(
+        &'a self,
+        access: &'a HostAccountAccess,
+        _remote: &'a str,
+        last: Option<&'a PolledWayfinderMaps>,
+    ) -> GitHostFuture<'a, Result<PolledWayfinderMaps, GitHostError>> {
+        Box::pin(async move {
+            if *self
+                .polls_fail
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+            {
+                return Err(GitHostError::Refused {
+                    reason: "the fake git host cannot be reached".to_owned(),
+                });
+            }
+            let maps = self.maps_now(access);
+            let mut hasher = DefaultHasher::new();
+            format!("{maps:?}").hash(&mut hasher);
+            let tag = format!("\"{:x}\"", hasher.finish());
+            let unchanged = last.filter(|last| last.memo.get(MAPS_TAG) == Some(tag.as_str()));
+            self.map_polls
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(if unchanged.is_some() {
+                    FakePoll::NotModified
+                } else {
+                    FakePoll::Full
+                });
+            if let Some(last) = unchanged {
+                return Ok(last.clone());
+            }
+            let mut memo = PollMemo::default();
+            memo.insert(MAPS_TAG, &tag);
+            Ok(PolledWayfinderMaps { maps, memo })
         })
     }
 }

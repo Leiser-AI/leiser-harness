@@ -32,7 +32,7 @@ const REVIEW_COMMENTS: &str = "review-comments";
 const STATUS: &str = "status-";
 
 /// An answer to a conditional request.
-enum Answer {
+pub(super) enum Answer {
     NotModified,
     Fresh { tag: Option<String>, body: String },
 }
@@ -449,14 +449,27 @@ impl<'a> Poll<'a> {
     /// Runs `gh api --include` for `path`, with `If-None-Match` when there
     /// is a tag.
     async fn conditional(&self, path: &str, tag: Option<&str>) -> Result<Answer, GitHostError> {
+        self.host
+            .conditional(self.access, self.repository, path, tag)
+            .await
+    }
+}
+
+impl GhGitHost {
+    /// Runs `gh api --include` for `path` in `repository`, with
+    /// `If-None-Match` when there is a tag.
+    pub(super) async fn conditional(
+        &self,
+        access: &HostAccountAccess,
+        repository: &str,
+        path: &str,
+        tag: Option<&str>,
+    ) -> Result<Answer, GitHostError> {
         let mut args = vec!["--include".to_owned()];
         if let Some(tag) = tag {
             args.extend(["--header".to_owned(), format!("If-None-Match: {tag}")]);
         }
-        let output = self
-            .host
-            .run_api(self.access, self.repository, path, &args)
-            .await?;
+        let output = self.run_api(access, repository, path, &args).await?;
         let stdout = String::from_utf8_lossy(&output.stdout);
         let (head, body) = split_response(&stdout);
         // `gh` exits with an error on a 304 too.
