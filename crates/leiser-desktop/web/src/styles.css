@@ -922,3 +922,144 @@ button.danger {
 .login-answer input {
   flex: 1;
 }
+
+/* The diff panel: a chat's changes per turn and of its whole branch. */
+.diff {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.diff-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  align-items: center;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.diff-range {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+  min-width: 0;
+  /* Wraps the restore buttons onto their own line rather than squeeze it. */
+  flex: 1 1 320px;
+}
+
+.diff-range select {
+  flex: 1;
+  min-width: 0;
+}
+
+.diff-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.diff-confirm {
+  max-width: 420px;
+}
+
+.diff-summary {
+  margin: 8px 16px;
+}
+
+.diff-files {
+  flex: 1;
+  overflow: auto;
+  padding: 0 16px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.diff-file {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-card);
+}
+
+.diff-file-header {
+  display: flex;
+  gap: 12px;
+  align-items: baseline;
+  padding: 6px 10px;
+  cursor: pointer;
+}
+
+.diff-file-path {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.diff-file-change,
+.diff-file-counts {
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.diff-file-change.added {
+  color: #1a7f37;
+}
+
+.diff-file-change.deleted {
+  color: #c62828;
+}
+
+.diff-note {
+  margin: 0;
+  padding: 6px 10px 10px;
+}
+
+.diff-lines {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  background: var(--bg);
+}
+
+.diff-lines td {
+  padding: 0 8px;
+  vertical-align: top;
+}
+
+.diff-hunk td {
+  color: var(--muted);
+  background: var(--bg-side);
+  padding: 2px 8px;
+}
+
+.diff-number {
+  width: 1%;
+  color: var(--muted);
+  text-align: right;
+  white-space: nowrap;
+  user-select: none;
+}
+
+.diff-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.diff-sign {
+  display: inline-block;
+  width: 1.2em;
+  user-select: none;
+}
+
+.diff-line.added {
+  background: rgba(46, 160, 67, 0.15);
+}
+
+.diff-line.removed {
+  background: rgba(248, 81, 73, 0.15);
+}

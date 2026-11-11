@@ -64,7 +64,50 @@ export type Command =
       file: string;
       text: string;
       previous: string;
-    };
+    }
+  | { type: "list_checkpoints"; chat: ChatId }
+  | { type: "read_diff"; chat: ChatId; range: DiffRange }
+  | { type: "restore_checkpoint"; chat: ChatId; turn: number; moment: CheckpointMoment };
+
+export type DiffRange = { type: "turn"; turn: number } | { type: "branch" };
+export type CheckpointMoment = "before" | "after";
+
+/** The checkpoints of one turn: commits under hidden git refs. */
+export interface TurnCheckpoints {
+  turn: number;
+  /** The first line of the message that started the turn. */
+  title: string;
+  before: string;
+  /** `null` while the turn runs, or when the service stopped before it ended. */
+  after: string | null;
+}
+
+export interface FileDiff {
+  path: string;
+  change: FileChange;
+  patch: Patch;
+}
+
+export type FileChange =
+  | { type: "added" }
+  | { type: "modified" }
+  | { type: "deleted" }
+  | { type: "renamed"; from: string };
+
+export type Patch =
+  | { type: "text"; hunks: Hunk[] }
+  | { type: "binary" }
+  | { type: "too_large"; lines: number };
+
+export interface Hunk {
+  section: string;
+  lines: DiffLine[];
+}
+
+export type DiffLine =
+  | { type: "context"; old: number; new: number; text: string }
+  | { type: "added"; new: number; text: string }
+  | { type: "removed"; old: number; text: string };
 
 export type Response =
   | { type: "repository_added"; repository: RepositoryId }
@@ -109,7 +152,10 @@ export type Response =
   | { type: "todo_removed" }
   | { type: "cli_extensions"; extensions: CliExtension[]; unreadable: UnreadableCliExtensionFile[] }
   | { type: "cli_extension_file"; text: string }
-  | { type: "cli_extension_file_saved" };
+  | { type: "cli_extension_file_saved" }
+  | { type: "checkpoints"; branch_base: string; turns: TurnCheckpoints[] }
+  | { type: "diff"; files: FileDiff[] }
+  | { type: "checkpoint_restored" };
 
 export type CommandError =
   | { type: "not_a_git_repository"; path: string }
@@ -143,6 +189,8 @@ export type CommandError =
   | { type: "repo_check_not_configured" }
   | { type: "repo_check_running"; repository: RepositoryId }
   | { type: "not_a_cli_extension_file"; file: string }
+  | { type: "unknown_checkpoint"; chat: ChatId; turn: number; moment: CheckpointMoment }
+  | { type: "checkpoint"; reason: string }
   | { type: "cli_extension_file_changed"; file: string }
   | { type: "invalid_cli_extension_file"; file: string; reason: string }
   | { type: "cli_extension_file_access"; file: string; reason: string }
@@ -320,6 +368,7 @@ export type ServiceEvent =
   | { type: "repo_check_started"; repository: RepositoryId }
   | { type: "repo_check_finished"; repository: RepositoryId }
   | { type: "todos_changed"; chat: ChatId; todos: Todo[] }
+  | { type: "checkpoint_restored"; chat: ChatId; turn: number; moment: CheckpointMoment }
   | { type: "service_update_waiting" };
 
 /** The app's connection to the harness service (not part of the service's protocol). */

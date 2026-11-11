@@ -19,6 +19,11 @@
 //!   every change. A chat without the file has an empty todo list. Added in
 //!   version 2 without a version bump: an older harness service never
 //!   reads or writes these files, so it cannot damage them.
+//! - `checkpoints/<chat id>.json`: one chat's turns with the commits of
+//!   their checkpoints, replaced atomically on every change. The commits
+//!   themselves live in the repository, under hidden refs (see
+//!   `checkpoint.rs`). Added in version 3 without a version bump, as the
+//!   todo lists were.
 //!
 //! The stored types are separate from the protocol types, except for
 //! [`TranscriptEntry`] and the `repo-check` report. A change that old data no longer parses with bumps
@@ -31,7 +36,10 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::repo_check::Outcome;
-use crate::{AgentCli, AgentEvent, PermissionMode, Provider, SubscriptionKind, TranscriptEntry};
+use crate::{
+    AgentCli, AgentEvent, PermissionMode, Provider, SubscriptionKind, TranscriptEntry,
+    TurnCheckpoints,
+};
 
 /// The storage version this harness service writes.
 ///
@@ -73,6 +81,7 @@ struct StoredRepoCheck {
     outcome: serde_json::Value,
 }
 const TODOS_DIR: &str = "todos";
+const CHECKPOINTS_DIR: &str = "checkpoints";
 
 /// Why the harness service could not read or write its data.
 #[derive(Debug, thiserror::Error)]
@@ -238,6 +247,44 @@ pub(crate) struct TodoV1 {
     pub done: bool,
 }
 
+/// The contents of `checkpoints/<chat id>.json`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct CheckpointsV1 {
+    pub turns: Vec<TurnCheckpointsV1>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct TurnCheckpointsV1 {
+    pub turn: u64,
+    pub title: String,
+    /// The commit with the files before the turn.
+    pub before: String,
+    /// The commit with the files after it, once the turn has ended.
+    pub after: Option<String>,
+}
+
+impl From<TurnCheckpointsV1> for TurnCheckpoints {
+    fn from(stored: TurnCheckpointsV1) -> Self {
+        Self {
+            turn: stored.turn,
+            title: stored.title,
+            before: stored.before,
+            after: stored.after,
+        }
+    }
+}
+
+impl From<&TurnCheckpoints> for TurnCheckpointsV1 {
+    fn from(turn: &TurnCheckpoints) -> Self {
+        Self {
+            turn: turn.turn,
+            title: turn.title.clone(),
+            before: turn.before.clone(),
+            after: turn.after.clone(),
+        }
+    }
+}
+
 /// The contents of `state.json`, storage version 1.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct StateV1 {
@@ -314,7 +361,7 @@ impl Store {
         let store = Self {
             dir: dir.to_path_buf(),
         };
-        for dir in [CHATS_DIR, TODOS_DIR] {
+        for dir in [CHATS_DIR, TODOS_DIR, CHECKPOINTS_DIR] {
             let dir = store.dir.join(dir);
             fs::create_dir_all(&dir).map_err(|source| StorageError::Io { path: dir, source })?;
         }
@@ -523,6 +570,37 @@ impl Store {
 
     fn todos_path(&self, chat: u64) -> PathBuf {
         self.dir.join(TODOS_DIR).join(format!("{chat}.json"))
+    }
+
+    /// Reads a chat's checkpoints; a chat without the file has none.
+    pub fn checkpoints(&self, chat: u64) -> Result<CheckpointsV1, StorageError> {
+        let path = self.checkpoints_path(chat);
+        match fs::read(&path) {
+            Ok(bytes) => serde_json::from_slice(&bytes)
+                .map_err(|source| StorageError::Corrupt { path, source }),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(CheckpointsV1::default()),
+            Err(source) => Err(StorageError::Io { path, source }),
+        }
+    }
+
+    /// Replaces a chat's checkpoints atomically.
+    pub fn save_checkpoints(
+        &self,
+        chat: u64,
+        checkpoints: &CheckpointsV1,
+    ) -> Result<(), StorageError> {
+        let path = self.checkpoints_path(chat);
+        let mut bytes =
+            serde_json::to_vec_pretty(checkpoints).map_err(|source| StorageError::Io {
+                path: path.clone(),
+                source: source.into(),
+            })?;
+        bytes.push(b'\n');
+        replace(&path, &bytes)
+    }
+
+    fn checkpoints_path(&self, chat: u64) -> PathBuf {
+        self.dir.join(CHECKPOINTS_DIR).join(format!("{chat}.json"))
     }
 
     /// Removes a last line that a crash cut off, so the next entry starts

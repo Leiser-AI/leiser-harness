@@ -11,9 +11,12 @@ import type {
   Checkout,
   ChatOverview,
   ChatStatus,
+  CheckpointMoment,
   CliExtension,
   Command,
   CommandError,
+  DiffRange,
+  FileDiff,
   PermissionMode,
   Provider,
   QueueReason,
@@ -29,6 +32,7 @@ import type {
   Todo,
   TodoId,
   TranscriptEntry,
+  TurnCheckpoints,
   UnreadableCliExtensionFile,
   UsageLimit,
 } from "./protocol";
@@ -155,6 +159,10 @@ function describe(error: CommandError): string {
       return `The OS keychain failed: ${error.reason}`;
     case "repository_config":
       return `The repository's config is invalid: ${error.reason}`;
+    case "unknown_checkpoint":
+      return `Turn ${error.turn} has no checkpoint ${error.moment} it.`;
+    case "checkpoint":
+      return `Git failed on the chat's checkpoints: ${error.reason}`;
   }
 }
 
@@ -351,6 +359,33 @@ export async function setTodoDone(chat: ChatId, todo: TodoId, done: boolean): Pr
 export async function removeTodo(chat: ChatId, todo: TodoId): Promise<void> {
   const response = await execute({ type: "remove_todo", chat, todo });
   if (response.type !== "todo_removed") unexpected(response);
+}
+
+/** A chat's checkpoints per turn and what its branch is compared to. */
+export interface Checkpoints {
+  branchBase: string;
+  turns: TurnCheckpoints[];
+}
+
+export async function listCheckpoints(chat: ChatId): Promise<Checkpoints> {
+  const response = await execute({ type: "list_checkpoints", chat });
+  return response.type === "checkpoints"
+    ? { branchBase: response.branch_base, turns: response.turns }
+    : unexpected(response);
+}
+
+export async function readDiff(chat: ChatId, range: DiffRange): Promise<FileDiff[]> {
+  const response = await execute({ type: "read_diff", chat, range });
+  return response.type === "diff" ? response.files : unexpected(response);
+}
+
+export async function restoreCheckpoint(
+  chat: ChatId,
+  turn: number,
+  moment: CheckpointMoment,
+): Promise<void> {
+  const response = await execute({ type: "restore_checkpoint", chat, turn, moment });
+  if (response.type !== "checkpoint_restored") unexpected(response);
 }
 
 /** The CLI extensions each agent CLI loads from a repository. */

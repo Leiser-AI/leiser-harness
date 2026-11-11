@@ -30,7 +30,13 @@
 //! Each chat has a todo list, kept on disk like its transcript. Agent
 //! sessions get tools for it only where the repository's
 //! `.leiser/config.toml` switches agent access on.
+//!
+//! Before and after every turn the harness service captures a checkpoint
+//! of the chat's files as a commit under a hidden git ref. The diff panel
+//! reads a turn's changes and the branch's from them, and the developer
+//! can put the files back to any checkpoint.
 
+mod checkpoint;
 mod claude_code;
 mod cli_extensions;
 mod codex;
@@ -70,11 +76,12 @@ pub use local_interface::{
 pub use program::{ArgsError, SERVICE_LOG_FILE, ServiceProgram};
 pub use protocol::{
     AgentCli, AgentEvent, Answer, ApiKey, Branch, ChatId, ChatOverview, ChatStatus, CheckId,
-    Checkout, CliExtension, CliExtensionKind, Command, CommandError, Event, Finding,
-    InvalidCheckId, LoginAnswer, LoginOutcome, OptOuts, PermissionMode, Provider, Question,
-    QuestionOption, QueueReason, RepoCheck, RepoCheckReport, RepositoryId, RepositoryOverview,
-    RepositoryScript, Response, SignIn, SubscriptionId, SubscriptionKind, SubscriptionOverview,
-    SwitchedOffCheck, Todo, TodoId, TranscriptEntry, UnreadableCliExtensionFile, UsageLimit,
+    Checkout, CheckpointMoment, CliExtension, CliExtensionKind, Command, CommandError, DiffLine,
+    DiffRange, Event, FileChange, FileDiff, Finding, Hunk, InvalidCheckId, LoginAnswer,
+    LoginOutcome, OptOuts, Patch, PermissionMode, Provider, Question, QuestionOption, QueueReason,
+    RepoCheck, RepoCheckReport, RepositoryId, RepositoryOverview, RepositoryScript, Response,
+    SignIn, SubscriptionId, SubscriptionKind, SubscriptionOverview, SwitchedOffCheck, Todo, TodoId,
+    TranscriptEntry, TurnCheckpoints, UnreadableCliExtensionFile, UsageLimit,
 };
 pub use service::{Service, ServiceConfig, ServiceHandle, StartError, start};
 pub use store::StorageError;
