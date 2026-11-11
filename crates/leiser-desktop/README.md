@@ -17,8 +17,19 @@ When the service program is replaced, for example by `cargo build`, the
 service shows that an update waits, applies it once no turn runs and
 resumes every chat.
 
+A chat is always open. On start, and after a chat is marked done, the app
+shows a new chat in the most recently used repository. It starts on the
+harness service only with its first message, so an open app creates no
+chats or worktrees by itself. Until then the composer chooses where it
+starts (repository; new worktree or main checkout) and with what (agent
+CLI and subscription, permission mode), beginning with the defaults from
+the repository's `.leiser/config.toml`. While a service update waits, the
+running service may not know these settings yet: a new chat then starts
+with the repository's defaults, and its settings change once it has
+started.
+
 Chats start on the installed Claude Code; Codex is configured as a second
-agent CLI. The composer's subscription picker lists every agent CLI's
+agent CLI. The composer's agent CLI picker lists every agent CLI's
 default login and every subscription, grouped by provider. Choosing a
 subscription or default login of the other provider moves the chat to that
 agent CLI between turns, with a handoff. An app started from the Finder does not get the shell's `PATH`,

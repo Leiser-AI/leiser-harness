@@ -267,11 +267,20 @@ body {
   color: var(--color-text);
 }
 
-/* A short fact after a row's title, such as repo-check's findings. */
+/* A short fact after a row's title, such as repo-check's findings; it shortens before the title does. */
 .chat-note {
-  flex-shrink: 0;
+  flex: 0 1 auto;
+  min-width: 0;
+  margin-left: auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   color: var(--color-text-faint);
   font-size: var(--text-xs);
+}
+
+.repo-check-link .chat-title {
+  flex: none;
 }
 
 /* A chat's status as a mark: a spinner while it works, a dot while it waits for the developer. */
@@ -372,19 +381,6 @@ body {
   font-size: var(--text-sm);
 }
 
-/* A value that may be long, such as a commit author. */
-.top-bar-value.truncated {
-  max-width: 28ch;
-}
-
-/* A value that needs the developer's attention, such as an unbound host account. */
-.top-bar-value.warning {
-  padding: 0 4px;
-  border-radius: var(--radius-sm);
-  background: var(--color-warning-soft);
-  color: var(--color-warning);
-}
-
 /* A short result next to the buttons, such as the branch just pushed. */
 .top-bar-note {
   flex: none;
@@ -403,11 +399,6 @@ body {
 .top-bar-action[aria-pressed="true"] {
   background: var(--color-selected);
   color: var(--color-text);
-}
-
-/* A value that needs attention never shortens. */
-.top-bar-item:has(.warning) {
-  flex-shrink: 0;
 }
 
 /*
@@ -432,16 +423,7 @@ body {
   .top-bar-action {
     width: var(--control-height-sm);
     padding: 0;
-  }
-
-  /* A value that needs attention keeps its label. */
-  .top-bar-item:has(.warning) .top-bar-label {
-    position: static;
-    width: auto;
-    height: auto;
-    clip-path: none;
-  }
-}
+  }}
 
 /* ---- Main column ---- */
 
@@ -515,10 +497,9 @@ body {
 
 .entry.user .entry-text {
   max-width: 85%;
-  padding: var(--space-2) var(--space-3);
-  border-radius: var(--radius-lg);
+  padding: var(--space-2) var(--space-4);
+  border-radius: var(--radius-2xl);
   background: var(--color-surface-raised);
-  border: 1px solid var(--color-border);
 }
 
 /* The agent's messages: plain text, the main thing to read. */
@@ -860,6 +841,15 @@ body {
   background: var(--color-border);
 }
 
+/* While a turn runs: a quiet line at the end of the transcript. */
+.working {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--color-text-muted);
+  font-size: var(--text-md);
+}
+
 /* ---- New chat: the question above the composer ---- */
 
 .transcript > .new-chat {
@@ -908,7 +898,7 @@ body {
 .menu-button.new-chat-repository {
   display: inline;
   height: auto;
-  padding: 0 2px;
+  padding: 0;
   border-radius: var(--radius-sm);
   color: inherit;
   font-size: inherit;

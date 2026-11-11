@@ -339,6 +339,7 @@ async function readAndRender(): Promise<void> {
     overview,
     repositories.find((candidate) => candidate.repository === overview.repository) ?? null,
     subscriptions,
+    todos ?? [],
   );
   renderTodos(chat, todos);
   if (diffPanel.isOpen()) {
@@ -347,8 +348,16 @@ async function readAndRender(): Promise<void> {
   }
 }
 
+// Whether the developer opened or closed the todo list; until they do
+// (`null`), it shows for a chat that has todos.
+let todosOpen: boolean | null = null;
+
+function todosShown(todos: Todo[]): boolean {
+  return todosOpen ?? todos.length > 0;
+}
+
 function renderTodos(chat: ChatId | null, todos: Todo[] | null): void {
-  if (chat === null || todos === null) {
+  if (chat === null || todos === null || !todosShown(todos)) {
     todosPanel.hidden = true;
     return;
   }
@@ -400,6 +409,8 @@ const SCRIPT_NAMES: Record<RepositoryScript, string> = {
  * message.
  */
 async function openNewChat(repository: RepositoryId | null, checkout?: Checkout): Promise<void> {
+  // An open menu chooses for the chat that was on screen.
+  menu.close();
   if (leaveExtensions()) {
     newChat.open(repository, checkout);
     selected = { type: "new_chat" };
@@ -759,11 +770,12 @@ function renderChat(
   overview: ChatOverview,
   repository: RepositoryOverview | null,
   subscriptions: SubscriptionOverview[],
+  todos: Todo[],
 ): void {
   const chat = overview.chat;
   // The terminal panel's shell runs here.
   const checkout = overview.worktree ?? repository?.path;
-  renderTopBar(overview.title ?? "New chat", [], chatActions(overview, view, checkout));
+  renderTopBar(overview.title ?? "New chat", [], chatActions(overview, view, checkout, todos));
   const branch =
     view.place === "removed_worktree" && view.pullRequest !== null
       ? `${view.pullRequest.head} (removed)`
@@ -824,6 +836,12 @@ function renderChat(
   }
   const cleanup = cleanupCard(chat, view);
   if (cleanup !== null) entries.push(cleanup);
+  // A turn that waits for an answer shows its card instead.
+  if (view.status === "working" && view.openRequests.length === 0) {
+    const working = el("li", "working");
+    working.append(el("span", "chat-status working"), "Working…");
+    entries.push(working);
+  }
   if (entries.length === 0) {
     entries.push(el("li", "empty", "Send a message to start the agent."));
   }
@@ -1025,6 +1043,7 @@ function chatActions(
   overview: ChatOverview,
   view: ChatView,
   checkout: string | undefined,
+  todos: Todo[],
 ): HTMLElement[] {
   const actions: HTMLElement[] = [];
   const pullRequest = view.pullRequest;
@@ -1106,8 +1125,20 @@ function chatActions(
     );
     actions.push(sameWorktree);
   }
+  const open = todos.filter((todo) => !todo.done).length;
+  const toggleTodos = topBarAction("checklist", open === 0 ? "Todos" : `Todos · ${open}`, "ghost");
+  toggleTodos.title = "The chat's todo list, which you and the agent keep";
+  toggleTodos.setAttribute("aria-pressed", String(todosShown(todos)));
+  toggleTodos.addEventListener("click", () =>
+    act(async () => {
+      todosOpen = !todosShown(todos);
+      await refresh();
+    }),
+  );
+  actions.push(toggleTodos);
   if (overview.status === "waiting_for_you") {
-    const done = topBarAction("check", "Mark done");
+    const done = topBarAction("check", "Mark done", "ghost");
+    done.title = "Close the chat: it stays readable, and a new chat opens";
     done.addEventListener("click", () =>
       act(async () => {
         await service.markChatDone(overview.chat);

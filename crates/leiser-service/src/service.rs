@@ -900,6 +900,21 @@ impl State {
             | Command::SetTodoDone { .. }
             | Command::RemoveTodo { .. }) => self.execute_todo(command),
             Command::ReadServiceStatus => Ok(self.service_status()),
+            command @ (Command::ListCliExtensions { .. }
+            | Command::ReadCliExtensionFile { .. }
+            | Command::SaveCliExtensionFile { .. }) => self.execute_cli_extension(command).await,
+            Command::ListCheckpoints { chat } => self.list_checkpoints(chat).await,
+            Command::ReadDiff { chat, range } => self.read_diff(chat, range).await,
+            Command::RestoreCheckpoint { chat, turn, moment } => {
+                self.restore(chat, turn, moment).await
+            }
+        };
+        // The caller may have stopped waiting; nothing to do then.
+        let _ = reply.send(result);
+    }
+
+    async fn execute_cli_extension(&mut self, command: Command) -> Result<Response, CommandError> {
+        match command {
             Command::ListCliExtensions { repository } => self.list_cli_extensions(repository).await,
             Command::ReadCliExtensionFile { repository, file } => {
                 self.read_cli_extension_file(repository, file).await
@@ -913,14 +928,9 @@ impl State {
                 self.save_cli_extension_file(repository, file, text, previous)
                     .await
             }
-            Command::ListCheckpoints { chat } => self.list_checkpoints(chat).await,
-            Command::ReadDiff { chat, range } => self.read_diff(chat, range).await,
-            Command::RestoreCheckpoint { chat, turn, moment } => {
-                self.restore(chat, turn, moment).await
-            }
-        };
-        // The caller may have stopped waiting; nothing to do then.
-        let _ = reply.send(result);
+            // `execute` sends only the commands above here.
+            _ => Err(CommandError::ServiceStopped),
+        }
     }
 
     fn execute_todo(&mut self, command: Command) -> Result<Response, CommandError> {
