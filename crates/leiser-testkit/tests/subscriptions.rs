@@ -9,8 +9,8 @@ use std::time::Duration;
 
 use leiser_service::{
     AgentCli, AgentEvent, ApiKey, CLAUDE_CONFIG_DIR, CODEX_HOME, ChatId, Checkout, Command,
-    CommandError, Event, LoginAnswer, LoginOutcome, Provider, Response, ServiceHandle, SignIn,
-    SubscriptionId, SubscriptionKind, SubscriptionOverview,
+    CommandError, Event, LoginAnswer, LoginOutcome, Provider, RepoCheck, RepositoryId, Response,
+    ServiceHandle, SignIn, SubscriptionId, SubscriptionKind, SubscriptionOverview,
 };
 use leiser_testkit::{
     FAKE_LOGIN_FILE, FakeDriver, FakeLogin, Script, Step, TestRepo, TestService, UNSET,
@@ -206,6 +206,60 @@ fn report(variable: &str) -> Step {
 }
 
 /// Every file below `dir`, links not followed.
+/// A harness service whose `repo-check` plays `script` on the fake agent
+/// CLI.
+fn repo_check_service(script: &Script) -> TestResult<TestService> {
+    Ok(TestService::with_repo_check(
+        Path::new(FAKE_AGENT_CLI),
+        &Script::new(),
+        script,
+    )?)
+}
+
+/// Adds the repository, which runs `repo-check`, and returns its result.
+async fn checked(service: &ServiceHandle, repo: &TestRepo) -> TestResult<RepoCheck> {
+    let mut events = service.subscribe();
+    let Response::RepositoryAdded { repository } = service
+        .execute(Command::AddRepository {
+            path: repo.path().to_path_buf(),
+        })
+        .await?
+    else {
+        return Err("expected RepositoryAdded".into());
+    };
+    let finished = async {
+        loop {
+            if let Event::RepoCheckFinished { repository: from } = events.recv().await?
+                && from == repository
+            {
+                return Ok::<_, Box<dyn Error>>(());
+            }
+        }
+    };
+    tokio::time::timeout(LOGIN_TIMEOUT, finished)
+        .await
+        .map_err(|_| "repo-check did not finish in time")??;
+    read_check(service, repository).await
+}
+
+async fn read_check(service: &ServiceHandle, repository: RepositoryId) -> TestResult<RepoCheck> {
+    match service
+        .execute(Command::ReadRepoCheck { repository })
+        .await?
+    {
+        Response::RepoCheck { check } => Ok(check),
+        response => Err(format!("expected RepoCheck, got {response:?}").into()),
+    }
+}
+
+/// What the scripted `repo-check` answered, which is no report.
+fn answer(check: RepoCheck) -> TestResult<String> {
+    match check {
+        RepoCheck::Unreadable { output, .. } => Ok(output),
+        check => Err(format!("expected the answer as it came, got {check:?}").into()),
+    }
+}
+
 fn files(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
     let mut found = Vec::new();
     for entry in std::fs::read_dir(dir)? {
@@ -763,4 +817,54 @@ fn an_api_key_never_shows_in_debug_output() {
     };
 
     assert!(!format!("{command:?}").contains(API_KEY));
+}
+
+#[tokio::test]
+async fn repo_check_runs_on_the_repository_default_anthropic_subscription() -> TestResult {
+    let harness = repo_check_service(
+        &Script::new().turn([report(CLAUDE_CONFIG_DIR), report("ANTHROPIC_API_KEY")]),
+    )?;
+    let service = harness.connect();
+    add_signed_in(&service, Provider::Anthropic, "Private").await?;
+    let work = add(&service, Provider::Anthropic, "Work", api_key(API_KEY)).await?;
+    let repo = TestRepo::new()?;
+    set_defaults(&repo, "[subscriptions]\nanthropic = \"Work\"\n")?;
+
+    let output = answer(checked(&service, &repo).await?)?;
+
+    assert_eq!(
+        output,
+        format!("{}\n\n{API_KEY}", home(&service, work).await?.display())
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn repo_check_without_a_default_runs_on_the_agent_cli_default_login() -> TestResult {
+    let harness = repo_check_service(&Script::new().turn([report(CLAUDE_CONFIG_DIR)]))?;
+    let service = harness.connect();
+    add_signed_in(&service, Provider::Anthropic, "Work").await?;
+    let repo = TestRepo::new()?;
+
+    let output = answer(checked(&service, &repo).await?)?;
+
+    assert_eq!(output, UNSET);
+    Ok(())
+}
+
+#[tokio::test]
+async fn repo_check_on_a_default_that_names_no_subscription_fails() -> TestResult {
+    let harness = repo_check_service(&Script::new().turn([report(CLAUDE_CONFIG_DIR)]))?;
+    let service = harness.connect();
+    add_signed_in(&service, Provider::Anthropic, "Work").await?;
+    let repo = TestRepo::new()?;
+    set_defaults(&repo, "[subscriptions]\nanthropic = \"Gone\"\n")?;
+
+    let check = checked(&service, &repo).await?;
+
+    let RepoCheck::Failed { reason } = check else {
+        return Err(format!("expected Failed, got {check:?}").into());
+    };
+    assert!(reason.contains("\"Gone\""), "{reason}");
+    Ok(())
 }

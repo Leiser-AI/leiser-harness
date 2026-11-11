@@ -28,7 +28,7 @@ use crate::{
     Checkout, Command, CommandError, Driver, Event, Keychain, LoginAnswer, LoginOutcome,
     LoginProcess, OptOuts, OsKeychain, PermissionMode, Provider, QueueReason, RepoCheck,
     RepositoryId, RepositoryOverview, RepositoryScript, Response, SessionInput, SessionSpec,
-    SignIn, SubscriptionId, SubscriptionKind, TodoId, TranscriptEntry, script,
+    SignIn, SubscriptionAccess, SubscriptionId, SubscriptionKind, TodoId, TranscriptEntry, script,
 };
 
 /// Commands waiting for the command loop. Small, so callers feel back
@@ -868,26 +868,32 @@ impl State {
         if let Some(CheckState::Running) = self.repo_checks.get(&repository) {
             return Err(CommandError::RepoCheckRunning { repository });
         }
-        let spec = SessionSpec {
-            working_directory: path.clone(),
-            harness_mcp_url: None,
-            access: Access::ReadOnly,
-            // A read-only agent session asks nothing.
-            permission_mode: PermissionMode::Supervised,
-            // repo-check runs on the agent CLI's own default login.
-            subscription: None,
-        };
-        let session = match driver.start(spec) {
+        let path = path.clone();
+        let started = self
+            .repo_check_subscription(&path)
+            .and_then(|subscription| {
+                driver
+                    .start(SessionSpec {
+                        working_directory: path,
+                        harness_mcp_url: None,
+                        access: Access::ReadOnly,
+                        // A read-only agent session asks nothing.
+                        permission_mode: PermissionMode::Supervised,
+                        subscription,
+                    })
+                    .map_err(|error| CommandError::AgentCli {
+                        reason: error.to_string(),
+                    })
+            });
+        let session = match started {
             Ok(session) => session,
             Err(error) => {
-                let reason = error.to_string();
-                self.finish_repo_check(
-                    repository,
-                    Outcome::Failed {
-                        reason: reason.clone(),
-                    },
-                );
-                return Err(CommandError::AgentCli { reason });
+                let reason = match &error {
+                    CommandError::AgentCli { reason } => reason.clone(),
+                    error => error.to_string(),
+                };
+                self.finish_repo_check(repository, Outcome::Failed { reason });
+                return Err(error);
             }
         };
         self.repo_checks.insert(repository, CheckState::Running);
@@ -906,6 +912,31 @@ impl State {
             }
         });
         Ok(())
+    }
+
+    /// The subscription `repo-check` runs on: the repository's default
+    /// Anthropic subscription, as `repo-check` runs on Claude Code. Without
+    /// one, or when `.leiser/config.toml` cannot be read (the result says
+    /// so), it runs on the agent CLI's own default login. A default that
+    /// names no subscription fails instead of using another.
+    fn repo_check_subscription(
+        &self,
+        repository: &Path,
+    ) -> Result<Option<SubscriptionAccess>, CommandError> {
+        let Ok(config) = RepositoryConfig::load(repository) else {
+            return Ok(None);
+        };
+        let Some(name) = config.subscriptions.get(&Provider::Anthropic) else {
+            return Ok(None);
+        };
+        let subscription = self
+            .subscriptions
+            .named(Provider::Anthropic, name)
+            .ok_or_else(|| CommandError::UnknownSubscriptionName {
+                provider: Provider::Anthropic,
+                name: name.clone(),
+            })?;
+        Ok(Some(self.subscriptions.access(subscription)?))
     }
 
     fn finish_repo_check(&mut self, repository: RepositoryId, outcome: Outcome) {
