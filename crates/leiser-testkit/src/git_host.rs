@@ -12,9 +12,10 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use leiser_service::{
-    Check, CheckOutcome, EntityTags, GitHost, GitHostError, GitHostFuture, HostAccountAccess,
-    LoginOutcome, LoginProcess, Mergeable, NewPullRequest, OpenedPullRequest, PolledPullRequest,
-    PullRequestActivity, PullRequestState, ReviewComment,
+    CheckOutcome, CommentLocation, CommitId, GitHost, GitHostError, GitHostFuture,
+    HostAccountAccess, LoginOutcome, LoginProcess, Mergeable, NewPullRequest, OpenedPullRequest,
+    PollMemo, PolledPullRequest, PullRequestActivity, PullRequestCheck, PullRequestComment,
+    PullRequestState,
 };
 use serde::Deserialize;
 use tokio::sync::{mpsc, oneshot};
@@ -30,10 +31,11 @@ pub const FAKE_GIT_HOST_MERGED_FILE: &str = "fake-git-host-merged";
 /// pull requests, by number, which every poll adds: for trying auto-fix in
 /// the desktop app. For example
 /// `{"1": {"failed_checks": {"test": "assertion failed"}, "conflicting": false,
-/// "comments": [{"author": "reviewer", "body": "Rename it", "location": "src/lib.rs:3"}]}}`.
+/// "comments": [{"author": "reviewer", "body": "Rename it",
+/// "location": {"path": "src/lib.rs", "line": 3}}]}}`.
 /// A check listed there fails on every head commit.
 pub const FAKE_GIT_HOST_ACTIVITY_FILE: &str = "fake-git-host-activity.json";
-/// The request name the fake git host keeps its one entity tag under.
+/// The memo key the fake git host keeps its one entity tag under.
 const TAG: &str = "pull";
 /// The credential helper the fake git host gives bound repositories. A
 /// local remote never asks for credentials.
@@ -46,6 +48,7 @@ pub struct FakeGitHost {
     next_login: Arc<Mutex<Option<String>>>,
     pull_requests: Arc<Mutex<Vec<FakePullRequest>>>,
     activity: Arc<Mutex<BTreeMap<u64, Activity>>>,
+    polls_fail: Arc<Mutex<bool>>,
 }
 
 /// How the fake git host answered a poll.
@@ -62,9 +65,9 @@ pub enum FakePoll {
 #[derive(Debug, Default)]
 struct Activity {
     /// Check outcomes by head commit, then check name.
-    checks: BTreeMap<String, BTreeMap<String, FakeCheck>>,
+    checks: BTreeMap<CommitId, BTreeMap<String, FakeCheck>>,
     conflicting: bool,
-    comments: Vec<ReviewComment>,
+    comments: Vec<PullRequestComment>,
     polls: Vec<FakePoll>,
 }
 
@@ -88,7 +91,7 @@ struct ActivityFile {
 struct CommentFile {
     author: String,
     body: String,
-    location: Option<String>,
+    location: Option<CommentLocation>,
 }
 
 /// A pull request opened on the fake git host.
@@ -193,18 +196,33 @@ impl FakeGitHost {
         self.with_activity(number, |activity| activity.conflicting = conflicting);
     }
 
-    /// Posts a comment on pull request `number`, on `location` (such as
-    /// `src/lib.rs:3`) or on the whole pull request.
-    pub fn comment(&self, number: u64, author: &str, body: &str, location: Option<&str>) {
+    /// Posts a comment on pull request `number`, on `location` or on the
+    /// whole pull request.
+    pub fn comment(
+        &self,
+        number: u64,
+        author: &str,
+        body: &str,
+        location: Option<CommentLocation>,
+    ) {
         self.with_activity(number, |activity| {
             let id = format!("fake-comment-{}", activity.comments.len() + 1);
-            activity.comments.push(ReviewComment {
+            activity.comments.push(PullRequestComment {
                 id,
                 author: author.to_owned(),
                 body: body.to_owned(),
-                location: location.map(str::to_owned),
+                location,
             });
         });
+    }
+
+    /// Makes polls fail, as a git host that cannot be reached would, or
+    /// answer again.
+    pub fn fail_polls(&self, fail: bool) {
+        *self
+            .polls_fail
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = fail;
     }
 
     /// How the fake git host answered each poll of pull request `number`,
@@ -221,7 +239,7 @@ impl FakeGitHost {
 
     /// The commit pull request `number`'s branch points to on the remote.
     #[must_use]
-    pub fn head_commit(&self, number: u64) -> Option<String> {
+    pub fn head_commit(&self, number: u64) -> Option<CommitId> {
         let (remote, head) = self.pull_requests().into_iter().find_map(|pull_request| {
             (pull_request.number == number).then_some((pull_request.remote, pull_request.head))
         })?;
@@ -273,7 +291,7 @@ impl FakeGitHost {
                 .comments
                 .into_iter()
                 .enumerate()
-                .map(|(index, comment)| ReviewComment {
+                .map(|(index, comment)| PullRequestComment {
                     id: format!("fake-file-comment-{}", index + 1),
                     author: comment.author,
                     body: comment.body,
@@ -285,7 +303,7 @@ impl FakeGitHost {
             state: pull_request.state,
             checks: checks
                 .into_iter()
-                .map(|(name, check)| Check {
+                .map(|(name, check)| PullRequestCheck {
                     id: format!("{head_commit}-{name}"),
                     outcome: match check {
                         FakeCheck::Pending => CheckOutcome::Pending,
@@ -452,6 +470,15 @@ impl GitHost for FakeGitHost {
         last: Option<&'a PolledPullRequest>,
     ) -> GitHostFuture<'a, Result<PolledPullRequest, GitHostError>> {
         Box::pin(async move {
+            if *self
+                .polls_fail
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+            {
+                return Err(GitHostError::Refused {
+                    reason: "the fake git host cannot be reached".to_owned(),
+                });
+            }
             // Sets the state the merged file asks for.
             self.pull_request_state(access, remote, number).await?;
             let pull_request = self
@@ -465,7 +492,7 @@ impl GitHost for FakeGitHost {
             let mut hasher = DefaultHasher::new();
             format!("{activity:?}").hash(&mut hasher);
             let tag = format!("\"{:x}\"", hasher.finish());
-            let unchanged = last.filter(|last| last.tags.get(TAG) == Some(tag.as_str()));
+            let unchanged = last.filter(|last| last.memo.get(TAG) == Some(tag.as_str()));
             self.with_activity(number, |known| {
                 known.polls.push(if unchanged.is_some() {
                     FakePoll::NotModified
@@ -476,15 +503,15 @@ impl GitHost for FakeGitHost {
             if let Some(last) = unchanged {
                 return Ok(last.clone());
             }
-            let mut tags = EntityTags::default();
-            tags.insert(TAG, &tag);
-            Ok(PolledPullRequest { activity, tags })
+            let mut memo = PollMemo::default();
+            memo.insert(TAG, &tag);
+            Ok(PolledPullRequest { activity, memo })
         })
     }
 }
 
 /// The commit `branch` points to on `remote`.
-async fn remote_commit(remote: &str, branch: &str) -> Result<String, GitHostError> {
+async fn remote_commit(remote: &str, branch: &str) -> Result<CommitId, GitHostError> {
     let output = tokio::process::Command::new("git")
         .args(["ls-remote", remote, &format!("refs/heads/{branch}")])
         .output()
@@ -499,6 +526,6 @@ async fn remote_commit(remote: &str, branch: &str) -> Result<String, GitHostErro
 }
 
 /// The commit of the first line of `git ls-remote`'s output.
-fn commit_of(ls_remote: &str) -> Option<String> {
-    ls_remote.split_whitespace().next().map(str::to_owned)
+fn commit_of(ls_remote: &str) -> Option<CommitId> {
+    ls_remote.split_whitespace().next().map(CommitId::new)
 }

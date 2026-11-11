@@ -949,17 +949,19 @@ pub enum AutoFix {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AutoFixStop {
-    /// `attempts` attempts in a row left the pull request's head commit
-    /// as it was.
+    /// `attempts` attempts in a row at failing checks or a conflict left
+    /// the pull request's head commit as it was.
     NoProgress { attempts: u32 },
-    /// The check failed again after an attempt to fix it, without passing
-    /// in between.
+    /// The check failed again on the commit auto-fix pushed to fix it.
     CheckFailedAgain { name: String },
-    /// The branch conflicts with the same base commit again after an
-    /// attempt to resolve it.
+    /// The branch conflicts with the same base commit again on the commit
+    /// auto-fix pushed to resolve it.
     ConflictAgain,
     /// The harness could not push the agent's fix.
     PushFailed { reason: String },
+    /// The git host could not be asked about the pull request, several
+    /// times in a row.
+    PollFailed { reason: String },
 }
 
 /// What woke a chat's agent to fix its pull request.
@@ -974,14 +976,48 @@ pub enum AutoFixTrigger {
     },
     /// The branch conflicts with the base branch.
     Conflict { base: String },
-    /// A review comment, a review with text, or a comment on the pull
-    /// request.
+    /// A review comment, a review that is not an approval, or a comment on
+    /// the pull request.
     Comment {
         author: String,
         body: String,
-        /// The file and line it is on, such as `src/lib.rs:12`.
-        location: Option<String>,
+        /// The file and line it is on; `None` for the whole pull request.
+        location: Option<CommentLocation>,
     },
+}
+
+impl std::fmt::Display for AutoFixTrigger {
+    /// One line on what happened, such as "The check `test` failed.".
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::CheckFailed { name, .. } => write!(f, "The check `{name}` failed."),
+            Self::Conflict { base } => write!(f, "The branch conflicts with `{base}`."),
+            Self::Comment {
+                author,
+                body,
+                location: Some(location),
+            } => write!(f, "{author} on {location}: {body}"),
+            Self::Comment { author, body, .. } => write!(f, "{author}: {body}"),
+        }
+    }
+}
+
+/// Where in a pull request's files a comment is.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommentLocation {
+    pub path: String,
+    /// `None` for a comment on the whole file.
+    pub line: Option<u64>,
+}
+
+impl std::fmt::Display for CommentLocation {
+    /// `path:line`, or the path alone.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.line {
+            Some(line) => write!(f, "{}:{line}", self.path),
+            None => f.write_str(&self.path),
+        }
+    }
 }
 
 /// What is checked out in a working directory.

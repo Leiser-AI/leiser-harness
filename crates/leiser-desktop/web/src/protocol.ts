@@ -351,12 +351,19 @@ export type AutoFixStop =
   | { type: "no_progress"; attempts: number }
   | { type: "check_failed_again"; name: string }
   | { type: "conflict_again" }
-  | { type: "push_failed"; reason: string };
+  | { type: "push_failed"; reason: string }
+  | { type: "poll_failed"; reason: string };
 
 export type AutoFixTrigger =
   | { type: "check_failed"; name: string; url: string }
   | { type: "conflict"; base: string }
-  | { type: "comment"; author: string; body: string; location: string | null };
+  | { type: "comment"; author: string; body: string; location: CommentLocation | null };
+
+/** Where in a pull request's files a comment is. */
+export interface CommentLocation {
+  path: string;
+  line: number | null;
+}
 
 export interface ChatOverview {
   chat: ChatId;

@@ -39,7 +39,7 @@ use crate::{
     RepositoryScript, Response, SessionInput, SessionSpec, SignIn, SubscriptionAccess,
     SubscriptionId, SubscriptionKind, TodoId, TranscriptEntry, TurnCheckpoints, UsageLimit, script,
 };
-use auto_fix::{AutoFixWatch, AutoFixWork};
+use auto_fix::{AutoFixWork, ChatAutoFix};
 use pull_requests::{ChatPullRequest, PullRequestWork};
 
 /// Commands waiting for the command loop. Small, so callers feel back
@@ -76,7 +76,7 @@ pub struct ServiceConfig {
     /// `None` is the developer's installed `gh`.
     git_host: Option<Arc<dyn GitHost>>,
     /// How often auto-fix polls an open pull request.
-    poll_interval: Duration,
+    pull_request_poll_interval: Duration,
 }
 
 impl ServiceConfig {
@@ -100,7 +100,7 @@ impl ServiceConfig {
             codex_home: default_codex_home(),
             repo_check: None,
             git_host: None,
-            poll_interval: auto_fix::POLL_INTERVAL,
+            pull_request_poll_interval: auto_fix::POLL_INTERVAL,
         }
     }
 
@@ -108,7 +108,7 @@ impl ServiceConfig {
     /// every 30 seconds.
     #[must_use]
     pub fn with_pull_request_poll_interval(mut self, interval: Duration) -> Self {
-        self.poll_interval = interval;
+        self.pull_request_poll_interval = interval;
         self
     }
 
@@ -335,7 +335,7 @@ struct Chat {
     held: VecDeque<String>,
     /// The chat's pull request, once the developer has asked for one.
     pull_request: Option<ChatPullRequest>,
-    auto_fix: AutoFixWatch,
+    auto_fix: ChatAutoFix,
 }
 
 /// A usage limit an agent session reported.
@@ -675,7 +675,7 @@ struct State {
     logins: BTreeMap<SubscriptionId, Login>,
     git_host: Arc<dyn GitHost>,
     /// How often auto-fix polls an open pull request.
-    poll_interval: Duration,
+    pull_request_poll_interval: Duration,
     host_accounts: HostAccounts,
     host_account_logins: BTreeMap<HostAccountId, Login>,
     next_id: u64,
@@ -740,7 +740,7 @@ impl State {
             git_host: config
                 .git_host
                 .unwrap_or_else(|| Arc::new(GhGitHost::installed())),
-            poll_interval: config.poll_interval,
+            pull_request_poll_interval: config.pull_request_poll_interval,
             host_accounts,
             host_account_logins: BTreeMap::new(),
             next_id: stored.next_id,
@@ -776,7 +776,7 @@ impl State {
         mut updates: mpsc::Receiver<()>,
         mut stopped: oneshot::Receiver<()>,
     ) {
-        let mut polls = tokio::time::interval(self.poll_interval);
+        let mut polls = tokio::time::interval(self.pull_request_poll_interval);
         polls.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tokio::select! {
@@ -1221,7 +1221,7 @@ impl State {
             usage_limit: None,
             held: VecDeque::new(),
             pull_request: None,
-            auto_fix: AutoFixWatch::new(),
+            auto_fix: ChatAutoFix::new(),
         };
         self.chats.insert(chat, new);
         if let Err(error) = self.save() {
@@ -1879,7 +1879,7 @@ impl State {
                 .and_then(ChatPullRequest::opened)
                 .cloned()
                 .map(Box::new),
-            auto_fix: chat.auto_fix.setting.clone(),
+            auto_fix: chat.auto_fix.setting().clone(),
             transcript,
         })
     }
@@ -3581,7 +3581,7 @@ fn stored_chat(store: &Store, chat: ChatV3) -> Result<(ChatId, Chat), StorageErr
                 (false, _) => Place::MainCheckout,
             },
             pull_request: chat.pull_request.map(pull_requests::restored),
-            auto_fix: AutoFixWatch::restored(chat.auto_fix),
+            auto_fix: ChatAutoFix::restored(chat.auto_fix),
             done: chat.done,
             // A setup cut short by a restart is not run again.
             setup: Setup::Done,

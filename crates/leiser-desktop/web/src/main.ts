@@ -832,6 +832,8 @@ function autoFixStopText(reason: AutoFixStop): string {
       return "The branch conflicts with the base branch again after the agent merged it.";
     case "push_failed":
       return `The fix could not be pushed: ${reason.reason}`;
+    case "poll_failed":
+      return `The git host could not be asked about the pull request: ${reason.reason}`;
   }
 }
 
@@ -841,8 +843,12 @@ function autoFixTriggerText(trigger: AutoFixTrigger): string {
       return `The check ${trigger.name} failed.`;
     case "conflict":
       return `The branch conflicts with ${trigger.base}.`;
-    case "comment":
-      return `${trigger.author}${trigger.location === null ? "" : ` on ${trigger.location}`}: ${trigger.body}`;
+    case "comment": {
+      const location = trigger.location;
+      const place =
+        location === null ? "" : ` on ${location.path}${location.line === null ? "" : `:${location.line}`}`;
+      return `${trigger.author}${place}: ${trigger.body}`;
+    }
   }
 }
 

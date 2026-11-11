@@ -14,6 +14,10 @@ workspace = true
 name = "fake-agent-cli"
 path = "src/bin/fake-agent-cli.rs"
 
+[[bin]]
+name = "fake-gh"
+path = "src/bin/fake-gh.rs"
+
 [dependencies]
 leiser-service = { version = "0.1.0", path = "../leiser-service" }
 serde = { version = "1.0.229", features = ["derive"] }

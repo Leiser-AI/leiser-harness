@@ -11,7 +11,7 @@
 //!
 //! While auto-fix watches a chat's open pull request, the harness service
 //! polls it ([`GitHost::poll_pull_request`]) with the entity tags of the
-//! last answer, so an unchanged pull request costs only `304 Not
+//! last answers, so an unchanged pull request costs only `304 Not
 //! Modified` answers, which do not count against the git host's rate limit.
 //!
 //! [`GhGitHost`] is the GitHub CLI. Tests use the testkit's fake git host.
@@ -24,7 +24,9 @@ use std::pin::Pin;
 use tokio::process::Command;
 
 use crate::installed::{self, Environment, Program};
-use crate::{LoginProcess, PullRequestState};
+use serde::{Deserialize, Serialize};
+
+use crate::{CommentLocation, LoginProcess, PullRequestState};
 
 mod github_poll;
 
@@ -63,20 +65,44 @@ pub struct OpenedPullRequest {
     pub url: String,
 }
 
-/// An open pull request as one poll of the git host found it.
+/// A pull request as one poll of the git host found it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PullRequestActivity {
     pub state: PullRequestState,
     /// The commit the pull request's head branch points to.
-    pub head_commit: String,
+    pub head_commit: CommitId,
     /// The commit its base branch points to.
-    pub base_commit: String,
+    pub base_commit: CommitId,
     pub mergeable: Mergeable,
-    /// The checks on `head_commit`.
-    pub checks: Vec<Check>,
-    /// Review comments, reviews with text and comments on the pull
-    /// request, by people, not bots.
-    pub comments: Vec<ReviewComment>,
+    /// The checks and commit statuses on `head_commit`.
+    pub checks: Vec<PullRequestCheck>,
+    /// Comments of people who can write to the repository, not of bots
+    /// or others: review comments, reviews that are not approvals, and
+    /// comments on the pull request.
+    pub comments: Vec<PullRequestComment>,
+}
+
+/// A commit's id, as git and the git host name it.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct CommitId(String);
+
+impl CommitId {
+    #[must_use]
+    pub fn new(id: impl Into<String>) -> Self {
+        Self(id.into())
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for CommitId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
 }
 
 /// Whether a pull request can be merged into its base branch.
@@ -89,9 +115,10 @@ pub enum Mergeable {
     Conflicting,
 }
 
-/// A check, such as a CI job, on a pull request's head commit.
+/// A check, such as a CI job, or a commit status on a pull request's head
+/// commit.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Check {
+pub struct PullRequestCheck {
     /// The git host's id of the check, unique in the repository.
     pub id: String,
     pub name: String,
@@ -116,41 +143,41 @@ pub enum CheckOutcome {
 
 /// A comment on a pull request.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReviewComment {
+pub struct PullRequestComment {
     /// The git host's id of the comment, unique in the repository.
     pub id: String,
     pub author: String,
     pub body: String,
-    /// The file and line it is on, such as `src/lib.rs:12`; `None` for a
-    /// comment on the whole pull request.
-    pub location: Option<String>,
+    /// `None` for a comment on the whole pull request.
+    pub location: Option<CommentLocation>,
 }
 
-/// The entity tags (`ETag`) of the git host's answers to one poll, by
-/// request. Only the git host reads them; the harness service passes them
-/// back on the next poll.
+/// What the git host keeps from one poll for the next, such as the entity
+/// tags (`ETag`) of its answers, by request. Only the git host reads it;
+/// the harness service passes it back on the next poll.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct EntityTags(BTreeMap<String, String>);
+pub struct PollMemo(BTreeMap<String, String>);
 
-impl EntityTags {
-    /// The tag of the answer to `request`, if it had one.
+impl PollMemo {
+    /// What was kept under `key`, such as the tag of the answer to a
+    /// request.
     #[must_use]
-    pub fn get(&self, request: &str) -> Option<&str> {
-        self.0.get(request).map(String::as_str)
+    pub fn get(&self, key: &str) -> Option<&str> {
+        self.0.get(key).map(String::as_str)
     }
 
-    /// Keeps `tag` as the tag of the answer to `request`.
-    pub fn insert(&mut self, request: &str, tag: &str) {
-        self.0.insert(request.to_owned(), tag.to_owned());
+    /// Keeps `value` under `key` for the next poll.
+    pub fn insert(&mut self, key: &str, value: &str) {
+        self.0.insert(key.to_owned(), value.to_owned());
     }
 }
 
-/// A pull request as one poll found it, with the tags its next poll
-/// sends back.
+/// A pull request as one poll found it, with what its next poll gets
+/// back.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PolledPullRequest {
     pub activity: PullRequestActivity,
-    pub tags: EntityTags,
+    pub memo: PollMemo,
 }
 
 /// Why the git host could not do what the harness service asked.
@@ -226,8 +253,8 @@ pub trait GitHost: Send + Sync + std::fmt::Debug {
     /// Polls pull request `number` in the repository at `remote`: its
     /// state, head and base commits, whether it conflicts, its checks and
     /// its comments. `last` is the previous poll's answer; what has not
-    /// changed since is taken from it, after a conditional request with its
-    /// entity tags.
+    /// changed since is taken from it, after conditional requests with the
+    /// entity tags in its memo.
     fn poll_pull_request<'a>(
         &'a self,
         access: &'a HostAccountAccess,
@@ -245,6 +272,14 @@ pub struct GhGitHost {
 }
 
 impl GhGitHost {
+    /// The `gh` at `program`, a path or a name looked up on `PATH`.
+    #[must_use]
+    pub fn new(program: impl Into<PathBuf>) -> Self {
+        Self {
+            program: Program::Given(program.into()),
+        }
+    }
+
     /// The developer's installed `gh`.
     #[must_use]
     pub fn installed() -> Self {
@@ -277,6 +312,31 @@ impl GhGitHost {
         Ok(command)
     }
 
+    /// Runs `gh api` for `repos/<repository><path>` with `args` before
+    /// the path, and returns its output whatever its exit status.
+    async fn run_api(
+        &self,
+        access: &HostAccountAccess,
+        repository: &str,
+        path: &str,
+        args: &[String],
+    ) -> Result<std::process::Output, GitHostError> {
+        let mut command = self.command(access)?;
+        command
+            .args(["api", "--hostname", &access.git_host])
+            .args(args)
+            .arg(format!("repos/{repository}{path}"))
+            .stdin(std::process::Stdio::null())
+            .kill_on_drop(true);
+        command
+            .output()
+            .await
+            .map_err(|source| GitHostError::Spawn {
+                program: "gh".to_owned(),
+                source,
+            })
+    }
+
     /// Runs `gh api` against the repository at `remote` and returns its
     /// standard output.
     async fn api(
@@ -287,29 +347,25 @@ impl GhGitHost {
         args: &[String],
     ) -> Result<String, GitHostError> {
         let repository = https_repository(remote, &access.git_host)?;
-        let mut command = self.command(access)?;
-        command
-            .args(["api", "--hostname", &access.git_host])
-            .arg(format!("repos/{repository}{path}"))
-            .args(args)
-            .stdin(std::process::Stdio::null())
-            .kill_on_drop(true);
-        let output = command
-            .output()
-            .await
-            .map_err(|source| GitHostError::Spawn {
-                program: "gh".to_owned(),
-                source,
-            })?;
+        let output = self.run_api(access, &repository, path, args).await?;
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-            return Err(GitHostError::Refused {
-                reason: if stderr.is_empty() { stdout } else { stderr },
-            });
+            return Err(refused(&output, ""));
         }
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
     }
+}
+
+/// Why `gh` failed: its standard error, else `fallback`, else its output.
+fn refused(output: &std::process::Output, fallback: &str) -> GitHostError {
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+    let reason = if !stderr.is_empty() {
+        stderr
+    } else if !fallback.is_empty() {
+        fallback.to_owned()
+    } else {
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    };
+    GitHostError::Refused { reason }
 }
 
 impl GitHost for GhGitHost {

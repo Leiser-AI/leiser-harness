@@ -36,6 +36,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::git_host::CommitId;
 use crate::repo_check::Outcome;
 use crate::{
     AgentCli, AgentEvent, AutoFix, PermissionMode, Provider, PullRequestState, SubscriptionKind,
@@ -196,12 +197,11 @@ pub(crate) struct AutoFixV3 {
     /// The ids of the comments it has handled; `None` takes the next
     /// poll's comments as handled.
     pub seen_comments: Option<Vec<String>>,
-    /// Per check an attempt tried to fix, the head commit then.
-    pub attempted_checks: BTreeMap<String, String>,
-    pub attempted_conflict: Option<ConflictV3>,
+    /// The checks attempts tried to fix, by name.
+    pub checks: BTreeMap<String, TriedV3>,
+    pub conflict: Option<ConflictV3>,
     pub attempts: Option<AttemptsV3>,
-    /// The head commit before the last pushed fix.
-    pub pushed_over: Option<String>,
+    pub awaiting_push: Option<AwaitingPushV3>,
 }
 
 impl Default for AutoFixV3 {
@@ -209,26 +209,41 @@ impl Default for AutoFixV3 {
         Self {
             setting: AutoFix::On,
             seen_comments: None,
-            attempted_checks: BTreeMap::new(),
-            attempted_conflict: None,
+            checks: BTreeMap::new(),
+            conflict: None,
             attempts: None,
-            pushed_over: None,
+            awaiting_push: None,
         }
     }
 }
 
-/// A conflict an attempt tried to resolve: the base and head commits then.
+/// An attempt at a problem: the head commit it was tried on, and the
+/// commit auto-fix pushed with the fix.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct TriedV3 {
+    pub on: CommitId,
+    pub fixed_in: Option<CommitId>,
+}
+
+/// A conflict with base commit `base` an attempt tried to resolve.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ConflictV3 {
-    pub base: String,
-    pub head: String,
+    pub base: CommitId,
+    pub tried: TriedV3,
 }
 
 /// How many attempts auto-fix made on one head commit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct AttemptsV3 {
-    pub head: String,
+    pub head: CommitId,
     pub count: u32,
+}
+
+/// A pushed fix the git host had not reported yet.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct AwaitingPushV3 {
+    pub head_before: CommitId,
+    pub polls: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

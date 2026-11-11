@@ -127,24 +127,8 @@ impl Quoted<'_> {
             Entry::AutoFix(triggers) => {
                 let mut text = format!("## {number}. Auto-fix woke the agent\n");
                 for trigger in triggers {
-                    let line = match trigger {
-                        AutoFixTrigger::CheckFailed { name, .. } => {
-                            format!("- The check `{name}` failed.")
-                        }
-                        AutoFixTrigger::Conflict { base } => {
-                            format!("- The branch conflicts with `{base}`.")
-                        }
-                        AutoFixTrigger::Comment {
-                            author,
-                            body,
-                            location,
-                        } => match location {
-                            Some(location) => format!("- {author} on {location}: {body}"),
-                            None => format!("- {author}: {body}"),
-                        },
-                    };
-                    text.push_str(&line);
-                    text.push('\n');
+                    // Writing to a `String` cannot fail.
+                    let _ = writeln!(text, "- {trigger}");
                 }
                 text.push('\n');
                 text

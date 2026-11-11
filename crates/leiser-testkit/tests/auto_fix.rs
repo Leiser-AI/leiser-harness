@@ -12,9 +12,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use leiser_service::{
-    AutoFix, AutoFixStop, AutoFixTrigger, ChatId, Checkout, Command, CommitAuthor, Event,
-    HostAccountId, LoginOutcome, PullRequest, PullRequestState, RepositoryId, Response,
-    ServiceHandle, TranscriptEntry,
+    AutoFix, AutoFixStop, AutoFixTrigger, ChatId, Checkout, Command, CommentLocation, CommitAuthor,
+    CommitId, Event, HostAccountId, LoginOutcome, PullRequest, PullRequestState, RepositoryId,
+    Response, ServiceHandle, TranscriptEntry,
 };
 use leiser_testkit::{
     DEFAULT_BRANCH, FakePoll, Gate, Script, Step, TestRepo, TestService, collect_turn,
@@ -326,7 +326,10 @@ async fn a_failing_check_wakes_the_agent_with_its_log_and_the_harness_pushes_the
         "{note}"
     );
     assert!(note.contains(&opened.pull_request.head), "{note}");
-    assert_eq!(opened.harness.git_host().head_commit(number), Some(pushed));
+    assert_eq!(
+        opened.harness.git_host().head_commit(number),
+        Some(CommitId::new(pushed))
+    );
     let (auto_fix, _, transcript) = read_chat(&opened.service, opened.chat).await?;
     assert_eq!(auto_fix, AutoFix::On);
     assert!(
@@ -371,7 +374,10 @@ async fn a_review_comment_wakes_the_agent_with_the_comment() -> TestResult {
         opened.pull_request.number,
         "reviewer",
         "Say hello to the world.",
-        Some("greeting.txt:1"),
+        Some(CommentLocation {
+            path: "greeting.txt".to_owned(),
+            line: Some(1),
+        }),
     );
     let triggers = next_fix(&mut events, opened.chat).await?;
     collect_turn(&mut events, opened.chat).await?;
@@ -382,7 +388,10 @@ async fn a_review_comment_wakes_the_agent_with_the_comment() -> TestResult {
         vec![AutoFixTrigger::Comment {
             author: "reviewer".to_owned(),
             body: "Say hello to the world.".to_owned(),
-            location: Some("greeting.txt:1".to_owned()),
+            location: Some(CommentLocation {
+                path: "greeting.txt".to_owned(),
+                line: Some(1),
+            }),
         }]
     );
     let note = fix_note(&opened).await?;
@@ -677,6 +686,8 @@ async fn auto_fix_keeps_its_setting_and_its_attempts_across_a_restart() -> TestR
     next_fix(&mut events, opened.chat).await?;
     collect_turn(&mut events, opened.chat).await?;
     wait_for_push(&opened).await?;
+    // The service records the push once it hears back from it.
+    quiet_period(&mut events, opened.chat).await;
     let Opened {
         harness,
         repo: _repo,
@@ -711,5 +722,170 @@ async fn auto_fix_keeps_its_setting_and_its_attempts_across_a_restart() -> TestR
         }
     );
     assert_eq!(read_chat(&harness.connect(), chat).await?.0, AutoFix::Off);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_check_that_fails_after_the_developer_s_own_push_is_attempted_again() -> TestResult {
+    let script = first_commit()
+        .turn([
+            Step::WriteUserMessageToFile {
+                path: PathBuf::from(FIX_NOTE),
+            },
+            Step::Commit {
+                message: "Fix 1".to_owned(),
+            },
+        ])
+        .turn([
+            Step::WriteFile {
+                path: PathBuf::from("more.txt"),
+                contents: "more\n".to_owned(),
+            },
+            Step::Commit {
+                message: "More".to_owned(),
+            },
+        ])
+        .turn([
+            Step::WriteUserMessageToFile {
+                path: PathBuf::from(FIX_NOTE),
+            },
+            Step::Commit {
+                message: "Fix 2".to_owned(),
+            },
+        ]);
+    let opened = opened(&script).await?;
+    let number = opened.pull_request.number;
+    let mut events = opened.service.subscribe();
+    opened
+        .harness
+        .git_host()
+        .fail_check(number, "test", "first failure");
+    next_fix(&mut events, opened.chat).await?;
+    collect_turn(&mut events, opened.chat).await?;
+    wait_for_push(&opened).await?;
+    opened
+        .service
+        .execute(Command::SetAutoFix {
+            chat: opened.chat,
+            on: false,
+        })
+        .await?;
+    opened
+        .service
+        .execute(Command::SendMessage {
+            chat: opened.chat,
+            text: "add more".to_owned(),
+        })
+        .await?;
+    collect_turn(&mut events, opened.chat).await?;
+    opened
+        .service
+        .execute(Command::Push { chat: opened.chat })
+        .await?;
+    set_auto_fix(&opened.service, opened.chat, true).await?;
+
+    opened
+        .harness
+        .git_host()
+        .fail_check(number, "test", "failure on the developer's commit");
+    let triggers = next_fix(&mut events, opened.chat).await?;
+
+    assert!(
+        matches!(&triggers[..], [AutoFixTrigger::CheckFailed { name, .. }] if name == "test"),
+        "{triggers:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn comments_that_need_no_commit_do_not_use_up_the_attempts() -> TestResult {
+    let answering = (0..6).fold(first_commit(), |script, _| {
+        script.turn([Step::message("No change needed: it is right as it is.")])
+    });
+    let opened = opened(&answering).await?;
+    let mut events = opened.service.subscribe();
+
+    for number in 1..=4 {
+        opened.harness.git_host().comment(
+            opened.pull_request.number,
+            "reviewer",
+            &format!("Question {number}?"),
+            None,
+        );
+        next_fix(&mut events, opened.chat).await?;
+        collect_turn(&mut events, opened.chat).await?;
+    }
+
+    assert_eq!(
+        read_chat(&opened.service, opened.chat).await?.0,
+        AutoFix::On
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_git_host_that_cannot_be_reached_stops_auto_fix_after_several_polls() -> TestResult {
+    let opened = opened(&fixing()).await?;
+    let mut events = opened.service.subscribe();
+
+    opened.harness.git_host().fail_polls(true);
+    let stopped = wait_for(&mut events, |event| match event {
+        Event::AutoFixChanged { chat, auto_fix } if *chat == opened.chat => Some(auto_fix.clone()),
+        _ => None,
+    })
+    .await?;
+
+    assert!(
+        matches!(
+            &stopped,
+            AutoFix::Stopped {
+                reason: AutoFixStop::PollFailed { reason }
+            } if reason.contains("cannot be reached")
+        ),
+        "{stopped:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_pull_request_merged_during_the_fix_is_not_pushed_to() -> TestResult {
+    let gate = Gate::new()?;
+    let script = first_commit().turn([
+        gate.step(),
+        Step::WriteFile {
+            path: PathBuf::from("greeting.txt"),
+            contents: "hello, world\n".to_owned(),
+        },
+        Step::Commit {
+            message: "Fix it".to_owned(),
+        },
+    ]);
+    let opened = opened(&script).await?;
+    let number = opened.pull_request.number;
+    let before = opened.harness.git_host().head_commit(number);
+    let mut events = opened.service.subscribe();
+    opened
+        .harness
+        .git_host()
+        .fail_check(number, "test", "it fails");
+    next_fix(&mut events, opened.chat).await?;
+
+    opened.harness.git_host().merge(number);
+    gate.open()?;
+    collect_turn(&mut events, opened.chat).await?;
+    let state = wait_for(&mut events, |event| match event {
+        Event::PullRequestChanged { chat, pull_request } if *chat == opened.chat => {
+            Some(pull_request.state)
+        }
+        _ => None,
+    })
+    .await?;
+
+    assert_eq!(state, PullRequestState::Merged);
+    assert_eq!(opened.harness.git_host().head_commit(number), before);
+    assert_eq!(
+        read_chat(&opened.service, opened.chat).await?.0,
+        AutoFix::On
+    );
     Ok(())
 }

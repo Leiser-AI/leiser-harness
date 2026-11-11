@@ -6,6 +6,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   AgentCli,
   Answer,
+  AutoFix,
   Branch,
   ChatId,
   Checkout,
@@ -25,7 +26,6 @@ import type {
   PermissionMode,
   Provider,
   PullRequest,
-  AutoFix,
   QueueReason,
   RepoCheck,
   RepositoryId,
