@@ -42,6 +42,8 @@ export type Command =
   | { type: "log_in"; subscription: SubscriptionId }
   | { type: "answer_login"; subscription: SubscriptionId; answer: string }
   | { type: "list_subscriptions" }
+  | { type: "set_interchangeable"; subscription: SubscriptionId; interchangeable: boolean }
+  | { type: "continue_on_subscription"; chat: ChatId; subscription: SubscriptionId | null }
   | {
       type: "change_subscription";
       chat: ChatId;
@@ -100,6 +102,7 @@ export type Response =
       subscription: SubscriptionId | null;
       host_account: HostAccountBinding;
       commit_author: CommitAuthor | null;
+      usage_limit: UsageLimit | null;
       transcript: TranscriptEntry[];
     }
   | { type: "subscription_added"; subscription: SubscriptionId }
@@ -114,6 +117,8 @@ export type Response =
   | { type: "host_account_login_started" }
   | { type: "host_accounts"; host_accounts: HostAccountOverview[] }
   | { type: "pushed"; branch: string }
+  | { type: "interchangeable_set" }
+  | { type: "continued_on_subscription" }
   | { type: "repo_check_started" }
   | { type: "repo_check"; check: RepoCheck }
   | { type: "service_status"; version: string; update_waiting: boolean }
@@ -170,6 +175,7 @@ export type CommandError =
   | { type: "cli_extension_file_changed"; file: string }
   | { type: "invalid_cli_extension_file"; file: string; reason: string }
   | { type: "cli_extension_file_access"; file: string; reason: string }
+  | { type: "no_usage_limit"; chat: ChatId }
   | { type: "service_stopped" };
 
 /** A rule of `repo-check`, such as `D3`. */
@@ -239,6 +245,16 @@ export interface SubscriptionOverview {
   kind: SubscriptionKind;
   home: string;
   logging_in: boolean;
+  /** Chats may move to and from it by themselves at a usage limit. */
+  interchangeable: boolean;
+}
+
+/** The usage limit a chat's last turn stopped at. */
+export interface UsageLimit {
+  limit: string;
+  /** `null`: the agent CLI's own default login. */
+  subscription: SubscriptionId | null;
+  resets_in_seconds: number | null;
 }
 
 export interface ChatOverview {
@@ -289,7 +305,13 @@ export type TranscriptEntry =
   | { type: "user_message"; text: string }
   | { type: "agent"; agent_cli: AgentCli; event: AgentEvent }
   | { type: "script_finished"; script: RepositoryScript; exit_code: number | null; output: string }
-  | { type: "answer"; request: string; answer: Answer };
+  | { type: "answer"; request: string; answer: Answer }
+  | {
+      type: "continued_on_subscription";
+      provider: Provider;
+      subscription: SubscriptionId | null;
+      automatic: boolean;
+    };
 
 export type Answer =
   | { type: "approve" }
@@ -336,6 +358,13 @@ export type ServiceEvent =
       output: string;
     }
   | { type: "status_changed"; chat: ChatId; status: ChatStatus }
+  | {
+      type: "continued_on_subscription";
+      chat: ChatId;
+      provider: Provider;
+      subscription: SubscriptionId | null;
+      automatic: boolean;
+    }
   | { type: "request_answered"; chat: ChatId; request: string; answer: Answer }
   | { type: "login_output"; subscription: SubscriptionId; text: string }
   | { type: "login_finished"; subscription: SubscriptionId; outcome: LoginOutcome }

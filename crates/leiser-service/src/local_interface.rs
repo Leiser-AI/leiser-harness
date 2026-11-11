@@ -73,7 +73,8 @@ enum ServiceFrame {
     },
     Reply {
         id: u64,
-        result: Outcome,
+        /// Boxed: a chat's answer is much larger than the other frames.
+        result: Box<Outcome>,
     },
     Event {
         event: Event,
@@ -291,7 +292,12 @@ async fn read_requests(
                             Ok(response) => Outcome::Ok(response),
                             Err(error) => Outcome::Err(error),
                         };
-                        let _ = frames.send(ServiceFrame::Reply { id, result }).await;
+                        let _ = frames
+                            .send(ServiceFrame::Reply {
+                                id,
+                                result: Box::new(result),
+                            })
+                            .await;
                     });
                 }
                 // A second hello is a client error; the connection stays.
@@ -495,7 +501,7 @@ async fn read_frames(
                     .ok()
                     .and_then(|mut pending| pending.as_mut()?.remove(&id));
                 if let Some(reply) = reply {
-                    let _ = reply.send(match result {
+                    let _ = reply.send(match *result {
                         Outcome::Ok(response) => Ok(response),
                         Outcome::Err(error) => Err(error),
                     });

@@ -34,6 +34,7 @@ import type {
   TodoId,
   TranscriptEntry,
   UnreadableCliExtensionFile,
+  UsageLimit,
 } from "./protocol";
 
 /** A chat as the service reports it. */
@@ -50,6 +51,8 @@ export interface ChatView {
   hostAccount: HostAccountBinding;
   /** Who commits are made by where the chat works; `null` when git has no author. */
   commitAuthor: CommitAuthor | null;
+  /** The usage limit the last turn stopped at, until the next turn. */
+  usageLimit: UsageLimit | null;
   transcript: TranscriptEntry[];
 }
 
@@ -155,6 +158,8 @@ function describe(error: CommandError): string {
       return `Could not access ${error.file}: ${error.reason}`;
     case "service_stopped":
       return "The harness service has stopped.";
+    case "no_usage_limit":
+      return "The chat's last turn did not stop at a usage limit.";
     case "unknown_subscription":
       return "This chat's subscription was removed. Choose another one in the top bar.";
     case "unknown_subscription_name":
@@ -266,6 +271,7 @@ export async function readChat(chat: ChatId): Promise<ChatView> {
         subscription: response.subscription,
         hostAccount: response.host_account,
         commitAuthor: response.commit_author,
+        usageLimit: response.usage_limit,
         transcript: response.transcript,
       }
     : unexpected(response);
@@ -346,6 +352,23 @@ export async function logInHostAccount(hostAccount: HostAccountId): Promise<void
 export async function push(chat: ChatId): Promise<string> {
   const response = await execute({ type: "push", chat });
   return response.type === "pushed" ? response.branch : unexpected(response);
+}
+
+export async function setInterchangeable(
+  subscription: SubscriptionId,
+  interchangeable: boolean,
+): Promise<void> {
+  const response = await execute({ type: "set_interchangeable", subscription, interchangeable });
+  if (response.type !== "interchangeable_set") unexpected(response);
+}
+
+/** After a usage limit: continues the chat on another subscription. */
+export async function continueOnSubscription(
+  chat: ChatId,
+  subscription: SubscriptionId | null,
+): Promise<void> {
+  const response = await execute({ type: "continue_on_subscription", chat, subscription });
+  if (response.type !== "continued_on_subscription") unexpected(response);
 }
 
 /** Runs repo-check on the repository again; it only reads. */

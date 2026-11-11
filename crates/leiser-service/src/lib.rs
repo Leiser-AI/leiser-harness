@@ -86,7 +86,7 @@ pub use protocol::{
     LoginOutcome, OptOuts, PermissionMode, Provider, Question, QuestionOption, QueueReason,
     RepoCheck, RepoCheckReport, RepositoryId, RepositoryOverview, RepositoryScript, Response,
     SignIn, SubscriptionId, SubscriptionKind, SubscriptionOverview, SwitchedOffCheck, Todo, TodoId,
-    TranscriptEntry, UnreadableCliExtensionFile,
+    TranscriptEntry, UnreadableCliExtensionFile, UsageLimit,
 };
 pub use service::{Service, ServiceConfig, ServiceHandle, StartError, start};
 pub use store::StorageError;

@@ -18,7 +18,9 @@ mod script;
 mod service;
 mod turn;
 
-pub use fake_driver::{FAKE_LOGIN_FILE, FakeDriver, FakeLogin, UNSET};
+pub use fake_driver::{
+    FAKE_LOGIN_FILE, FAKE_USAGE_LIMIT_FILE, FakeDriver, FakeLogin, FakeUsageLimit, UNSET,
+};
 pub use gate::Gate;
 pub use git_host::{FAKE_CREDENTIAL_HELPER, FAKE_GIT_HOST_LOGIN_FILE, FakeGitHost};
 pub use harness_mcp_client::{HarnessMcpClient, McpClientError, ToolOutput};
