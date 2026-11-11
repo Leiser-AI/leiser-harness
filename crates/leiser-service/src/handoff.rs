@@ -76,14 +76,18 @@ fn quoted(transcript: &[TranscriptEntry]) -> Vec<Quoted<'_>> {
                         output,
                     } => Entry::Command(*agent_cli, command, *exit_code, output),
                     AgentEvent::ApprovalRequested { .. }
+                    | AgentEvent::QuestionAsked { .. }
                     | AgentEvent::UsageLimitReached { .. }
                     | AgentEvent::TurnEnded
                     | AgentEvent::TurnInterrupted
                     | AgentEvent::TurnFailed { .. }
                     | AgentEvent::SessionEnded => return None,
                 },
-                // The harness's own scripts; the agent did not run them.
-                TranscriptEntry::ScriptFinished { .. } => return None,
+                // The agent session that asked has its answer already, and
+                // the harness's own scripts were not the agent's doing.
+                TranscriptEntry::Answer { .. } | TranscriptEntry::ScriptFinished { .. } => {
+                    return None;
+                }
             };
             Some((index, entry))
         })

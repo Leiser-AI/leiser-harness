@@ -24,11 +24,11 @@ use crate::subscriptions::{SubscriptionError, Subscriptions};
 use crate::todos::{TodoChange, TodoError, TodoList};
 use crate::worktree::{self, WorktreeError};
 use crate::{
-    Access, AgentCli, AgentEvent, AgentSessionId, Branch, ChatId, ChatOverview, ChatStatus,
+    Access, AgentCli, AgentEvent, AgentSessionId, Answer, Branch, ChatId, ChatOverview, ChatStatus,
     Checkout, Command, CommandError, Driver, Event, Keychain, LoginAnswer, LoginOutcome,
-    LoginProcess, OptOuts, OsKeychain, Provider, QueueReason, RepoCheck, RepositoryId,
-    RepositoryOverview, RepositoryScript, Response, SessionInput, SessionSpec, SignIn,
-    SubscriptionId, SubscriptionKind, TodoId, TranscriptEntry, script,
+    LoginProcess, OptOuts, OsKeychain, PermissionMode, Provider, QueueReason, RepoCheck,
+    RepositoryId, RepositoryOverview, RepositoryScript, Response, SessionInput, SessionSpec,
+    SignIn, SubscriptionId, SubscriptionKind, TodoId, TranscriptEntry, script,
 };
 
 /// Commands waiting for the command loop. Small, so callers feel back
@@ -282,6 +282,8 @@ struct Chat {
     /// The handoff the next message carries, after the chat changed agent
     /// CLI or subscription.
     handoff: Option<Handoff>,
+    /// The permission mode the developer chose; each turn starts in it.
+    permission_mode: PermissionMode,
     /// The subscription per provider; a provider without one runs on the
     /// agent CLI's own default login.
     subscriptions: BTreeMap<Provider, SubscriptionId>,
@@ -328,20 +330,12 @@ impl Chat {
             return ChatStatus::Working;
         }
         match &self.session {
+            // An approval request or a question waits for the developer.
+            Some(Session { open, .. }) if !open.is_empty() => ChatStatus::WaitingForYou,
             Some(Session {
-                turn:
-                    Turn::Running {
-                        waiting_for_approval,
-                        ..
-                    },
+                turn: Turn::Running { .. },
                 ..
-            }) => {
-                if *waiting_for_approval {
-                    ChatStatus::WaitingForYou
-                } else {
-                    ChatStatus::Working
-                }
-            }
+            }) => ChatStatus::Working,
             _ if self.done => ChatStatus::Done,
             _ => ChatStatus::WaitingForYou,
         }
@@ -364,6 +358,36 @@ struct Session {
     input: mpsc::Sender<SessionInput>,
     turn: Turn,
     resume: Resume,
+    /// The permission mode the agent CLI runs this agent session in.
+    permission_mode: PermissionMode,
+    /// Approval requests and questions waiting for the developer, oldest
+    /// first. They close when the turn ends.
+    open: Vec<OpenRequest>,
+}
+
+/// An approval request or a question the agent waits for an answer to.
+struct OpenRequest {
+    /// The id the chat knows it by, unique in the harness service.
+    id: String,
+    /// The driver's id, unique only in the agent session.
+    driver_id: String,
+    kind: RequestKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RequestKind {
+    Approval,
+    Question,
+}
+
+impl RequestKind {
+    fn fits(self, answer: &Answer) -> bool {
+        match answer {
+            Answer::Decline { .. } => true,
+            Answer::Approve => self == Self::Approval,
+            Answer::Answers { .. } => self == Self::Question,
+        }
+    }
 }
 
 /// Whether a resumed agent session has shown that the agent CLI could
@@ -391,8 +415,6 @@ enum Turn {
     /// A turn runs; `queued` messages are sent in order, one turn each.
     Running {
         queued: VecDeque<String>,
-        /// The agent asked for an approval and has done nothing since.
-        waiting_for_approval: bool,
     },
 }
 
@@ -400,7 +422,6 @@ impl Turn {
     fn running() -> Self {
         Self::Running {
             queued: VecDeque::new(),
-            waiting_for_approval: false,
         }
     }
 }
@@ -433,8 +454,14 @@ enum CheckState {
 struct PendingWorktree {
     chat: ChatId,
     repository: RepositoryId,
+    defaults: ChatDefaults,
     setup_script: Option<String>,
-    /// The repository's default subscriptions, read when the chat started.
+}
+
+/// What a new chat starts with from its repository's config, read when the
+/// chat started.
+struct ChatDefaults {
+    permission_mode: PermissionMode,
     subscriptions: BTreeMap<Provider, SubscriptionId>,
 }
 
@@ -586,6 +613,7 @@ impl State {
                             HandoffV2::NewSession => Handoff::NewSession,
                             HandoffV2::Resume { known } => Handoff::Resume { known },
                         }),
+                        permission_mode: chat.permission_mode,
                         subscriptions: chat
                             .subscriptions
                             .into_iter()
@@ -724,6 +752,15 @@ impl State {
             Command::ListChats => Ok(self.list_chats()),
             Command::ReadChat { chat } => self.read_chat(chat).await,
             Command::ChangeAgentCli { chat, agent_cli } => self.change_agent_cli(chat, agent_cli),
+            Command::ChangePermissionMode {
+                chat,
+                permission_mode,
+            } => self.change_permission_mode(chat, permission_mode),
+            Command::AnswerRequest {
+                chat,
+                request,
+                answer,
+            } => self.answer_request(chat, request, answer).await,
             Command::AddSubscription {
                 provider,
                 name,
@@ -835,6 +872,8 @@ impl State {
             working_directory: path.clone(),
             harness_mcp_url: None,
             access: Access::ReadOnly,
+            // A read-only agent session asks nothing.
+            permission_mode: PermissionMode::Supervised,
             // repo-check runs on the agent CLI's own default login.
             subscription: None,
         };
@@ -927,7 +966,14 @@ impl State {
             .get(&repository)
             .ok_or(CommandError::UnknownRepository { repository })?
             .clone();
-        let subscriptions = self.default_subscriptions(&path)?;
+        let config =
+            RepositoryConfig::load(&path).map_err(|error| CommandError::RepositoryConfig {
+                reason: error.to_string(),
+            })?;
+        let defaults = ChatDefaults {
+            permission_mode: config.permission_mode,
+            subscriptions: self.default_subscriptions(&config)?,
+        };
         let (working_directory, place) = match checkout {
             Checkout::Main => (path, Place::MainCheckout),
             Checkout::Worktree { chat: other } => {
@@ -947,18 +993,13 @@ impl State {
                 (other_chat.working_directory.clone(), Place::Worktree)
             }
             Checkout::NewWorktree => {
-                let config = RepositoryConfig::load(&path).map_err(|error| {
-                    CommandError::RepositoryConfig {
-                        reason: error.to_string(),
-                    }
-                })?;
                 let chat = ChatId(self.next_id());
                 return Ok(Started::AfterWorktree {
                     pending: PendingWorktree {
                         chat,
                         repository,
+                        defaults,
                         setup_script: config.worktree.setup_script,
-                        subscriptions,
                     },
                     repository_path: path,
                     base_branch: config.worktree.base_branch,
@@ -972,7 +1013,7 @@ impl State {
             working_directory,
             place,
             Setup::Done,
-            subscriptions,
+            defaults,
         )?;
         Ok(Started::Now(chat))
     }
@@ -984,7 +1025,7 @@ impl State {
         working_directory: PathBuf,
         place: Place,
         setup: Setup,
-        subscriptions: BTreeMap<Provider, SubscriptionId>,
+        defaults: ChatDefaults,
     ) -> Result<(), CommandError> {
         self.status_changes += 1;
         let new = Chat {
@@ -998,7 +1039,8 @@ impl State {
             agent_cli: self.default_agent_cli,
             agent_sessions: BTreeMap::new(),
             handoff: None,
-            subscriptions,
+            permission_mode: defaults.permission_mode,
+            subscriptions: defaults.subscriptions,
             session: None,
             todos: TodoList::default(),
         };
@@ -1079,8 +1121,8 @@ impl State {
         let PendingWorktree {
             chat,
             repository,
+            defaults,
             setup_script,
-            subscriptions,
         } = pending;
         let setup = match setup_script {
             Some(_) => Setup::Running {
@@ -1088,14 +1130,7 @@ impl State {
             },
             None => Setup::Done,
         };
-        self.insert_chat(
-            chat,
-            repository,
-            path,
-            Place::Worktree,
-            setup,
-            subscriptions,
-        )?;
+        self.insert_chat(chat, repository, path, Place::Worktree, setup, defaults)?;
         if let Some(setup_script) = setup_script {
             self.run_script(chat, RepositoryScript::Setup, setup_script);
         }
@@ -1260,19 +1295,18 @@ impl State {
     /// running the chat on another plan.
     fn default_subscriptions(
         &self,
-        repository: &Path,
+        config: &RepositoryConfig,
     ) -> Result<BTreeMap<Provider, SubscriptionId>, CommandError> {
-        let config =
-            RepositoryConfig::load(repository).map_err(|error| CommandError::RepositoryConfig {
-                reason: error.to_string(),
-            })?;
         config
             .subscriptions
-            .into_iter()
+            .iter()
             .map(
-                |(provider, name)| match self.subscriptions.named(provider, &name) {
+                |(&provider, name)| match self.subscriptions.named(provider, name) {
                     Some(subscription) => Ok((provider, subscription)),
-                    None => Err(CommandError::UnknownSubscriptionName { provider, name }),
+                    None => Err(CommandError::UnknownSubscriptionName {
+                        provider,
+                        name: name.clone(),
+                    }),
                 },
             )
             .collect()
@@ -1315,7 +1349,21 @@ impl State {
         let pending = chat.handoff;
         let was_done = chat.done;
         let in_worktree = chat.place == Place::Worktree;
-        if chat.session.is_none() {
+        let mode_changed = self.chats.get(&id).is_some_and(|chat| {
+            chat.session
+                .as_ref()
+                .is_some_and(|session| session.permission_mode != self.applied_mode(chat))
+        });
+        if mode_changed {
+            // The agent CLI takes the new mode when the agent session is
+            // resumed with it.
+            self.end_session(id);
+        }
+        if self
+            .chats
+            .get(&id)
+            .is_some_and(|chat| chat.session.is_none())
+        {
             self.open_session(id)?;
         }
         let transcript = self.store.transcript(id.0)?;
@@ -1557,8 +1605,94 @@ impl State {
             branch: crate::git::current_branch(&chat.working_directory).await,
             agent_cli: chat.agent_cli,
             subscription: chat.subscription(),
+            permission_mode: chat.permission_mode,
+            applied_permission_mode: self.applied_mode(chat),
+            open_requests: chat
+                .session
+                .iter()
+                .flat_map(|session| &session.open)
+                .map(|request| request.id.clone())
+                .collect(),
             transcript,
         })
+    }
+
+    /// The mode the chat's agent CLI runs it in: its permission mode, or
+    /// Supervised where the agent CLI lacks that mode.
+    fn applied_mode(&self, chat: &Chat) -> PermissionMode {
+        let supported = self
+            .drivers
+            .get(&chat.agent_cli)
+            .is_some_and(|driver| driver.supports_permission_mode(chat.permission_mode));
+        if supported {
+            chat.permission_mode
+        } else {
+            PermissionMode::Supervised
+        }
+    }
+
+    fn change_permission_mode(
+        &mut self,
+        id: ChatId,
+        permission_mode: PermissionMode,
+    ) -> Result<Response, CommandError> {
+        let chat = self
+            .chats
+            .get_mut(&id)
+            .ok_or(CommandError::UnknownChat { chat: id })?;
+        let before = std::mem::replace(&mut chat.permission_mode, permission_mode);
+        if let Err(error) = self.save() {
+            if let Some(chat) = self.chats.get_mut(&id) {
+                chat.permission_mode = before;
+            }
+            return Err(error);
+        }
+        Ok(Response::PermissionModeChanged)
+    }
+
+    async fn answer_request(
+        &mut self,
+        id: ChatId,
+        request: String,
+        answer: Answer,
+    ) -> Result<Response, CommandError> {
+        let chat = self
+            .chats
+            .get_mut(&id)
+            .ok_or(CommandError::UnknownChat { chat: id })?;
+        let Some((session, index)) = chat.session.as_mut().and_then(|session| {
+            let index = session.open.iter().position(|open| open.id == request)?;
+            Some((session, index))
+        }) else {
+            return Err(CommandError::UnknownRequest { chat: id, request });
+        };
+        if !session.open[index].kind.fits(&answer) {
+            return Err(CommandError::AnswerDoesNotFit { chat: id, request });
+        }
+        let open = session.open.remove(index);
+        let input = session.input.clone();
+        // Recorded first, so the developer's answer is never lost.
+        self.store.append(
+            id.0,
+            &TranscriptEntry::Answer {
+                request: request.clone(),
+                answer: answer.clone(),
+            },
+        )?;
+        send_input(
+            &input,
+            SessionInput::Answer {
+                request: open.driver_id,
+                answer: answer.clone(),
+            },
+        )
+        .await?;
+        self.emit(Event::RequestAnswered {
+            chat: id,
+            request,
+            answer,
+        });
+        Ok(Response::RequestAnswered)
     }
 
     fn change_agent_cli(
@@ -1980,10 +2114,16 @@ impl State {
             .map_err(|error| CommandError::AgentCli {
                 reason: error.to_string(),
             })?;
+        let permission_mode = if driver.supports_permission_mode(chat.permission_mode) {
+            chat.permission_mode
+        } else {
+            PermissionMode::Supervised
+        };
         let spec = SessionSpec {
             working_directory: chat.working_directory.clone(),
             harness_mcp_url: Some(harness_mcp_url),
             access: Access::Chat,
+            permission_mode,
             subscription,
         };
         let (started, resume) = match chat.agent_sessions.get(&chat.agent_cli) {
@@ -2007,6 +2147,8 @@ impl State {
             input: started.input,
             turn: Turn::Idle,
             resume,
+            permission_mode,
+            open: Vec::new(),
         });
         Ok(())
     }
@@ -2056,21 +2198,11 @@ impl State {
     /// Records and forwards an agent session's event and, when it ends the
     /// turn, sends the next queued message.
     async fn agent_event(&mut self, id: ChatId, event: AgentEvent) {
+        let event = self.open_request(id, event);
         let Some(chat) = self.chats.get_mut(&id) else {
             return;
         };
         let agent_cli = chat.agent_cli;
-        if let Some(Session {
-            turn:
-                Turn::Running {
-                    waiting_for_approval,
-                    ..
-                },
-            ..
-        }) = &mut chat.session
-        {
-            *waiting_for_approval = matches!(event, AgentEvent::ApprovalRequested { .. });
-        }
         if let Some(session) = &mut chat.session {
             match std::mem::replace(&mut session.resume, Resume::Proven) {
                 Resume::Trying(retry) if event == AgentEvent::SessionEnded => {
@@ -2099,12 +2231,67 @@ impl State {
             }
             _ => None,
         };
+        if session_ended == Some(false)
+            && let Some(Chat {
+                session: Some(session),
+                ..
+            }) = self.chats.get_mut(&id)
+        {
+            // The agent CLI no longer waits for answers of an ended turn.
+            session.open.clear();
+        }
         self.emit(Event::Agent { chat: id, event });
         match session_ended {
             None => {}
             // Queued messages of the ended agent session are dropped with it.
             Some(true) => self.end_session(id),
             Some(false) => self.send_next_queued(id).await,
+        }
+    }
+
+    /// Opens an approval request or a question of the chat's agent session,
+    /// under an id unique in the harness service: drivers number requests
+    /// per agent session, and a chat can have several. Other events pass
+    /// unchanged.
+    fn open_request(&mut self, id: ChatId, event: AgentEvent) -> AgentEvent {
+        let (kind, driver_id) = match &event {
+            AgentEvent::ApprovalRequested { request, .. } => (RequestKind::Approval, request),
+            AgentEvent::QuestionAsked { request, .. } => (RequestKind::Question, request),
+            _ => return event,
+        };
+        let driver_id = driver_id.clone();
+        if self
+            .chats
+            .get(&id)
+            .is_none_or(|chat| chat.session.is_none())
+        {
+            return event;
+        }
+        let request = self.next_id().to_string();
+        if let Err(error) = self.save() {
+            // Only a restart before the next save could reuse the id.
+            tracing::error!(chat = ?id, %error, "could not store the next id");
+        }
+        if let Some(Chat {
+            session: Some(session),
+            ..
+        }) = self.chats.get_mut(&id)
+        {
+            session.open.push(OpenRequest {
+                id: request.clone(),
+                driver_id,
+                kind,
+            });
+        }
+        match event {
+            AgentEvent::ApprovalRequested { description, .. } => AgentEvent::ApprovalRequested {
+                request,
+                description,
+            },
+            AgentEvent::QuestionAsked { questions, .. } => {
+                AgentEvent::QuestionAsked { request, questions }
+            }
+            event => event,
         }
     }
 
@@ -2141,6 +2328,11 @@ impl State {
     }
 
     async fn send_next_queued(&mut self, id: ChatId) {
+        let mode_changed = self.chats.get(&id).is_some_and(|chat| {
+            chat.session
+                .as_ref()
+                .is_some_and(|session| session.permission_mode != self.applied_mode(chat))
+        });
         let Some(Chat {
             session: Some(session),
             ..
@@ -2155,11 +2347,18 @@ impl State {
         let Some(text) = queued.pop_front() else {
             return;
         };
-        session.turn = Turn::Running {
-            queued,
-            waiting_for_approval: false,
-        };
-        let input = session.input.clone();
+        session.turn = Turn::Running { queued };
+        let mut input = session.input.clone();
+        if mode_changed {
+            match self.reopen_with_turn(id, &text) {
+                Ok(reopened) => input = reopened,
+                Err(error) => {
+                    // The queued messages go with the ended agent session.
+                    tracing::error!(chat = ?id, %error, "could not resume the agent session in its new permission mode");
+                    return;
+                }
+            }
+        }
         if let Err(error) = self.append_user_message(id, &text) {
             tracing::error!(chat = ?id, %error, "could not store a queued message");
         }
@@ -2170,6 +2369,38 @@ impl State {
         // A failed send means the agent session has ended; its
         // `SessionEnded` event follows and ends the session.
         let _ = send_input(&input, SessionInput::UserMessage { text }).await;
+    }
+
+    /// Ends the chat's agent session, whose turn has just ended, and
+    /// resumes it in the chat's permission mode with the same queue, for
+    /// the turn that `text` starts. Returns the new agent session's input.
+    fn reopen_with_turn(
+        &mut self,
+        id: ChatId,
+        text: &str,
+    ) -> Result<mpsc::Sender<SessionInput>, CommandError> {
+        let entries_before = self.store.transcript(id.0)?.len();
+        let turn = self
+            .chats
+            .get_mut(&id)
+            .and_then(|chat| chat.session.take())
+            .map_or(Turn::Idle, |session| session.turn);
+        self.open_session(id)?;
+        let Some(Chat {
+            session: Some(session),
+            ..
+        }) = self.chats.get_mut(&id)
+        else {
+            return Err(CommandError::UnknownChat { chat: id });
+        };
+        session.turn = turn;
+        if let Resume::Untried = session.resume {
+            session.resume = Resume::Trying(Retry {
+                text: text.to_owned(),
+                entries_before,
+            });
+        }
+        Ok(session.input.clone())
     }
 
     /// The chat, if `generation` is its running agent session.
@@ -2216,6 +2447,7 @@ impl State {
                         Handoff::NewSession => HandoffV2::NewSession,
                         Handoff::Resume { known } => HandoffV2::Resume { known },
                     }),
+                    permission_mode: chat.permission_mode,
                     subscriptions: chat
                         .subscriptions
                         .iter()
@@ -2383,7 +2615,9 @@ fn stored_title(store: &Store, chat: u64) -> Option<String> {
     };
     transcript.iter().find_map(|entry| match entry {
         TranscriptEntry::UserMessage { text } => title(text),
-        TranscriptEntry::Agent { .. } | TranscriptEntry::ScriptFinished { .. } => None,
+        TranscriptEntry::Agent { .. }
+        | TranscriptEntry::ScriptFinished { .. }
+        | TranscriptEntry::Answer { .. } => None,
     })
 }
 

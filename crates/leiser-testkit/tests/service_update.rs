@@ -7,8 +7,8 @@ use std::path::Path;
 use std::time::Duration;
 
 use leiser_service::{
-    AgentCli, AgentEvent, ChatId, ChatStatus, Checkout, Command, Event, RepositoryScript, Response,
-    ServiceHandle, TranscriptEntry,
+    AgentCli, AgentEvent, Answer, ChatId, ChatStatus, Checkout, Command, Event, RepositoryScript,
+    Response, ServiceHandle, TranscriptEntry,
 };
 use leiser_testkit::{Gate, Script, Step, TestRepo, TestService, collect_turn};
 use tokio::sync::broadcast;
@@ -309,46 +309,18 @@ async fn a_message_sent_while_an_update_waits_still_starts_its_turn() -> TestRes
     Ok(())
 }
 
-/// Waits for the chat's agent event.
-async fn agent_event(
-    events: &mut broadcast::Receiver<Event>,
-    chat: ChatId,
-    expected: &AgentEvent,
-) -> TestResult {
-    tokio::time::timeout(TIMEOUT, async {
-        loop {
-            if let Event::Agent { chat: from, event } = events.recv().await?
-                && from == chat
-                && &event == expected
-            {
-                return Ok(());
-            }
-        }
-    })
-    .await?
-}
-
 #[tokio::test]
 async fn a_service_update_waits_while_a_turn_waits_for_an_approval() -> TestResult {
-    let gate = Gate::new()?;
-    let approval = AgentEvent::ApprovalRequested {
-        request: "1".to_owned(),
+    let script = Script::new().turn([Step::RequestApproval {
         description: "Run `cargo test`".to_owned(),
-    };
-    let script = Script::new().turn([
-        Step::Emit {
-            event: approval.clone(),
-        },
-        gate.step(),
-        Step::message("approved"),
-    ]);
+    }]);
     let service = start_service(&script)?;
     let repo = TestRepo::new()?;
     let app = service.connect();
     let chat = start_chat(&app, &repo).await?;
     let mut events = app.subscribe();
     send(&app, chat, "may I?").await?;
-    agent_event(&mut events, chat, &approval).await?;
+    let request = approval_requested(&mut events, chat, "Run `cargo test`").await?;
 
     let update = tokio::spawn(service.update());
     update_announced(&mut events).await?;
@@ -358,13 +330,44 @@ async fn a_service_update_waits_while_a_turn_waits_for_an_approval() -> TestResu
     assert_eq!(read_chat(&app, chat).await?.0, ChatStatus::WaitingForYou);
     assert!(update_waiting(&app).await?);
     assert!(!update.is_finished());
-    gate.open()?;
+    app.execute(Command::AnswerRequest {
+        chat,
+        request,
+        answer: Answer::Approve,
+    })
+    .await?;
     assert_eq!(
         collect_turn(&mut events, chat).await?,
         vec![message("approved"), AgentEvent::TurnEnded]
     );
     tokio::time::timeout(TIMEOUT, update).await???;
     Ok(())
+}
+
+/// Waits for the approval request with `description` and returns its id.
+async fn approval_requested(
+    events: &mut broadcast::Receiver<Event>,
+    chat: ChatId,
+    description: &str,
+) -> TestResult<String> {
+    tokio::time::timeout(TIMEOUT, async {
+        loop {
+            if let Event::Agent {
+                chat: from,
+                event:
+                    AgentEvent::ApprovalRequested {
+                        request,
+                        description: asked,
+                    },
+            } = events.recv().await?
+                && from == chat
+                && asked == description
+            {
+                return Ok(request);
+            }
+        }
+    })
+    .await?
 }
 
 #[tokio::test]

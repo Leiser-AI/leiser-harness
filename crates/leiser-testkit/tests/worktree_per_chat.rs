@@ -601,12 +601,14 @@ async fn the_sidebar_shows_each_chats_status_with_waiting_chats_on_top() -> Test
         })
         .await?;
     send(&service, asking, "work").await?;
-    while next_event(&mut events, asking).await?
-        != (Event::Agent {
-            chat: asking,
-            event: approval.clone(),
-        })
-    {}
+    // The service gives the request its own id, so only its kind counts.
+    while !matches!(
+        next_event(&mut events, asking).await?,
+        Event::Agent {
+            event: AgentEvent::ApprovalRequested { .. },
+            ..
+        }
+    ) {}
 
     let statuses: Vec<(ChatId, ChatStatus)> = list_chats(&service)
         .await?

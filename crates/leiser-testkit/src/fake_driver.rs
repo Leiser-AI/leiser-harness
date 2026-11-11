@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use leiser_service::{
     Access, AgentCli, AgentEvent, AgentSession, AgentSessionId, Driver, DriverError, LoginProcess,
-    SessionInput, SessionSpec, SubscriptionAccess,
+    PermissionMode, SessionInput, SessionSpec, SubscriptionAccess,
 };
 use serde::{Deserialize, Serialize};
 use tempfile::TempDir;
@@ -47,6 +47,7 @@ pub struct FakeDriver {
     /// The agent CLI whose environment variables it gets.
     agent_cli: AgentCli,
     supports_steer: bool,
+    unsupported_permission_modes: Vec<PermissionMode>,
     login_fails: bool,
     login_asks_for_code: bool,
     script_file: PathBuf,
@@ -100,6 +101,7 @@ impl FakeDriver {
             program: program.to_path_buf(),
             agent_cli: AgentCli::ClaudeCode,
             supports_steer: script.supports_steer,
+            unsupported_permission_modes: script.unsupported_permission_modes.clone(),
             login_fails: script.login_fails,
             login_asks_for_code: script.login_asks_for_code,
             script_file,
@@ -135,7 +137,9 @@ impl FakeDriver {
             .arg("--sessions")
             .arg(&self.sessions)
             .arg(mode)
-            .arg(id.as_str());
+            .arg(id.as_str())
+            .arg("--permission-mode")
+            .arg(permission_mode_argument(spec.permission_mode));
         if let Some(url) = &spec.harness_mcp_url {
             command.arg("--harness-mcp").arg(url);
         }
@@ -203,6 +207,19 @@ impl Driver for FakeDriver {
         access.environment(self.agent_cli).apply(&mut command);
         LoginProcess::spawn(command)
     }
+
+    fn supports_permission_mode(&self, mode: PermissionMode) -> bool {
+        !self.unsupported_permission_modes.contains(&mode)
+    }
+}
+
+/// The permission mode as the fake agent CLI's `--permission-mode` takes
+/// it: the harness's own spelling.
+fn permission_mode_argument(mode: PermissionMode) -> String {
+    serde_json::to_value(mode)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_default()
 }
 
 async fn write_input(mut stdin: ChildStdin, mut input: mpsc::Receiver<SessionInput>) {
@@ -211,6 +228,7 @@ async fn write_input(mut stdin: ChildStdin, mut input: mpsc::Receiver<SessionInp
             SessionInput::UserMessage { text } => FakeInput::UserMessage { text },
             SessionInput::Steer { text } => FakeInput::Steer { text },
             SessionInput::Interrupt => FakeInput::Interrupt,
+            SessionInput::Answer { request, answer } => FakeInput::Answer { request, answer },
         };
         let Ok(mut line) = serde_json::to_vec(&message) else {
             return;

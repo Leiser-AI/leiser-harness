@@ -8,6 +8,12 @@
 //! The harness MCP server is configured with `-c mcp_servers.<name>.url`,
 //! which Codex reaches over streamable HTTP.
 //!
+//! A chat's agent session runs in Codex's `workspace-write` sandbox. The
+//! permission mode sets Codex's approval policy (see
+//! `conversation::approval_settings`); Codex has no Auto-accept edits.
+//! Approval requests and `request_user_input` questions stay open until the
+//! developer answers; a decline's feedback is steered into the turn.
+//!
 //! A subscription runs with `CODEX_HOME` set to its shadow home: the shared
 //! Codex home with its own `auth.json`, so threads resume across
 //! subscriptions. Its login is kept in that `auth.json` (`codex login` with
@@ -30,7 +36,7 @@ use self::conversation::{Conversation, Output, ProtocolError};
 use crate::installed::{self, Found, Program};
 use crate::{
     Access, AgentCli, AgentEvent, AgentSession, AgentSessionId, Driver, DriverError, Environment,
-    HARNESS_MCP_SERVER, LoginProcess, OPENAI_API_KEY, SessionInput, SessionSpec,
+    HARNESS_MCP_SERVER, LoginProcess, OPENAI_API_KEY, PermissionMode, SessionInput, SessionSpec,
     SubscriptionAccess, Version,
 };
 
@@ -171,6 +177,11 @@ impl Driver for CodexDriver {
         true
     }
 
+    /// Codex has no mode that accepts file edits but asks about commands.
+    fn supports_permission_mode(&self, mode: PermissionMode) -> bool {
+        mode != PermissionMode::AutoAcceptEdits
+    }
+
     /// Runs `codex login` in the subscription's shadow home.
     fn login(&self, access: &SubscriptionAccess) -> Result<LoginProcess, DriverError> {
         let program = self.program.resolve()?;
@@ -231,18 +242,19 @@ impl CodexDriver {
         let (id_sender, id) = oneshot::channel();
         let (input, input_receiver) = mpsc::channel(CHANNEL_BUFFER);
         let (event_sender, events) = mpsc::channel(CHANNEL_BUFFER);
-        let access = spec.access;
+        let thread = ThreadSettings {
+            working_directory,
+            permission_mode: spec.permission_mode,
+            resume,
+            access: spec.access,
+        };
         tokio::spawn(async move {
             // Ends the agent session however the conversation stopped:
             // the input was dropped, Codex exited, or Codex broke the
             // protocol. The cause is not reported yet: `AgentEvent` has no
             // variant for it.
             let _ = run(
-                Thread {
-                    working_directory,
-                    resume,
-                    access,
-                },
+                thread,
                 id_sender,
                 stdin,
                 stdout,
@@ -299,27 +311,34 @@ enum SessionStop {
     Protocol(#[from] ProtocolError),
 }
 
-/// The Codex thread an agent session opens.
-struct Thread {
+/// What Codex's thread starts or resumes with.
+struct ThreadSettings {
     working_directory: String,
+    permission_mode: PermissionMode,
     /// The thread to resume instead of starting a new one.
     resume: Option<String>,
     access: Access,
 }
 
 async fn run(
-    thread: Thread,
+    thread: ThreadSettings,
     id: oneshot::Sender<AgentSessionId>,
     mut stdin: ChildStdin,
     stdout: ChildStdout,
     mut input: mpsc::Receiver<SessionInput>,
     events: &mpsc::Sender<AgentEvent>,
 ) -> Result<(), SessionStop> {
-    let (conversation, output) = match thread.resume {
-        Some(thread_id) => Conversation::resume(thread.working_directory, thread_id)?,
-        None => Conversation::start(thread.working_directory)?,
+    let ThreadSettings {
+        working_directory,
+        permission_mode,
+        resume,
+        access,
+    } = thread;
+    let (conversation, output) = match resume {
+        Some(thread_id) => Conversation::resume(working_directory, permission_mode, thread_id)?,
+        None => Conversation::start(working_directory, permission_mode)?,
     };
-    let mut conversation = match thread.access {
+    let mut conversation = match access {
         Access::Chat => conversation,
         Access::ReadOnly => conversation.read_only(),
     };
@@ -332,6 +351,9 @@ async fn run(
                 Some(SessionInput::UserMessage { text }) => conversation.user_message(text)?,
                 Some(SessionInput::Steer { text }) => conversation.steer(text)?,
                 Some(SessionInput::Interrupt) => conversation.interrupt()?,
+                Some(SessionInput::Answer { request, answer }) => {
+                    conversation.answer(&request, answer)?
+                }
                 None => return Err(SessionStop::InputClosed),
             },
             line = lines.next_line() => match line? {
@@ -396,13 +418,14 @@ mod tests {
     use crate::Access;
 
     use super::session_command;
-    use crate::{ApiKey, SessionSpec, SubscriptionAccess};
+    use crate::{ApiKey, PermissionMode, SessionSpec, SubscriptionAccess};
 
     fn arguments(api_key: Option<ApiKey>) -> Vec<String> {
         let spec = SessionSpec {
             working_directory: PathBuf::from("/work"),
             harness_mcp_url: Some("http://127.0.0.1:1/mcp".to_owned()),
             access: Access::Chat,
+            permission_mode: PermissionMode::Auto,
             subscription: Some(SubscriptionAccess {
                 home: PathBuf::from("/data/subscriptions/3/codex-home"),
                 api_key,

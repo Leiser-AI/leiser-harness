@@ -510,3 +510,29 @@ async fn an_invalid_repository_config_is_reported() -> TestResult {
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn a_repository_config_that_breaks_later_is_reported_when_the_agent_session_starts()
+-> TestResult {
+    let harness = start_service(&Script::new())?;
+    let service = harness.connect();
+    let repo = repo_with_config("[agent_access]\ntodo_list = true\n")?;
+    let chat = start_chat(&service, &repo).await?;
+    std::fs::write(
+        repo.path().join(".leiser/config.toml"),
+        "[agent_access]\ntodo_list = \"yes\"\n",
+    )?;
+
+    let result = service
+        .execute(Command::SendMessage {
+            chat,
+            text: "hello".to_owned(),
+        })
+        .await;
+
+    assert!(
+        matches!(result, Err(CommandError::RepositoryConfig { .. })),
+        "{result:?}"
+    );
+    Ok(())
+}

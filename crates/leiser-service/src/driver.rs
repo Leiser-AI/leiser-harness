@@ -1,9 +1,9 @@
 //! The driver interface: one driver per agent CLI (ADR 0002).
 //!
-//! Covers start, resume, send, read events, steer and interrupt. Queue
-//! needs nothing from the driver: the harness service holds queued messages
-//! and sends each when the running turn ends. Approve follows in a later
-//! ticket.
+//! Covers start, resume, send, read events, approve, steer and interrupt.
+//! Queue needs nothing from the driver: the harness service holds queued
+//! messages and sends each when the running turn ends. Approve is
+//! [`SessionInput::Answer`], which answers approval requests and questions.
 //!
 //! A driver also runs the agent CLI's own login for a subscription
 //! ([`Driver::login`]). Which subscription an agent session or a login uses
@@ -20,7 +20,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::ChildStdin;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::{AgentCli, AgentEvent, ApiKey, LoginOutcome, Version};
+use crate::{AgentCli, AgentEvent, Answer, ApiKey, LoginOutcome, PermissionMode, Version};
 
 /// Claude Code's config directory, one per Claude subscription.
 pub const CLAUDE_CONFIG_DIR: &str = "CLAUDE_CONFIG_DIR";
@@ -61,6 +61,11 @@ pub struct SessionSpec {
     /// The subscription the agent session runs on; `None` leaves the agent
     /// CLI on its own default login and config directory.
     pub subscription: Option<SubscriptionAccess>,
+    /// How much the agent session may do without asking. Always one the
+    /// driver supports (see [`Driver::supports_permission_mode`]). The
+    /// driver keeps the agent CLI's sandbox on in every mode. Applies to
+    /// [`Access::Chat`] only: a read-only agent session asks nothing.
+    pub permission_mode: PermissionMode,
 }
 
 /// What an agent session may change.
@@ -311,6 +316,14 @@ pub enum SessionInput {
     /// Stops the running turn, which then ends with
     /// [`AgentEvent::TurnInterrupted`]. Ignored when no turn runs.
     Interrupt,
+    /// Answers the running turn's approval request or question `request`,
+    /// by the id the driver gave it in [`AgentEvent::ApprovalRequested`] or
+    /// [`AgentEvent::QuestionAsked`]. Sent once per request, only while it
+    /// is open, and only with an answer that fits it: never
+    /// [`Answer::Approve`] for a question or [`Answer::Answers`] for an
+    /// approval request. The feedback of [`Answer::Decline`] must reach
+    /// the agent.
+    Answer { request: String, answer: Answer },
 }
 
 /// A running agent session: send it input, read its events.
@@ -359,6 +372,10 @@ pub trait Driver: Send + Sync + std::fmt::Debug {
     fn supports_steer(&self) -> bool {
         false
     }
+
+    /// Whether the agent CLI has a mode for `mode`. A chat in a mode the
+    /// agent CLI lacks runs Supervised, which every driver must support.
+    fn supports_permission_mode(&self, mode: PermissionMode) -> bool;
 
     /// Runs the agent CLI's own login for a login subscription, so it
     /// signs in and keeps the login in `access.home`. Must be called inside

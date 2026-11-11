@@ -13,6 +13,14 @@ ignore = [
   # ships for macOS and Windows only. No upgrade exists until Tauri replaces
   # gtk-rs 0.18. Re-check on the next Tauri update.
   { id = "RUSTSEC-2024-0370", reason = "unmaintained proc macro, Linux-only via Tauri's gtk-rs 0.18; no upgrade available" },
+  # `zvariant`, `zvariant_derive` and `zbus_names` are unmaintained, not
+  # vulnerable: they were merged into `zbus` 6. They come in only on Linux,
+  # through `tauri-plugin-notification`'s `zbus` 5 (the desktop app's OS
+  # notifications); v1 ships for macOS and Windows only. Re-check when the
+  # plugin moves to `zbus` 6.
+  { id = "RUSTSEC-2026-0370", reason = "zvariant merged into zbus 6; Linux-only via tauri-plugin-notification's zbus 5" },
+  { id = "RUSTSEC-2026-0371", reason = "zbus_names merged into zbus 6; Linux-only via tauri-plugin-notification's zbus 5" },
+  { id = "RUSTSEC-2026-0372", reason = "zvariant_derive merged into zbus 6; Linux-only via tauri-plugin-notification's zbus 5" },
 ]
 
 [licenses]

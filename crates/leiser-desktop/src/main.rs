@@ -8,6 +8,10 @@
 //! `connection.rs`). It forwards the interface 1:1: the `execute` command
 //! takes a [`Command`] and answers with its [`Response`], and every service
 //! [`Event`](leiser_service::Event) reaches the UI as `service-event`.
+//!
+//! When a chat starts waiting for the developer (an approval request or a
+//! question) while the app is not in front, the app sends an OS
+//! notification.
 
 // Release builds on Windows open no console window next to the app.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
@@ -24,6 +28,7 @@ use tauri_plugin_dialog::DialogExt;
 fn main() -> Result<(), tauri::Error> {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             // Not in the app data directory: its path has a space on macOS,
             // which some build tools in a worktree trip over.

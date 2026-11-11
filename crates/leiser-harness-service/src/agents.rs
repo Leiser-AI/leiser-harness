@@ -7,7 +7,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use leiser_service::{
-    AgentCli, AgentEvent, ClaudeCodeDriver, CodexDriver, ServiceConfig, ServiceProgram,
+    AgentCli, AgentEvent, ClaudeCodeDriver, CodexDriver, Question, QuestionOption, ServiceConfig,
+    ServiceProgram,
 };
 use leiser_testkit::{FakeDriver, SAMPLE_REPO_CHECK_REPORT, Script, Step};
 
@@ -63,9 +64,31 @@ fn fake_repo_check(program: &Path) -> io::Result<FakeDriver> {
 /// A driver that answers every message with a tool call, its result, the
 /// message itself and a todo it adds through the harness MCP server. In a
 /// repository without agent access to the todo list, the harness MCP
-/// server refuses the todo, and the answer says so. Its agent sessions
-/// survive a service update.
+/// server refuses the todo, and the answer says so. Of every three turns,
+/// the second first asks for an approval and the third asks a question,
+/// to try the cards. Its agent sessions survive a service update.
 fn fake_driver(program: &Path, state: &Path) -> io::Result<FakeDriver> {
+    let approval = Step::RequestApproval {
+        description: "Run `cargo test --workspace`".to_owned(),
+    };
+    let question = Step::AskQuestions {
+        questions: vec![Question {
+            id: "runner".to_owned(),
+            header: "Test runner".to_owned(),
+            question: "Which test runner should I use?".to_owned(),
+            options: vec![
+                QuestionOption {
+                    label: "cargo test".to_owned(),
+                    description: "The default runner".to_owned(),
+                },
+                QuestionOption {
+                    label: "cargo nextest".to_owned(),
+                    description: "Faster, needs an install".to_owned(),
+                },
+            ],
+            multi_select: false,
+        }],
+    };
     std::fs::create_dir_all(state)?;
     let gate = state.join(FAKE_TURN_GATE);
     if !gate.exists() {
@@ -92,6 +115,13 @@ fn fake_driver(program: &Path, state: &Path) -> io::Result<FakeDriver> {
             arguments: serde_json::json!({ "text": "Added by the fake agent CLI" }),
         },
     ];
-    let script = (0..FAKE_TURNS).fold(Script::new(), |script, _| script.turn(turn.clone()));
+    let script = (0..FAKE_TURNS).fold(Script::new(), |script, number| {
+        let first = match number % 3 {
+            1 => Some(approval.clone()),
+            2 => Some(question.clone()),
+            _ => None,
+        };
+        script.turn(first.into_iter().chain(turn.iter().cloned()))
+    });
     FakeDriver::persistent(program, &script, state)
 }

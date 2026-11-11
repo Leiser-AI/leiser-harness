@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use leiser_service::AgentEvent;
+use leiser_service::{AgentEvent, Answer, PermissionMode, Question};
 use serde::{Deserialize, Serialize};
 
 /// The turns the fake agent CLI plays back, one per message it receives.
@@ -13,14 +13,18 @@ use serde::{Deserialize, Serialize};
 /// with the turn after the last one it played.
 ///
 /// The fake agent CLI exits with an error on input a real one would not
-/// get from a correct harness service: a message while a turn runs, or a
-/// steer while no turn runs or when steering is not supported.
+/// get from a correct harness service: a message while a turn runs, a
+/// steer while no turn runs or when steering is not supported, or an
+/// answer to a request that is not open.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Script {
     pub turns: Vec<Vec<Step>>,
     /// Whether the fake agent CLI takes messages mid-turn.
     #[serde(default)]
     pub supports_steer: bool,
+    /// Permission modes the fake agent CLI has no mode for.
+    #[serde(default)]
+    pub unsupported_permission_modes: Vec<PermissionMode>,
     /// Whether the fake agent CLI's login fails.
     #[serde(default)]
     pub login_fails: bool,
@@ -40,6 +44,13 @@ impl Script {
     #[must_use]
     pub fn supports_steer(mut self) -> Self {
         self.supports_steer = true;
+        self
+    }
+
+    /// Makes the fake agent CLI lack a mode for `mode`.
+    #[must_use]
+    pub fn without_permission_mode(mut self, mode: PermissionMode) -> Self {
+        self.unsupported_permission_modes.push(mode);
         self
     }
 
@@ -110,6 +121,16 @@ pub enum Step {
     /// Ends the agent session once this turn has ended and forgets it, as
     /// an agent CLI whose session expired would: resuming it fails.
     ForgetSession,
+    /// Answers with the permission mode the agent session runs in, in the
+    /// harness's own spelling, such as `auto_accept_edits`.
+    ReportPermissionMode,
+    /// Asks for the developer's approval and waits for the answer, then
+    /// answers with `approved`, `declined` or `declined: <feedback>`.
+    RequestApproval { description: String },
+    /// Asks the developer questions and waits for the answer, then answers
+    /// with `answered: <id>=<answer>|<answer>, ...` or as a declined
+    /// approval does.
+    AskQuestions { questions: Vec<Question> },
     /// Writes `contents` to `path`, relative to the working directory, and
     /// answers `wrote <path>`. A read-only agent session declines, as a
     /// real agent CLI would, and answers `declined: read-only`.
@@ -136,4 +157,5 @@ pub enum FakeInput {
     UserMessage { text: String },
     Steer { text: String },
     Interrupt,
+    Answer { request: String, answer: Answer },
 }
