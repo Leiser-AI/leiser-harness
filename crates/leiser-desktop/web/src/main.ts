@@ -17,6 +17,7 @@ import type {
   RepositoryId,
   RepositoryOverview,
   RepositoryScript,
+  Todo,
   TranscriptEntry,
 } from "./protocol";
 import * as extensions from "./extensions";
@@ -40,6 +41,10 @@ const sendButton = byId<HTMLButtonElement>("send");
 const interruptButton = byId<HTMLButtonElement>("interrupt");
 const errorBox = byId("error");
 const repoCheckView = byId("repo-check");
+const todosPanel = byId("todos");
+const todoList = byId("todo-list");
+const todoForm = byId<HTMLFormElement>("todo-form");
+const todoInput = byId<HTMLInputElement>("todo-text");
 extensions.mount(byId("extensions"));
 
 function byId<T extends HTMLElement = HTMLElement>(id: string): T {
@@ -84,10 +89,11 @@ let selectedWorking = false;
 async function refresh(): Promise<void> {
   const read = ++readCount;
   const chat = selectedChat;
-  const [repositories, chats, view] = await Promise.all([
+  const [repositories, chats, view, todos] = await Promise.all([
     service.listRepositories(),
     service.listChats(),
     chat === null ? Promise.resolve(null) : service.readChat(chat),
+    chat === null ? Promise.resolve(null) : service.listTodos(chat),
   ]);
   const checks = new Map(
     await Promise.all(
@@ -103,12 +109,14 @@ async function refresh(): Promise<void> {
     const shown = repositories.find((overview) => overview.repository === selectedExtensions);
     repoCheckView.hidden = true;
     renderExtensionsTopBar(shown ?? null);
+    renderTodos(null, null);
     return;
   }
   const checked = repositories.find((overview) => overview.repository === selectedCheck);
   const check = selectedCheck === null ? undefined : checks.get(selectedCheck);
   if (checked && check) {
     renderRepoCheck(checked, check);
+    renderTodos(null, null);
     return;
   }
   repoCheckView.hidden = true;
@@ -119,6 +127,45 @@ async function refresh(): Promise<void> {
     overview,
     repositories.find((candidate) => candidate.repository === overview?.repository) ?? null,
   );
+  renderTodos(chat, todos);
+}
+
+function renderTodos(chat: ChatId | null, todos: Todo[] | null): void {
+  if (chat === null || todos === null) {
+    todosPanel.hidden = true;
+    return;
+  }
+  const items = todos.map((todo) => {
+    const item = el("li", todo.done ? "todo done" : "todo");
+    const label = el("label");
+    const check = el("input");
+    check.type = "checkbox";
+    check.checked = todo.done;
+    check.addEventListener("change", () =>
+      act(async () => {
+        await service.setTodoDone(chat, todo.id, check.checked);
+        await refresh();
+      }),
+    );
+    label.append(check, el("span", "todo-text", todo.text));
+    const remove = el("button", "todo-remove", "×");
+    remove.type = "button";
+    remove.title = "Remove this todo";
+    remove.setAttribute("aria-label", `Remove "${todo.text}"`);
+    remove.addEventListener("click", () =>
+      act(async () => {
+        await service.removeTodo(chat, todo.id);
+        await refresh();
+      }),
+    );
+    item.append(label, remove);
+    return item;
+  });
+  if (items.length === 0) {
+    items.push(el("li", "empty", "No todos yet."));
+  }
+  todoList.replaceChildren(...items);
+  todosPanel.hidden = false;
 }
 
 const STATUS_LABELS: Record<ChatStatus, string> = {
@@ -544,6 +591,18 @@ async function send(): Promise<void> {
     messageInput.focus();
   }
 }
+
+todoForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  const text = todoInput.value.trim();
+  if (selectedChat === null || text === "") return;
+  const chat = selectedChat;
+  void act(async () => {
+    await service.addTodo(chat, text);
+    todoInput.value = "";
+    await refresh();
+  });
+});
 
 interruptButton.addEventListener("click", () =>
   act(async () => {

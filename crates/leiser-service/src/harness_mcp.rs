@@ -3,11 +3,14 @@
 //! A small MCP server over streamable HTTP on localhost, without server
 //! streams or sessions: every POST carries one JSON-RPC message and gets a
 //! JSON answer. Each agent session gets its own address with an
-//! unguessable token, which also names the chat it may read. The chat is
-//! read through the service's command loop, which owns the transcripts.
+//! unguessable token, which also names the chat it may read and the tools
+//! it gets. Calls go to the service's command loop, which owns the chats.
 //!
-//! v1 exposes two tools, always on: `read_chat`, and `name_branch` for
-//! chats in a worktree.
+//! v1 exposes `read_chat`, always on, `name_branch` for chats in a
+//! worktree, and the chat's todo list (`list_todos`, `add_todo`,
+//! `set_todo_done`, `remove_todo`) where the repository switches agent
+//! access to it on. A tool that is not on is not listed and calling it
+//! fails like calling an unknown tool.
 
 use std::collections::HashMap;
 use std::convert::Infallible;
@@ -26,8 +29,9 @@ use serde_json::{Value, json};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::ChatId;
 use crate::handoff::{self, ReadError};
+use crate::todos::TodoChange;
+use crate::{ChatId, CommandError, Todo, TodoId};
 
 /// Protocol versions this server speaks, newest first.
 const PROTOCOL_VERSIONS: [&str; 3] = ["2025-11-25", "2025-06-18", "2025-03-26"];
@@ -38,6 +42,10 @@ const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 const ACCEPT_RETRY: Duration = Duration::from_millis(100);
 
 const READ_CHAT: &str = "read_chat";
+const LIST_TODOS: &str = "list_todos";
+const ADD_TODO: &str = "add_todo";
+const SET_TODO_DONE: &str = "set_todo_done";
+const REMOVE_TODO: &str = "remove_todo";
 const NAME_BRANCH: &str = "name_branch";
 
 /// Why the harness MCP server could not start.
@@ -67,18 +75,47 @@ pub(crate) struct BranchNaming {
     pub reply: oneshot::Sender<Result<String, String>>,
 }
 
+/// A todo list call, for the command loop to answer with the todo list
+/// after the change, if any, and the id of an added todo.
+#[derive(Debug)]
+pub(crate) struct TodoCall {
+    pub chat: ChatId,
+    pub change: Option<TodoChange>,
+    pub reply: oneshot::Sender<Result<TodoAnswer, CommandError>>,
+}
+
+#[derive(Debug)]
+pub(crate) struct TodoAnswer {
+    pub added: Option<TodoId>,
+    pub todos: Vec<Todo>,
+}
+
 /// A tool call the command loop answers.
 #[derive(Debug)]
 pub(crate) enum HarnessCall {
     ReadChat(ChatRead),
     NameBranch(BranchNaming),
+    Todos(TodoCall),
 }
 
-/// What every connection shares: which token belongs to which chat, and
-/// where tool calls go.
+/// The tools an agent session gets besides those always on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Tools {
+    pub todo_list: bool,
+}
+
+/// What one address may do: read and change one chat, with these tools.
+#[derive(Debug, Clone, Copy)]
+struct Access {
+    chat: ChatId,
+    tools: Tools,
+}
+
+/// What every connection shares: which token may do what, and where tool
+/// calls go.
 #[derive(Debug)]
 struct Shared {
-    chats: Mutex<HashMap<String, ChatId>>,
+    chats: Mutex<HashMap<String, Access>>,
     calls: mpsc::Sender<HarnessCall>,
 }
 
@@ -112,8 +149,8 @@ impl HarnessMcp {
     }
 
     /// Gives an agent session its own address, through which it reads
-    /// `chat`.
-    pub(crate) fn register(&self, chat: ChatId) -> Result<String, HarnessMcpError> {
+    /// `chat` and uses `tools` on it.
+    pub(crate) fn register(&self, chat: ChatId, tools: Tools) -> Result<String, HarnessMcpError> {
         let mut bytes = [0_u8; 16];
         getrandom::fill(&mut bytes).map_err(HarnessMcpError::Token)?;
         let token = bytes.iter().fold(String::new(), |mut token, byte| {
@@ -125,7 +162,7 @@ impl HarnessMcp {
             .chats
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(token, chat);
+            .insert(token, Access { chat, tools });
         Ok(url)
     }
 }
@@ -158,7 +195,7 @@ async fn handle(request: Request<Incoming>, chats: &Chats) -> Response<Full<Byte
     {
         return status(StatusCode::FORBIDDEN);
     }
-    let chat = request
+    let access = request
         .uri()
         .path()
         .strip_prefix("/mcp/")
@@ -170,7 +207,7 @@ async fn handle(request: Request<Incoming>, chats: &Chats) -> Response<Full<Byte
                 .get(token)
                 .copied()
         });
-    let Some(chat) = chat else {
+    let Some(access) = access else {
         return status(StatusCode::NOT_FOUND);
     };
     if request.method() != Method::POST {
@@ -187,14 +224,14 @@ async fn handle(request: Request<Incoming>, chats: &Chats) -> Response<Full<Byte
     else {
         return status(StatusCode::PAYLOAD_TOO_LARGE);
     };
-    let message = match parse(&body.to_bytes()) {
+    let message = match parse(&body.to_bytes(), access.tools) {
         Ok(Some(message)) => message,
         // Notifications and responses need no answer.
         Ok(None) => return status(StatusCode::ACCEPTED),
         Err(error) => return json_response(StatusCode::BAD_REQUEST, &error),
     };
     let reply = match message.request {
-        Ok(request) => Reply::result(message.id, answer(request, chat, &chats.calls).await),
+        Ok(request) => Reply::result(message.id, answer(request, access, &chats.calls).await),
         Err(error) => Reply::error(Some(message.id), error),
     };
     json_response(StatusCode::OK, &reply)
@@ -252,6 +289,8 @@ struct InitializeParams {
 enum ToolCall {
     ReadChat(Result<ReadChatArguments, String>),
     NameBranch(Result<NameBranchArguments, String>),
+    /// `None` reads the todo list, a change changes it.
+    Todos(Result<Option<TodoChange>, String>),
 }
 
 #[derive(Debug, Deserialize)]
@@ -274,6 +313,29 @@ struct NameBranchArguments {
     name: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NoArguments {}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AddTodoArguments {
+    text: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SetTodoDoneArguments {
+    id: u64,
+    done: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RemoveTodoArguments {
+    id: u64,
+}
+
 /// A request to answer: its id, and the request or why it is invalid.
 #[derive(Debug)]
 struct Message {
@@ -282,7 +344,7 @@ struct Message {
 }
 
 /// Parses one JSON-RPC message. `Ok(None)` for notifications and responses.
-fn parse(body: &[u8]) -> Result<Option<Message>, Reply> {
+fn parse(body: &[u8], tools: Tools) -> Result<Option<Message>, Reply> {
     let raw: RawMessage = serde_json::from_slice(body)
         .map_err(|_| Reply::error(None, RpcError::new(-32700, "parse error")))?;
     if raw.jsonrpc != "2.0" {
@@ -294,11 +356,15 @@ fn parse(body: &[u8]) -> Result<Option<Message>, Reply> {
     let (Some(id), Some(method)) = (raw.id, raw.method) else {
         return Ok(None);
     };
-    let request = parse_request(&method, raw.params);
+    let request = parse_request(&method, raw.params, tools);
     Ok(Some(Message { id, request }))
 }
 
-fn parse_request(method: &str, params: Option<Value>) -> Result<McpRequest, RpcError> {
+fn parse_request(
+    method: &str,
+    params: Option<Value>,
+    tools: Tools,
+) -> Result<McpRequest, RpcError> {
     let params = params.unwrap_or(Value::Null);
     let invalid = |error: serde_json::Error| RpcError::new(-32602, &error.to_string());
     match method {
@@ -310,6 +376,9 @@ fn parse_request(method: &str, params: Option<Value>) -> Result<McpRequest, RpcE
         "tools/call" => {
             let call: CallToolParams = serde_json::from_value(params).map_err(invalid)?;
             let arguments = call.arguments.unwrap_or_else(|| json!({}));
+            let todos = |change: Result<Option<TodoChange>, String>| {
+                Ok(McpRequest::CallTool(ToolCall::Todos(change)))
+            };
             match call.name.as_str() {
                 READ_CHAT => Ok(McpRequest::CallTool(ToolCall::ReadChat(tool_arguments(
                     arguments,
@@ -317,6 +386,31 @@ fn parse_request(method: &str, params: Option<Value>) -> Result<McpRequest, RpcE
                 NAME_BRANCH => Ok(McpRequest::CallTool(ToolCall::NameBranch(tool_arguments(
                     arguments,
                 )))),
+                LIST_TODOS if tools.todo_list => {
+                    todos(tool_arguments::<NoArguments>(arguments).map(|_| None))
+                }
+                ADD_TODO if tools.todo_list => todos(
+                    tool_arguments::<AddTodoArguments>(arguments).map(|arguments| {
+                        Some(TodoChange::Add {
+                            text: arguments.text,
+                        })
+                    }),
+                ),
+                SET_TODO_DONE if tools.todo_list => todos(
+                    tool_arguments::<SetTodoDoneArguments>(arguments).map(|arguments| {
+                        Some(TodoChange::SetDone {
+                            todo: TodoId(arguments.id),
+                            done: arguments.done,
+                        })
+                    }),
+                ),
+                REMOVE_TODO if tools.todo_list => todos(
+                    tool_arguments::<RemoveTodoArguments>(arguments).map(|arguments| {
+                        Some(TodoChange::Remove {
+                            todo: TodoId(arguments.id),
+                        })
+                    }),
+                ),
                 name => Err(RpcError::new(-32602, &format!("unknown tool: {name}"))),
             }
         }
@@ -332,7 +426,8 @@ fn tool_arguments<T: serde::de::DeserializeOwned>(arguments: Value) -> Result<T,
     serde_json::from_value(arguments).map_err(|error| error.to_string())
 }
 
-async fn answer(request: McpRequest, chat: ChatId, calls: &mpsc::Sender<HarnessCall>) -> Value {
+async fn answer(request: McpRequest, access: Access, calls: &mpsc::Sender<HarnessCall>) -> Value {
+    let chat = access.chat;
     match request {
         McpRequest::Initialize(params) => {
             let version = PROTOCOL_VERSIONS
@@ -347,20 +442,27 @@ async fn answer(request: McpRequest, chat: ChatId, calls: &mpsc::Sender<HarnessC
                     "title": "leiser harness",
                     "version": env!("CARGO_PKG_VERSION"),
                 },
-                "instructions": "Tools of the leiser harness. Use read_chat to read \
-                    entries of this chat that a handoff left out, and name_branch to \
-                    name the branch of this chat's worktree.",
+                "instructions": instructions(access.tools),
             })
         }
         McpRequest::Ping => json!({}),
-        McpRequest::ListTools => json!({ "tools": [read_chat_tool(), name_branch_tool()] }),
+        McpRequest::ListTools => {
+            let mut tools = vec![read_chat_tool(), name_branch_tool()];
+            if access.tools.todo_list {
+                tools.extend(todo_tools());
+            }
+            json!({ "tools": tools })
+        }
         McpRequest::CallTool(call) => {
             let text = match call {
                 ToolCall::ReadChat(Ok(arguments)) => read_chat(chat, arguments, calls)
                     .await
                     .map_err(|error| error.to_string()),
                 ToolCall::NameBranch(Ok(arguments)) => name_branch(chat, arguments, calls).await,
-                ToolCall::ReadChat(Err(error)) | ToolCall::NameBranch(Err(error)) => Err(error),
+                ToolCall::Todos(Ok(change)) => change_todos(chat, change, calls).await,
+                ToolCall::ReadChat(Err(error))
+                | ToolCall::NameBranch(Err(error))
+                | ToolCall::Todos(Err(error)) => Err(error),
             };
             match text {
                 Ok(text) => json!({
@@ -374,6 +476,21 @@ async fn answer(request: McpRequest, chat: ChatId, calls: &mpsc::Sender<HarnessC
             }
         }
     }
+}
+
+fn instructions(tools: Tools) -> String {
+    let mut text = "Tools of the leiser harness. Use read_chat to read entries of this \
+        chat that a handoff left out, and name_branch to name the branch of this chat's \
+        worktree."
+        .to_owned();
+    if tools.todo_list {
+        text.push_str(
+            " The developer sees this chat's todo list in the harness. Use \
+             list_todos, add_todo, set_todo_done and remove_todo to track the \
+             steps of the task there.",
+        );
+    }
+    text
 }
 
 async fn read_chat(
@@ -434,6 +551,146 @@ fn name_branch_tool() -> Value {
         },
         "annotations": { "readOnlyHint": false, "destructiveHint": false, "openWorldHint": false },
     })
+}
+
+/// Reads or changes the chat's todo list and answers with what happened
+/// and the list after it.
+async fn change_todos(
+    chat: ChatId,
+    change: Option<TodoChange>,
+    calls: &mpsc::Sender<HarnessCall>,
+) -> Result<String, String> {
+    let stopped = || CommandError::ServiceStopped.to_string();
+    let summary = match &change {
+        Some(TodoChange::SetDone { todo, done: true }) => Some(format!("Checked todo {todo}.")),
+        Some(TodoChange::SetDone { todo, done: false }) => Some(format!("Unchecked todo {todo}.")),
+        Some(TodoChange::Remove { todo }) => Some(format!("Removed todo {todo}.")),
+        None | Some(TodoChange::Add { .. }) => None,
+    };
+    let (reply, answer) = oneshot::channel();
+    calls
+        .send(HarnessCall::Todos(TodoCall {
+            chat,
+            change,
+            reply,
+        }))
+        .await
+        .map_err(|_| stopped())?;
+    let answer = answer
+        .await
+        .map_err(|_| stopped())?
+        .map_err(|error| error.to_string())?;
+    let list = render_todos(&answer.todos);
+    let summary = answer
+        .added
+        .map(|todo| format!("Added todo {todo}."))
+        .or(summary);
+    Ok(match summary {
+        Some(summary) => format!("{summary}\n\n{list}"),
+        None => list,
+    })
+}
+
+/// The todo list as the agent reads it: one line per todo.
+fn render_todos(todos: &[Todo]) -> String {
+    if todos.is_empty() {
+        return "The todo list is empty.".to_owned();
+    }
+    todos
+        .iter()
+        .fold("Todo list:".to_owned(), |mut text, todo| {
+            let check = if todo.done { 'x' } else { ' ' };
+            let _ = write!(text, "\n{}. [{check}] {}", todo.id, todo.text);
+            text
+        })
+}
+
+fn todo_tools() -> [Value; 4] {
+    let id = json!({
+        "type": "integer",
+        "minimum": 1,
+        "description": "The todo's id, as list_todos shows it.",
+    });
+    [
+        json!({
+            "name": LIST_TODOS,
+            "title": "List todos",
+            "description": "Lists this chat's todo list, which the developer sees in the \
+                harness: one line per todo with its id and whether it is checked.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false,
+            },
+            "annotations": { "readOnlyHint": true, "openWorldHint": false },
+        }),
+        json!({
+            "name": ADD_TODO,
+            "title": "Add todo",
+            "description": "Adds a todo at the end of this chat's todo list and answers \
+                with the list.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "text": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "What is to be done.",
+                    },
+                },
+                "required": ["text"],
+                "additionalProperties": false,
+            },
+            "annotations": {
+                "readOnlyHint": false,
+                "destructiveHint": false,
+                "idempotentHint": false,
+                "openWorldHint": false,
+            },
+        }),
+        json!({
+            "name": SET_TODO_DONE,
+            "title": "Check todo",
+            "description": "Checks a todo of this chat's todo list as done, or unchecks \
+                it, and answers with the list.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": id,
+                    "done": {
+                        "type": "boolean",
+                        "description": "true checks the todo, false unchecks it.",
+                    },
+                },
+                "required": ["id", "done"],
+                "additionalProperties": false,
+            },
+            "annotations": {
+                "readOnlyHint": false,
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": false,
+            },
+        }),
+        json!({
+            "name": REMOVE_TODO,
+            "title": "Remove todo",
+            "description": "Removes a todo from this chat's todo list and answers with \
+                the list.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "id": id },
+                "required": ["id"],
+                "additionalProperties": false,
+            },
+            "annotations": {
+                "readOnlyHint": false,
+                "destructiveHint": true,
+                "idempotentHint": true,
+                "openWorldHint": false,
+            },
+        }),
+    ]
 }
 
 fn read_chat_tool() -> Value {

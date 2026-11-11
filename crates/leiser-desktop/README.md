@@ -29,8 +29,10 @@ npm run tauri dev
 ```
 
 To try the app without a subscription, run it on the testkit's fake agent
-CLI, which answers every message with a tool call, its result and an echo,
-and every `repo-check` with a made-up sample report.
+CLI, which answers every message with a tool call, its result, an echo and
+a todo it adds through the harness MCP server (refused unless the
+repository's `.leiser/config.toml` has `[agent_access] todo_list = true`).
+Every `repo-check` gets a made-up sample report.
 Its chats are kept apart from real ones.
 
 ```bash

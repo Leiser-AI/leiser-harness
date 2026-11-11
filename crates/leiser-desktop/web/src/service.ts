@@ -19,6 +19,8 @@ import type {
   RepositoryOverview,
   Response,
   ServiceEvent,
+  Todo,
+  TodoId,
   TranscriptEntry,
   UnreadableCliExtensionFile,
 } from "./protocol";
@@ -68,6 +70,10 @@ function describe(error: CommandError): string {
       return `${AGENT_CLI_NAMES[error.agent_cli]} is not set up in the harness service.`;
     case "agent_cli":
       return `The agent CLI failed: ${error.reason}`;
+    case "empty_todo":
+      return "A todo needs a text.";
+    case "unknown_todo":
+      return `Todo ${error.todo} no longer exists.`;
     case "storage":
       return `The harness service could not store the chat: ${error.reason}`;
     case "repo_check_not_configured":
@@ -165,6 +171,26 @@ export async function runRepoCheck(repository: RepositoryId): Promise<void> {
 export async function readRepoCheck(repository: RepositoryId): Promise<RepoCheck> {
   const response = await execute({ type: "read_repo_check", repository });
   return response.type === "repo_check" ? response.check : unexpected(response);
+}
+
+export async function listTodos(chat: ChatId): Promise<Todo[]> {
+  const response = await execute({ type: "list_todos", chat });
+  return response.type === "todos" ? response.todos : unexpected(response);
+}
+
+export async function addTodo(chat: ChatId, text: string): Promise<TodoId> {
+  const response = await execute({ type: "add_todo", chat, text });
+  return response.type === "todo_added" ? response.todo : unexpected(response);
+}
+
+export async function setTodoDone(chat: ChatId, todo: TodoId, done: boolean): Promise<void> {
+  const response = await execute({ type: "set_todo_done", chat, todo, done });
+  if (response.type !== "todo_updated") unexpected(response);
+}
+
+export async function removeTodo(chat: ChatId, todo: TodoId): Promise<void> {
+  const response = await execute({ type: "remove_todo", chat, todo });
+  if (response.type !== "todo_removed") unexpected(response);
 }
 
 /** The CLI extensions each agent CLI loads from a repository. */

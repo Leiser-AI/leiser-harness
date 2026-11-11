@@ -17,11 +17,17 @@
 //! # `repo-check` rules switched off, each with the reason why.
 //! [repo_check.off]
 //! D3 = "No pre-commit hook: the full check runs in CI in under a minute."
+//!
+//! [agent_access]
+//! # Agent sessions may read and change the chat's todo list through the
+//! # harness MCP server. Default: false, only the developer uses it.
+//! todo_list = true
 //! ```
 //!
 //! A repository without the file uses the defaults. Sections other
 //! features read may be present; unknown keys inside `[worktree]` and
-//! `[repo_check]` are refused, so a typo does not go unnoticed.
+//! `[repo_check]` and `[agent_access]` are refused, so a typo does not go
+//! unnoticed.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -55,6 +61,8 @@ pub(crate) struct RepositoryConfig {
     pub worktree: WorktreeConfig,
     #[serde(default)]
     pub repo_check: RepoCheckConfig,
+    #[serde(default)]
+    pub agent_access: AgentAccess,
 }
 
 /// Which `repo-check` rules the repository switches off.
@@ -77,6 +85,15 @@ impl RepoCheckConfig {
             })
             .collect()
     }
+}
+
+/// Which harness features agent sessions may use. Off by default: only the
+/// developer uses them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct AgentAccess {
+    /// The chat's todo list, through the harness MCP server.
+    pub todo_list: bool,
 }
 
 /// How chats of the repository get and leave their worktrees.
