@@ -9,9 +9,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use leiser_service::{
-    AgentEvent, Branch, ChatId, ChatPlace, ChatStatus, Checkout, Command, CommandError,
-    CommitAuthor, Event, HostAccountId, LoginOutcome, PullRequest, PullRequestState, RepositoryId,
-    Response, ServiceHandle, TranscriptEntry,
+    AgentEvent, Branch, ChatId, ChatPlace, ChatSettings, ChatStatus, Checkout, Command,
+    CommandError, CommitAuthor, Event, HostAccountId, LoginOutcome, PullRequest, PullRequestState,
+    RepositoryId, Response, ServiceHandle, TranscriptEntry,
 };
 use leiser_testkit::{
     DEFAULT_BRANCH, FAKE_GIT_HOST_MERGED_FILE, Script, Step, TestRepo, TestService, collect_turn,
@@ -99,6 +99,7 @@ async fn start_chat(service: &ServiceHandle, repository: RepositoryId) -> TestRe
         .execute(Command::StartChat {
             repository,
             checkout: Checkout::NewWorktree,
+            settings: ChatSettings::default(),
         })
         .await?
     {
@@ -565,6 +566,7 @@ async fn a_chat_in_the_main_checkout_has_no_worktree_to_remove() -> TestResult {
         .execute(Command::StartChat {
             repository,
             checkout: Checkout::Main,
+            settings: ChatSettings::default(),
         })
         .await?
     {

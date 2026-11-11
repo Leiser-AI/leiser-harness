@@ -7,8 +7,8 @@ use std::path::Path;
 use std::time::Duration;
 
 use leiser_service::{
-    AgentEvent, ChatId, ChatStatus, Checkout, Command, CommandError, ConnectError, ENDPOINT_FILE,
-    Event, LOCAL_INTERFACE_VERSION, LocalClient, Notification, Response,
+    AgentEvent, ChatId, ChatSettings, ChatStatus, Checkout, Command, CommandError, ConnectError,
+    ENDPOINT_FILE, Event, LOCAL_INTERFACE_VERSION, LocalClient, Notification, Response,
 };
 use leiser_testkit::{Gate, Script, Step, TestRepo, TestService};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -36,6 +36,7 @@ async fn start_chat(app: &LocalClient, repo: &TestRepo) -> TestResult<ChatId> {
         .execute(Command::StartChat {
             repository,
             checkout: Checkout::Main,
+            settings: ChatSettings::default(),
         })
         .await?;
     let Response::ChatStarted { chat } = response else {

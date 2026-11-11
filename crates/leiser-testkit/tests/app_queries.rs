@@ -6,8 +6,9 @@ use std::path::Path;
 use std::process::Command as Process;
 
 use leiser_service::{
-    AgentCli, AgentEvent, Branch, ChatId, ChatOverview, ChatStatus, Checkout, Command,
-    CommandError, RepositoryId, RepositoryOverview, Response, ServiceHandle, TranscriptEntry,
+    AgentCli, AgentEvent, Branch, ChatId, ChatOverview, ChatSettings, ChatStatus, Checkout,
+    Command, CommandError, RepositoryId, RepositoryOverview, Response, ServiceHandle,
+    TranscriptEntry,
 };
 use leiser_testkit::{Script, Step, TestRepo, TestService, collect_turn};
 
@@ -36,6 +37,7 @@ async fn start_chat(service: &ServiceHandle, repository: RepositoryId) -> TestRe
         .execute(Command::StartChat {
             repository,
             checkout: Checkout::Main,
+            settings: ChatSettings::default(),
         })
         .await?;
     let Response::ChatStarted { chat } = response else {

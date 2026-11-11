@@ -95,14 +95,14 @@ pub use local_interface::{
 pub use program::{ArgsError, SERVICE_LOG_FILE, ServiceProgram};
 pub use protocol::{
     AgentCli, AgentEvent, Answer, ApiKey, AutoFix, AutoFixStop, AutoFixTrigger, Branch, ChatId,
-    ChatOverview, ChatPlace, ChatStatus, CheckId, Checkout, CheckpointMoment, CliExtension,
-    CliExtensionKind, Command, CommandError, CommentLocation, CommitAuthor, DiffLine, DiffRange,
-    Event, FileChange, FileDiff, Finding, HostAccountBinding, HostAccountId, HostAccountOverview,
-    Hunk, InvalidCheckId, LoginAnswer, LoginOutcome, OptOuts, Patch, PermissionMode, Provider,
-    PullRequest, PullRequestState, Question, QuestionOption, QueueReason, RepoCheck,
-    RepoCheckReport, RepositoryId, RepositoryOverview, RepositoryScript, Response, SignIn,
-    SubscriptionId, SubscriptionKind, SubscriptionOverview, SwitchedOffCheck, Todo, TodoId,
-    TranscriptEntry, TurnCheckpoints, UnreadableCliExtensionFile, UsageLimit,
+    ChatOverview, ChatPlace, ChatSettings, ChatStatus, CheckId, Checkout, CheckpointMoment,
+    CliExtension, CliExtensionKind, Command, CommandError, CommentLocation, CommitAuthor, DiffLine,
+    DiffRange, Event, FileChange, FileDiff, Finding, HostAccountBinding, HostAccountId,
+    HostAccountOverview, Hunk, InvalidCheckId, LoginAnswer, LoginOutcome, OptOuts, Patch,
+    PermissionMode, Provider, PullRequest, PullRequestState, Question, QuestionOption, QueueReason,
+    RepoCheck, RepoCheckReport, RepositoryId, RepositoryOverview, RepositoryScript, Response,
+    SignIn, StartOn, SubscriptionId, SubscriptionKind, SubscriptionOverview, SwitchedOffCheck,
+    Todo, TodoId, TranscriptEntry, TurnCheckpoints, UnreadableCliExtensionFile, UsageLimit,
 };
 pub use service::{Service, ServiceConfig, ServiceHandle, StartError, start};
 pub use store::StorageError;

@@ -14,7 +14,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use leiser_service::{
-    AgentCli, Checkout, ClaudeCodeDriver, CodexDriver, Command, CommandError, Environment, Response,
+    AgentCli, ChatSettings, Checkout, ClaudeCodeDriver, CodexDriver, Command, CommandError,
+    Environment, Response,
 };
 use leiser_testkit::{TestRepo, TestService};
 
@@ -136,6 +137,7 @@ async fn send_first_message(
         .execute(Command::StartChat {
             repository,
             checkout: Checkout::Main,
+            settings: ChatSettings::default(),
         })
         .await?
     else {

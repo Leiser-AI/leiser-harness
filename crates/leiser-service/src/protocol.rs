@@ -220,6 +220,28 @@ pub enum Checkout {
     Worktree { chat: ChatId },
 }
 
+/// What the developer chose for a new chat instead of its repository's
+/// defaults.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatSettings {
+    /// The provider whose agent CLI the chat starts on, and its
+    /// subscription there. `None`: the service's default agent CLI on the
+    /// repository's default subscription.
+    #[serde(default)]
+    pub start_on: Option<StartOn>,
+    /// `None`: the repository's permission mode.
+    #[serde(default)]
+    pub permission_mode: Option<PermissionMode>,
+}
+
+/// The provider and subscription a new chat starts on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StartOn {
+    pub provider: Provider,
+    /// `None`: the agent CLI's own default login.
+    pub subscription: Option<SubscriptionId>,
+}
+
 /// A script of the repository, set in its `.leiser/config.toml`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -243,11 +265,21 @@ pub enum Command {
     /// Answers once the chat's worktree exists; its setup script may still
     /// run then. Messages sent meanwhile wait for it
     /// ([`QueueReason::SettingUp`]).
+    ///
+    /// The chat starts with `settings`; what they leave out comes from the
+    /// repository's `.leiser/config.toml`, as [`Command::ReadChatDefaults`]
+    /// reports it.
     StartChat {
         repository: RepositoryId,
         #[serde(default)]
         checkout: Checkout,
+        #[serde(default)]
+        settings: ChatSettings,
     },
+    /// Reads what a new chat in the repository starts with when
+    /// [`Command::StartChat`] names no settings, for the desktop app to
+    /// show before the chat starts.
+    ReadChatDefaults { repository: RepositoryId },
     /// Sends the developer's message to the chat's agent session, starting
     /// the agent session if the chat has none yet. Fails while a turn runs;
     /// queue or steer the message instead.
@@ -598,6 +630,14 @@ pub enum Response {
     },
     ChatStarted {
         chat: ChatId,
+    },
+    /// What a new chat in the repository starts with.
+    ChatDefaults {
+        agent_cli: AgentCli,
+        permission_mode: PermissionMode,
+        /// The default subscription of `agent_cli`'s provider; `None`: the
+        /// agent CLI's own default login.
+        subscription: Option<SubscriptionId>,
     },
     /// The message was sent and starts a turn.
     MessageSent,

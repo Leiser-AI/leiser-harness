@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use leiser_service::{
-    AgentEvent, Branch, ChatId, Checkout, Command, CommandError, CommitAuthor, Event,
+    AgentEvent, Branch, ChatId, ChatSettings, Checkout, Command, CommandError, CommitAuthor, Event,
     HostAccountId, LoginOutcome, PermissionMode, RepositoryId, Response, ServiceHandle,
 };
 use leiser_testkit::{DEFAULT_BRANCH, Script, Step, TestRepo, TestService, collect_turn};
@@ -96,6 +96,7 @@ async fn start_chat(
         .execute(Command::StartChat {
             repository,
             checkout,
+            settings: ChatSettings::default(),
         })
         .await?
     {

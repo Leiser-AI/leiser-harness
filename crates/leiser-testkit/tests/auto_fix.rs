@@ -12,9 +12,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use leiser_service::{
-    AutoFix, AutoFixStop, AutoFixTrigger, ChatId, Checkout, Command, CommentLocation, CommitAuthor,
-    CommitId, Event, HostAccountId, LoginOutcome, PullRequest, PullRequestState, RepositoryId,
-    Response, ServiceHandle, TranscriptEntry,
+    AutoFix, AutoFixStop, AutoFixTrigger, ChatId, ChatSettings, Checkout, Command, CommentLocation,
+    CommitAuthor, CommitId, Event, HostAccountId, LoginOutcome, PullRequest, PullRequestState,
+    RepositoryId, Response, ServiceHandle, TranscriptEntry,
 };
 use leiser_testkit::{
     DEFAULT_BRANCH, FakePoll, Gate, Script, Step, TestRepo, TestService, collect_turn,
@@ -163,6 +163,7 @@ async fn start_chat(service: &ServiceHandle, repository: RepositoryId) -> TestRe
         .execute(Command::StartChat {
             repository,
             checkout: Checkout::NewWorktree,
+            settings: ChatSettings::default(),
         })
         .await?
     {

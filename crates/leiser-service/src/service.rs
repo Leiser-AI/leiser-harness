@@ -32,12 +32,13 @@ mod auto_fix;
 mod pull_requests;
 
 use crate::{
-    Access, AgentCli, AgentEvent, AgentSessionId, Answer, Branch, ChatId, ChatOverview, ChatStatus,
-    Checkout, CheckpointMoment, Command, CommandError, CommitAuthor, DiffRange, Driver, Event,
-    HostAccountBinding, HostAccountId, Keychain, LoginAnswer, LoginOutcome, LoginProcess, OptOuts,
-    OsKeychain, PermissionMode, Provider, QueueReason, RepoCheck, RepositoryId, RepositoryOverview,
-    RepositoryScript, Response, SessionInput, SessionSpec, SignIn, SubscriptionAccess,
-    SubscriptionId, SubscriptionKind, TodoId, TranscriptEntry, TurnCheckpoints, UsageLimit, script,
+    Access, AgentCli, AgentEvent, AgentSessionId, Answer, Branch, ChatId, ChatOverview,
+    ChatSettings, ChatStatus, Checkout, CheckpointMoment, Command, CommandError, CommitAuthor,
+    DiffRange, Driver, Event, HostAccountBinding, HostAccountId, Keychain, LoginAnswer,
+    LoginOutcome, LoginProcess, OptOuts, OsKeychain, PermissionMode, Provider, QueueReason,
+    RepoCheck, RepositoryId, RepositoryOverview, RepositoryScript, Response, SessionInput,
+    SessionSpec, SignIn, StartOn, SubscriptionAccess, SubscriptionId, SubscriptionKind, TodoId,
+    TranscriptEntry, TurnCheckpoints, UsageLimit, script,
 };
 use auto_fix::{AutoFixWork, ChatAutoFix};
 use pull_requests::{ChatPullRequest, PullRequestWork};
@@ -560,9 +561,11 @@ struct PendingWorktree {
     setup_script: Option<String>,
 }
 
-/// What a new chat starts with from its repository's config, read when the
-/// chat started.
+/// What a new chat starts with: its repository's config as read when the
+/// chat started, with the developer's [`ChatSettings`] in its place where
+/// they chose.
 struct ChatDefaults {
+    agent_cli: AgentCli,
     permission_mode: PermissionMode,
     subscriptions: BTreeMap<Provider, SubscriptionId>,
 }
@@ -822,10 +825,13 @@ impl State {
             Command::StartChat {
                 repository,
                 checkout,
+                settings,
             } => {
-                self.start_chat_command(repository, checkout, reply).await;
+                self.start_chat_command(repository, checkout, settings, reply)
+                    .await;
                 return;
             }
+            Command::ReadChatDefaults { repository } => self.read_chat_defaults(repository),
             Command::AddRepository { path } => self.add_repository(path),
             Command::SendMessage { chat, text } => self.send_message(chat, text).await,
             Command::QueueMessage { chat, text } => {
@@ -939,10 +945,11 @@ impl State {
         &mut self,
         repository: RepositoryId,
         checkout: Checkout,
+        settings: ChatSettings,
         reply: Reply,
     ) {
         let started = match self.bind_host_account(repository).await {
-            Ok(_) => self.start_chat(repository, checkout),
+            Ok(_) => self.start_chat(repository, checkout, settings),
             Err(error) => Err(error),
         };
         let result = match started {
@@ -1129,20 +1136,10 @@ impl State {
         &mut self,
         repository: RepositoryId,
         checkout: Checkout,
+        settings: ChatSettings,
     ) -> Result<Started, CommandError> {
-        let path = self
-            .repositories
-            .get(&repository)
-            .ok_or(CommandError::UnknownRepository { repository })?
-            .clone();
-        let config =
-            RepositoryConfig::load(&path).map_err(|error| CommandError::RepositoryConfig {
-                reason: error.to_string(),
-            })?;
-        let defaults = ChatDefaults {
-            permission_mode: config.permission_mode,
-            subscriptions: self.default_subscriptions(&config)?,
-        };
+        let (path, config) = self.repository_config(repository)?;
+        let defaults = self.chat_defaults(&config, settings)?;
         let (working_directory, place) = match checkout {
             Checkout::Main => (path, Place::MainCheckout),
             Checkout::Worktree { chat: other } => {
@@ -1193,6 +1190,64 @@ impl State {
         Ok(Started::Now(chat))
     }
 
+    /// The repository's path and its `.leiser/config.toml` as it is now.
+    fn repository_config(
+        &self,
+        repository: RepositoryId,
+    ) -> Result<(PathBuf, RepositoryConfig), CommandError> {
+        let path = self
+            .repositories
+            .get(&repository)
+            .ok_or(CommandError::UnknownRepository { repository })?
+            .clone();
+        let config =
+            RepositoryConfig::load(&path).map_err(|error| CommandError::RepositoryConfig {
+                reason: error.to_string(),
+            })?;
+        Ok((path, config))
+    }
+
+    /// What a new chat starts with: the repository's `config`, with
+    /// `settings` in its place where the developer chose.
+    fn chat_defaults(
+        &self,
+        config: &RepositoryConfig,
+        settings: ChatSettings,
+    ) -> Result<ChatDefaults, CommandError> {
+        let mut defaults = ChatDefaults {
+            agent_cli: self.default_agent_cli,
+            permission_mode: settings.permission_mode.unwrap_or(config.permission_mode),
+            subscriptions: self.default_subscriptions(config)?,
+        };
+        if let Some(StartOn {
+            provider,
+            subscription,
+        }) = settings.start_on
+        {
+            self.check_subscription(provider, subscription)?;
+            defaults.agent_cli = provider.agent_cli();
+            self.driver(defaults.agent_cli)?;
+            match subscription {
+                Some(subscription) => defaults.subscriptions.insert(provider, subscription),
+                None => defaults.subscriptions.remove(&provider),
+            };
+        }
+        Ok(defaults)
+    }
+
+    fn read_chat_defaults(&self, repository: RepositoryId) -> Result<Response, CommandError> {
+        let (_, config) = self.repository_config(repository)?;
+        let defaults = self.chat_defaults(&config, ChatSettings::default())?;
+        Ok(Response::ChatDefaults {
+            agent_cli: defaults.agent_cli,
+            permission_mode: defaults.permission_mode,
+            subscription: defaults
+                .subscriptions
+                .get(&defaults.agent_cli.provider())
+                .copied(),
+        })
+    }
+
     fn insert_chat(
         &mut self,
         chat: ChatId,
@@ -1211,7 +1266,7 @@ impl State {
             setup,
             shown: (ChatStatus::WaitingForYou, self.status_changes),
             title: None,
-            agent_cli: self.default_agent_cli,
+            agent_cli: defaults.agent_cli,
             agent_sessions: BTreeMap::new(),
             handoff: None,
             permission_mode: defaults.permission_mode,
