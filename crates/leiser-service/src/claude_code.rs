@@ -122,12 +122,17 @@ fn permission_mode_argument(mode: PermissionMode) -> &'static str {
 /// `--settings` ranks above the repository's own settings files, which
 /// stay in force: Claude Code merges list keys such as `permissions.deny`
 /// across all of them, and a deny rule holds in every permission mode.
-fn sandbox_settings() -> String {
+///
+/// With the sandbox on, Claude Code runs every sandboxed command without
+/// asking unless `autoAllowBashIfSandboxed` is false; `ask_for_commands`
+/// keeps Supervised and Auto-accept edits asking before each command.
+fn sandbox_settings(ask_for_commands: bool) -> String {
     serde_json::json!({
         "sandbox": {
             "enabled": true,
             "failIfUnavailable": !cfg!(windows),
             "allowUnsandboxedCommands": false,
+            "autoAllowBashIfSandboxed": !ask_for_commands,
         },
         "attribution": { "commit": "", "pr": "" },
         "includeCoAuthoredBy": false,
@@ -356,7 +361,14 @@ fn arguments(spec: &SessionSpec, resume: Option<&AgentSessionId>) -> Vec<String>
             );
         }
     }
-    arguments.extend(["--settings".to_owned(), sandbox_settings()]);
+    let ask_for_commands = match spec.access {
+        Access::Chat => matches!(
+            spec.permission_mode,
+            PermissionMode::Supervised | PermissionMode::AutoAcceptEdits
+        ),
+        Access::ReadOnly => true,
+    };
+    arguments.extend(["--settings".to_owned(), sandbox_settings(ask_for_commands)]);
     // Both options take several values; each is followed by another option
     // or ends the arguments.
     if let Some(url) = &spec.harness_mcp_url {
@@ -1194,6 +1206,14 @@ mod tests {
             assert_eq!(settings["sandbox"]["enabled"], true, "{mode:?}");
             assert_eq!(
                 settings["sandbox"]["allowUnsandboxedCommands"], false,
+                "{mode:?}"
+            );
+            let asks = matches!(
+                mode,
+                PermissionMode::Supervised | PermissionMode::AutoAcceptEdits
+            );
+            assert_eq!(
+                settings["sandbox"]["autoAllowBashIfSandboxed"], !asks,
                 "{mode:?}"
             );
             assert_eq!(
