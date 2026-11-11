@@ -61,6 +61,18 @@ pub enum Step {
     /// Waits until the file at `gate` exists, as a long turn would; see
     /// [`Gate`](crate::Gate).
     WaitForGate { gate: PathBuf },
+    /// Answers with the names of the harness MCP server's tools, joined
+    /// by commas.
+    ListHarnessTools,
+    /// Calls a tool of the harness MCP server and answers with the text it
+    /// returned, prefixed with `error: ` when the tool reported an error.
+    CallHarnessTool {
+        name: String,
+        arguments: serde_json::Value,
+    },
+    /// Ends the agent session once this turn has ended and forgets it, as
+    /// an agent CLI whose session expired would: resuming it fails.
+    ForgetSession,
 }
 
 impl Step {

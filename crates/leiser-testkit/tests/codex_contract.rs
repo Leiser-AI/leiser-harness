@@ -18,8 +18,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use leiser_service::{
-    AgentEvent, ChatId, Checkout, CodexDriver, Command, Driver, Event, QueueReason, Response,
-    ServiceHandle, SessionSpec,
+    AgentCli, AgentEvent, ChatId, Checkout, CodexDriver, Command, Driver, Event, QueueReason,
+    Response, ServiceHandle, SessionSpec,
 };
 use leiser_testkit::{FakeDriver, Gate, Script, Step, TestRepo, TestService, collect_turn_within};
 use tokio::sync::broadcast;
@@ -65,7 +65,7 @@ struct Chat {
 
 impl Chat {
     async fn start(driver: Arc<dyn Driver>, repo: &TestRepo) -> TestResult<Self> {
-        let harness = TestService::with_driver(driver)?;
+        let harness = TestService::with_driver(AgentCli::Codex, driver)?;
         let service = harness.connect();
         let Response::RepositoryAdded { repository } = service
             .execute(Command::AddRepository {
@@ -296,6 +296,8 @@ async fn an_agent_session_ends_when_its_input_is_dropped(driver: Arc<dyn Driver>
     let repo = TestRepo::new()?;
     let mut session = driver.start(SessionSpec {
         working_directory: repo.path().to_path_buf(),
+        // No harness MCP server listens there; these tests do not use it.
+        harness_mcp_url: "http://127.0.0.1:9/mcp/none".to_owned(),
     })?;
 
     drop(session.input);

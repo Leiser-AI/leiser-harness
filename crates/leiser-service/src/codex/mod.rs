@@ -3,6 +3,8 @@
 //! standard input and output. Steer uses `turn/steer`, interrupt
 //! `turn/interrupt`; both wait for the turn's id when they come before it.
 //! Resume uses `thread/resume` with the thread's id as the agent session id.
+//! The harness MCP server is configured with `-c mcp_servers.<name>.url`,
+//! which Codex reaches over streamable HTTP.
 
 mod conversation;
 mod wire;
@@ -17,8 +19,8 @@ use tokio::sync::{mpsc, oneshot};
 
 use self::conversation::{Conversation, Output, ProtocolError};
 use crate::{
-    AgentEvent, AgentSession, AgentSessionId, Driver, DriverError, SessionInput, SessionSpec,
-    Version,
+    AgentEvent, AgentSession, AgentSessionId, Driver, DriverError, HARNESS_MCP_SERVER,
+    SessionInput, SessionSpec, Version,
 };
 
 const AGENT_CLI: &str = "Codex";
@@ -143,6 +145,11 @@ impl CodexDriver {
             })?
             .to_owned();
         let mut child = Command::new(&self.program)
+            .arg("-c")
+            .arg(format!(
+                "mcp_servers.{HARNESS_MCP_SERVER}.url={}",
+                toml_string(&spec.harness_mcp_url)
+            ))
             .arg("app-server")
             .current_dir(&spec.working_directory)
             .stdin(Stdio::piped())
@@ -178,6 +185,13 @@ impl CodexDriver {
         });
         Ok(AgentSession { id, input, events })
     }
+}
+
+/// `text` as a TOML basic string, as `-c` overrides expect their values.
+fn toml_string(text: &str) -> String {
+    // A JSON string is a valid TOML basic string for the URLs passed here:
+    // both escape quotes, backslashes and control characters the same way.
+    serde_json::Value::String(text.to_owned()).to_string()
 }
 
 /// Why [`run`] returned.

@@ -119,6 +119,11 @@ pub(super) enum Item {
     },
     CommandExecution {
         command: String,
+        /// Set once the command has exited.
+        #[serde(default, rename = "exitCode")]
+        exit_code: Option<i32>,
+        #[serde(default, rename = "aggregatedOutput")]
+        aggregated_output: Option<String>,
     },
     FileChange {
         changes: Vec<FileUpdateChange>,

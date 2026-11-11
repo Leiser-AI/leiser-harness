@@ -72,6 +72,8 @@ impl FakeDriver {
             .arg(&self.sessions)
             .arg(mode)
             .arg(id.as_str())
+            .arg("--harness-mcp")
+            .arg(&spec.harness_mcp_url)
             .current_dir(&spec.working_directory)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

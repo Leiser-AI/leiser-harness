@@ -30,6 +30,8 @@ async fn codex_starts_only_at_or_above_the_minimum_version_and_says_why_not() ->
     let repo = TestRepo::new()?;
     let spec = SessionSpec {
         working_directory: repo.path().to_path_buf(),
+        // No harness MCP server listens there; these tests do not use it.
+        harness_mcp_url: "http://127.0.0.1:9/mcp/none".to_owned(),
     };
     let too_old = fake_codex(dir.path(), "old", "codex-cli 0.99.9")?;
     let unreadable = fake_codex(dir.path(), "odd", "something else 1.2.3")?;

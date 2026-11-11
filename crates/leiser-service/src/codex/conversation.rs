@@ -383,6 +383,15 @@ impl Conversation {
             Notification::ItemCompleted(Item::AgentMessage { text }) => {
                 output.events.push(AgentEvent::Message { text });
             }
+            Notification::ItemCompleted(Item::CommandExecution {
+                command,
+                exit_code,
+                aggregated_output,
+            }) => output.events.push(AgentEvent::CommandFinished {
+                command,
+                exit_code,
+                output: aggregated_output.unwrap_or_default(),
+            }),
             Notification::TurnCompleted(turn) => {
                 output.events.extend(self.usage_limit(&turn, now));
                 output
@@ -453,7 +462,7 @@ fn text_input(text: String) -> UserInput {
 
 fn tool_call(item: Item) -> Option<AgentEvent> {
     let (name, detail) = match item {
-        Item::CommandExecution { command } => ("command".to_owned(), command),
+        Item::CommandExecution { command, .. } => ("command".to_owned(), command),
         Item::FileChange { changes } => (
             "file_change".to_owned(),
             changes
@@ -642,6 +651,7 @@ mod tests {
         let notifications = [
             json!({"method": "turn/started", "params": {"threadId": "t1", "turn": {"id": "u1", "items": [], "status": "inProgress", "error": null}}}),
             json!({"method": "item/started", "params": {"threadId": "t1", "turnId": "u1", "item": {"type": "commandExecution", "id": "c1", "command": "cargo test", "cwd": "/repo", "status": "inProgress"}}}),
+            json!({"method": "item/completed", "params": {"threadId": "t1", "turnId": "u1", "item": {"type": "commandExecution", "id": "c1", "command": "cargo test", "cwd": "/repo", "status": "failed", "exitCode": 101, "aggregatedOutput": "test result: FAILED"}}}),
             json!({"method": "item/started", "params": {"threadId": "t1", "turnId": "u1", "item": {"type": "fileChange", "id": "f1", "changes": [{"path": "a.rs", "kind": {"type": "update"}, "diff": ""}, {"path": "b.rs", "kind": {"type": "add"}, "diff": ""}], "status": "inProgress"}}}),
             json!({"method": "item/started", "params": {"threadId": "t1", "turnId": "u1", "item": {"type": "agentMessage", "id": "m1", "text": ""}}}),
             json!({"method": "item/agentMessage/delta", "params": {"threadId": "t1", "turnId": "u1", "itemId": "m1", "delta": "Do"}}),
@@ -660,6 +670,11 @@ mod tests {
                 AgentEvent::ToolCall {
                     name: "command".to_owned(),
                     detail: "cargo test".to_owned()
+                },
+                AgentEvent::CommandFinished {
+                    command: "cargo test".to_owned(),
+                    exit_code: Some(101),
+                    output: "test result: FAILED".to_owned(),
                 },
                 AgentEvent::ToolCall {
                     name: "file_change".to_owned(),

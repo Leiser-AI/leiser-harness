@@ -9,6 +9,10 @@
 //! Resume runs Claude Code with `--resume <session id>`; the id comes from
 //! the `session_id` field of Claude Code's output lines.
 //!
+//! The harness MCP server is passed with `--mcp-config` as an HTTP server,
+//! and its read-only `read_chat` tool is allowed with `--allowedTools`, so
+//! it never waits for an approval.
+//!
 //! Interrupt uses Claude Code's control protocol. Steering is not supported
 //! yet, so the harness service queues steered messages: it is not verified
 //! how Claude Code ends turns when a message arrives mid-turn.
@@ -24,8 +28,8 @@ use tokio::process::{ChildStdin, ChildStdout, Command};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::{
-    AgentEvent, AgentSession, AgentSessionId, Driver, DriverError, SessionInput, SessionSpec,
-    Version,
+    AgentEvent, AgentSession, AgentSessionId, Driver, DriverError, HARNESS_MCP_SERVER,
+    SessionInput, SessionSpec, Version,
 };
 
 const AGENT_CLI: &str = "Claude Code";
@@ -137,6 +141,13 @@ impl ClaudeCodeDriver {
         self.check_version()?;
         let mut command = Command::new(&self.program);
         command.args(ARGUMENTS);
+        // Both options take several values; each is followed by another
+        // option or ends the arguments.
+        command
+            .arg("--mcp-config")
+            .arg(harness_mcp_config(&spec.harness_mcp_url))
+            .arg("--allowedTools")
+            .arg(format!("mcp__{HARNESS_MCP_SERVER}__read_chat"));
         if let Some(session) = resume {
             command.arg("--resume").arg(session.as_str());
         }
@@ -165,6 +176,14 @@ impl ClaudeCodeDriver {
         });
         Ok(AgentSession { id, input, events })
     }
+}
+
+/// Claude Code's MCP configuration with only the harness MCP server.
+fn harness_mcp_config(url: &str) -> String {
+    serde_json::json!({
+        "mcpServers": { HARNESS_MCP_SERVER: { "type": "http", "url": url } }
+    })
+    .to_string()
 }
 
 async fn write_input(mut stdin: ChildStdin, mut input: mpsc::Receiver<SessionInput>) {

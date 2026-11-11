@@ -4,7 +4,7 @@ use std::io;
 use std::path::Path;
 use std::sync::Arc;
 
-use leiser_service::{Driver, Service, ServiceConfig, ServiceHandle, StartError};
+use leiser_service::{AgentCli, Driver, Service, ServiceConfig, ServiceHandle, StartError};
 use tempfile::TempDir;
 
 use crate::{FakeDriver, Script};
@@ -18,25 +18,36 @@ pub enum TestServiceError {
     Start(#[from] StartError),
 }
 
-/// A harness service on a driver, usually a [`FakeDriver`], and a temporary
-/// data directory, both kept across [`TestService::restart`].
+/// One driver per agent CLI: new chats start on `default`.
+#[derive(Debug)]
+struct Drivers {
+    default: (AgentCli, Arc<dyn Driver>),
+    others: Vec<(AgentCli, Arc<dyn Driver>)>,
+}
+
+/// A harness service on drivers, usually [`FakeDriver`]s, and a temporary
+/// data directory, all kept across [`TestService::restart`].
 #[derive(Debug)]
 pub struct TestService {
     service: Service,
-    driver: Arc<dyn Driver>,
+    drivers: Drivers,
     data: TempDir,
 }
 
 impl TestService {
-    /// `program` is the `fake-agent-cli` binary; integration tests get it
-    /// from `env!("CARGO_BIN_EXE_fake-agent-cli")`.
+    /// A harness service whose chats run on Claude Code, played by the
+    /// fake agent CLI. `program` is the `fake-agent-cli` binary;
+    /// integration tests get it from `env!("CARGO_BIN_EXE_fake-agent-cli")`.
     ///
     /// # Errors
     ///
     /// Returns a [`TestServiceError`] when the driver or the service cannot
     /// be set up.
     pub fn start(program: &Path, script: &Script) -> Result<Self, TestServiceError> {
-        Self::with_driver(Arc::new(FakeDriver::new(program, script)?))
+        Self::with_driver(
+            AgentCli::ClaudeCode,
+            Arc::new(FakeDriver::new(program, script)?),
+        )
     }
 
     /// A harness service on any driver, such as a real agent CLI's.
@@ -45,12 +56,30 @@ impl TestService {
     ///
     /// Returns a [`TestServiceError`] when the data directory or the
     /// service cannot be set up.
-    pub fn with_driver(driver: Arc<dyn Driver>) -> Result<Self, TestServiceError> {
+    pub fn with_driver(
+        agent_cli: AgentCli,
+        driver: Arc<dyn Driver>,
+    ) -> Result<Self, TestServiceError> {
+        Self::with_drivers((agent_cli, driver), Vec::new())
+    }
+
+    /// A harness service whose chats start on `default` and can change to
+    /// the agent CLIs of `others`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`TestServiceError`] when the data directory or the
+    /// service cannot be set up.
+    pub fn with_drivers(
+        default: (AgentCli, Arc<dyn Driver>),
+        others: Vec<(AgentCli, Arc<dyn Driver>)>,
+    ) -> Result<Self, TestServiceError> {
+        let drivers = Drivers { default, others };
         let data = tempfile::tempdir()?;
-        let service = start(&driver, &data)?;
+        let service = start(&drivers, &data)?;
         Ok(Self {
             service,
-            driver,
+            drivers,
             data,
         })
     }
@@ -62,7 +91,7 @@ impl TestService {
     }
 
     /// Shuts the harness service down and starts it again on the same data
-    /// directory and agent CLI.
+    /// directory and agent CLIs.
     ///
     /// # Errors
     ///
@@ -70,22 +99,24 @@ impl TestService {
     pub async fn restart(self) -> Result<Self, StartError> {
         let Self {
             service,
-            driver,
+            drivers,
             data,
         } = self;
         service.shutdown().await;
-        let service = start(&driver, &data)?;
+        let service = start(&drivers, &data)?;
         Ok(Self {
             service,
-            driver,
+            drivers,
             data,
         })
     }
 }
 
-fn start(driver: &Arc<dyn Driver>, data: &TempDir) -> Result<Service, StartError> {
-    leiser_service::start(ServiceConfig {
-        driver: driver.clone(),
-        data_dir: data.path().to_path_buf(),
-    })
+fn start(drivers: &Drivers, data: &TempDir) -> Result<Service, StartError> {
+    let (agent_cli, driver) = &drivers.default;
+    let config = drivers.others.iter().fold(
+        ServiceConfig::new(*agent_cli, driver.clone(), data.path().to_path_buf()),
+        |config, (agent_cli, driver)| config.with_driver(*agent_cli, driver.clone()),
+    );
+    leiser_service::start(config)
 }

@@ -7,6 +7,7 @@
 
 mod fake_driver;
 mod gate;
+mod harness_mcp_client;
 mod repo;
 mod script;
 mod service;
@@ -14,6 +15,7 @@ mod turn;
 
 pub use fake_driver::FakeDriver;
 pub use gate::Gate;
+pub use harness_mcp_client::{HarnessMcpClient, McpClientError, ToolOutput};
 pub use repo::TestRepo;
 pub use script::{FakeInput, Script, Step};
 pub use service::{TestService, TestServiceError};

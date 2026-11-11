@@ -5,8 +5,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use leiser_service::{
-    AgentEvent, ChatId, ChatOverview, ChatStatus, Checkout, Command, Response, ServiceConfig,
-    ServiceHandle, StartError, StorageError, TranscriptEntry,
+    AgentCli, AgentEvent, ChatId, ChatOverview, ChatStatus, Checkout, Command, Response,
+    ServiceConfig, ServiceHandle, StartError, StorageError, TranscriptEntry,
 };
 use leiser_testkit::{FakeDriver, Gate, Script, Step, TestRepo, TestService, collect_turn};
 
@@ -79,8 +79,12 @@ fn user(text: &str) -> TranscriptEntry {
     }
 }
 
+/// An entry of the agent CLI the test's chats run on.
 fn agent(event: AgentEvent) -> TranscriptEntry {
-    TranscriptEntry::Agent { event }
+    TranscriptEntry::Agent {
+        agent_cli: AgentCli::ClaudeCode,
+        event,
+    }
 }
 
 #[tokio::test]
@@ -247,10 +251,11 @@ async fn data_of_storage_version_1_still_loads() -> TestResult {
     copy_dir(&fixture, data.path())?;
     let driver = FakeDriver::new(Path::new(FAKE_AGENT_CLI), &Script::new())?;
 
-    let service = leiser_service::start(ServiceConfig {
-        driver: Arc::new(driver),
-        data_dir: data.path().to_path_buf(),
-    })?;
+    let service = leiser_service::start(ServiceConfig::new(
+        AgentCli::ClaudeCode,
+        Arc::new(driver),
+        data.path().to_path_buf(),
+    ))?;
 
     let app = service.connect();
     let chats = list_chats(&app).await?;
@@ -276,10 +281,11 @@ async fn data_of_a_newer_storage_version_is_refused() -> TestResult {
     std::fs::write(data.path().join("state.json"), r#"{"version": 999}"#)?;
     let driver = FakeDriver::new(Path::new(FAKE_AGENT_CLI), &Script::new())?;
 
-    let result = leiser_service::start(ServiceConfig {
-        driver: Arc::new(driver),
-        data_dir: data.path().to_path_buf(),
-    });
+    let result = leiser_service::start(ServiceConfig::new(
+        AgentCli::ClaudeCode,
+        Arc::new(driver),
+        data.path().to_path_buf(),
+    ));
 
     assert!(
         matches!(

@@ -3,9 +3,11 @@
 //! Usage:
 //!
 //! ```text
-//! fake-agent-cli --script <script.json> --sessions <dir> --session-id <id>
-//! fake-agent-cli --script <script.json> --sessions <dir> --resume <id>
+//! fake-agent-cli --script <script.json> --sessions <dir> --session-id <id> [--harness-mcp <url>]
+//! fake-agent-cli --script <script.json> --sessions <dir> --resume <id> [--harness-mcp <url>]
 //! ```
+//!
+//! Scripted calls to the harness MCP server go to `--harness-mcp`.
 //!
 //! Reads one [`FakeInput`] per line on standard input and answers each
 //! message with the next scripted turn, written as one [`AgentEvent`] per
@@ -27,7 +29,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, TryRecvError};
 use std::time::Duration;
 
 use leiser_service::AgentEvent;
-use leiser_testkit::{FakeInput, Script, Step};
+use leiser_testkit::{FakeInput, HarnessMcpClient, McpClientError, Script, Step};
 use serde::{Deserialize, Serialize};
 
 /// How often a turn waiting at a gate looks for the gate file.
@@ -37,9 +39,13 @@ const GATE_POLL: Duration = Duration::from_millis(10);
 enum FakeError {
     #[error(
         "usage: fake-agent-cli --script <script.json> --sessions <dir> \
-         (--session-id <id> | --resume <id>)"
+         (--session-id <id> | --resume <id>) [--harness-mcp <url>]"
     )]
     Usage,
+    #[error("the script calls the harness MCP server, but no --harness-mcp was given")]
+    NoHarnessMcp,
+    #[error("harness MCP server: {0}")]
+    HarnessMcp(#[from] McpClientError),
     #[error("unknown agent session {0}")]
     UnknownSession(String),
     #[error(transparent)]
@@ -80,12 +86,14 @@ struct Args {
     script: PathBuf,
     sessions: PathBuf,
     session: SessionArg,
+    harness_mcp: Option<String>,
 }
 
 fn parse_args() -> Result<Args, FakeError> {
     let mut script = None;
     let mut sessions = None;
     let mut session = None;
+    let mut harness_mcp = None;
     let mut args = std::env::args_os().skip(1);
     while let Some(flag) = args.next() {
         let value = args.next().ok_or(FakeError::Usage)?;
@@ -95,6 +103,7 @@ fn parse_args() -> Result<Args, FakeError> {
             Some("--sessions") => sessions = Some(PathBuf::from(&value)),
             Some("--session-id") => session = Some(SessionArg::New(text()?)),
             Some("--resume") => session = Some(SessionArg::Resume(text()?)),
+            Some("--harness-mcp") => harness_mcp = Some(text()?),
             _ => return Err(FakeError::Usage),
         }
     }
@@ -103,6 +112,7 @@ fn parse_args() -> Result<Args, FakeError> {
             script,
             sessions,
             session,
+            harness_mcp,
         }),
         _ => Err(FakeError::Usage),
     }
@@ -181,10 +191,13 @@ fn run() -> Result<(), FakeError> {
                     message: text,
                     steer: None,
                     supports_steer: script.supports_steer,
+                    harness_mcp: args.harness_mcp.as_deref(),
+                    forget_session: false,
                     inputs: &inputs,
                     out: &mut out,
                 };
                 let outcome = turn.play(session.next_turn(&script))?;
+                let forget_session = turn.forget_session;
                 // Saved before the turn ends: once the harness service sees
                 // the end it may restart and resume this session at once.
                 session.save()?;
@@ -192,6 +205,10 @@ fn run() -> Result<(), FakeError> {
                     Outcome::Ended => emit(&mut out, &AgentEvent::TurnEnded)?,
                     Outcome::Interrupted => emit(&mut out, &AgentEvent::TurnInterrupted)?,
                     Outcome::InputClosed => return Ok(()),
+                }
+                if forget_session {
+                    std::fs::remove_file(&session.path)?;
+                    return Ok(());
                 }
             }
             FakeInput::Steer { .. } => return Err(FakeError::Unexpected("steer between turns")),
@@ -238,6 +255,10 @@ struct Turn<'a, W> {
     /// The last steered message of the turn.
     steer: Option<String>,
     supports_steer: bool,
+    /// The harness MCP server's address, if the agent session got one.
+    harness_mcp: Option<&'a str>,
+    /// Set by [`Step::ForgetSession`].
+    forget_session: bool,
     inputs: &'a Receiver<Result<FakeInput, FakeError>>,
     out: &'a mut W,
 }
@@ -270,9 +291,29 @@ impl<W: Write> Turn<'_, W> {
             },
             Step::WaitForSteer => return self.wait_for_steer(),
             Step::WaitForGate { gate } => return self.wait_for_gate(&gate),
+            Step::ListHarnessTools => AgentEvent::Message {
+                text: self.harness_mcp()?.list_tools()?.join(","),
+            },
+            Step::CallHarnessTool { name, arguments } => {
+                let output = self.harness_mcp()?.call_tool(&name, &arguments)?;
+                let prefix = if output.is_error { "error: " } else { "" };
+                AgentEvent::Message {
+                    text: format!("{prefix}{}", output.text),
+                }
+            }
+            Step::ForgetSession => {
+                self.forget_session = true;
+                return Ok(None);
+            }
         };
         emit(self.out, &event)?;
         Ok(None)
+    }
+
+    fn harness_mcp(&self) -> Result<HarnessMcpClient, FakeError> {
+        Ok(HarnessMcpClient::connect(
+            self.harness_mcp.ok_or(FakeError::NoHarnessMcp)?,
+        )?)
     }
 
     fn wait_for_steer(&mut self) -> Result<Option<Outcome>, FakeError> {

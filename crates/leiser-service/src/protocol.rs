@@ -13,6 +13,23 @@ pub struct RepositoryId(pub(crate) u64);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ChatId(pub(crate) u64);
 
+/// An agent CLI the harness service can run a chat on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentCli {
+    ClaudeCode,
+    Codex,
+}
+
+impl std::fmt::Display for AgentCli {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::ClaudeCode => "Claude Code",
+            Self::Codex => "Codex",
+        })
+    }
+}
+
 /// Where a chat works.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -35,7 +52,16 @@ pub enum Command {
     /// Sends the developer's message to the chat's agent session, starting
     /// the agent session if the chat has none yet. Fails while a turn runs;
     /// queue or steer the message instead.
+    ///
+    /// The first message after [`Command::ChangeAgentCli`] goes to that
+    /// agent CLI's earlier agent session, resumed, with a handoff of the
+    /// chat's entries since; without one, to a new agent session with a
+    /// handoff of the chat so far.
     SendMessage { chat: ChatId, text: String },
+    /// Changes the agent CLI that the chat's next message goes to, and
+    /// ends the chat's agent session on the agent CLI it leaves. A new chat
+    /// starts on the service's default agent CLI. Fails while a turn runs.
+    ChangeAgentCli { chat: ChatId, agent_cli: AgentCli },
     /// Sends the message when the running turn ends, as the next turn.
     /// Queued messages are sent in order, one turn each. Without a running
     /// turn the message is sent at once.
@@ -73,6 +99,8 @@ pub enum Response {
     MessageSteered,
     /// The agent CLI was asked to stop the running turn.
     InterruptRequested,
+    /// The chat's next message goes to the new agent CLI.
+    AgentCliChanged,
     Chats {
         chats: Vec<ChatOverview>,
     },
@@ -110,8 +138,11 @@ pub enum TranscriptEntry {
     /// A message the developer sent to the agent session, also a queued
     /// one once it was sent, or one steered into the running turn.
     UserMessage { text: String },
-    /// An event from the chat's agent session.
-    Agent { event: AgentEvent },
+    /// An event from one of the chat's agent sessions.
+    Agent {
+        agent_cli: AgentCli,
+        event: AgentEvent,
+    },
 }
 
 /// Why a message was queued instead of being delivered now.
@@ -139,6 +170,8 @@ pub enum CommandError {
     TurnRunning(ChatId),
     #[error("no turn is running in chat {0:?}")]
     NoTurnRunning(ChatId),
+    #[error("no driver is configured for {0}")]
+    AgentCliNotConfigured(AgentCli),
     #[error("the agent CLI failed: {reason}")]
     AgentCli { reason: String },
     #[error("the harness service could not store the chat: {reason}")]
@@ -188,8 +221,17 @@ pub enum AgentEvent {
     Message { text: String },
     /// The agent called a tool.
     ToolCall { name: String, detail: String },
-    /// A tool the agent called returned.
+    /// A tool the agent called returned. Shell commands end with
+    /// [`AgentEvent::CommandFinished`] instead where the agent CLI reports
+    /// their exit code.
     ToolResult { name: String, output: String },
+    /// A shell command the agent ran has finished.
+    CommandFinished {
+        command: String,
+        /// `None` when the command was stopped before it exited.
+        exit_code: Option<i32>,
+        output: String,
+    },
     /// The agent waits for the developer's approval.
     ApprovalRequested {
         request: String,
