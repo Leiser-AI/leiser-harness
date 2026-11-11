@@ -18,9 +18,9 @@ An update replaces the service's program file, for example with the desktop
 app's bundle. The service checks its program file every second. When it
 changed, the service announces that an update waits, keeps every turn
 running, including queued messages and turns that wait for an approval, as
-well as worktree setup and repository scripts, and once none of that runs it
-ends its agent
-sessions, starts the new program on the same data directory and exits. The
+well as worktree setup and repository scripts. Once none of that runs, it
+ends its agent sessions, starts the new program on the same data directory
+and exits. The
 new service resumes every agent session. Closing or updating the desktop app
 only closes its connection; the app connects again, and starts a service
 itself if none comes back within a few seconds.
