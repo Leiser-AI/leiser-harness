@@ -73,6 +73,8 @@ pub enum Step {
     ListHarnessTools,
     /// Calls a tool of the harness MCP server and answers with the text it
     /// returned, prefixed with `error: ` when the tool reported an error.
+    /// A JSON-RPC error, such as for a tool the server does not offer, is
+    /// answered as `rpc error <code>: <message>`.
     CallHarnessTool {
         name: String,
         arguments: serde_json::Value,

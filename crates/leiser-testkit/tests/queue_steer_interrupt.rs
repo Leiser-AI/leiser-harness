@@ -211,7 +211,7 @@ async fn a_failed_turn_ends_the_turn_with_its_reason_and_sends_the_queued_messag
     else {
         return Err("expected Chat".into());
     };
-    assert_eq!(status, ChatStatus::Idle);
+    assert_eq!(status, ChatStatus::WaitingForYou);
     assert!(transcript.contains(&TranscriptEntry::Agent {
         agent_cli: AgentCli::ClaudeCode,
         event: failed,

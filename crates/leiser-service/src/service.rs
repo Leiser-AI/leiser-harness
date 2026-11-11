@@ -9,14 +9,17 @@ use tokio::task::JoinHandle;
 
 use crate::cli_extensions::{self, CliExtensionError};
 use crate::handoff::{self, Handoff, ReadError};
-use crate::harness_mcp::{BranchNaming, ChatRead, HarnessCall, HarnessMcp, HarnessMcpError};
+use crate::harness_mcp::{
+    BranchNaming, ChatRead, HarnessCall, HarnessMcp, HarnessMcpError, TodoAnswer, TodoCall, Tools,
+};
 use crate::repo_config::RepositoryConfig;
 use crate::store::{AgentSessionV2, ChatV2, HandoffV2, RepositoryV1, StateV2, StorageError, Store};
+use crate::todos::{TodoChange, TodoError, TodoList};
 use crate::worktree::{self, WorktreeError};
 use crate::{
     AgentCli, AgentEvent, AgentSessionId, Branch, ChatId, ChatOverview, ChatStatus, Checkout,
     Command, CommandError, Driver, Event, QueueReason, RepositoryId, RepositoryOverview,
-    RepositoryScript, Response, SessionInput, SessionSpec, TranscriptEntry, script,
+    RepositoryScript, Response, SessionInput, SessionSpec, TodoId, TranscriptEntry, script,
 };
 
 /// Commands waiting for the command loop. Small, so callers feel back
@@ -112,7 +115,7 @@ pub fn start(config: ServiceConfig) -> Result<Service, StartError> {
             sessions,
             background,
         },
-    );
+    )?;
     state.resume_all();
     let (stop, stopped) = oneshot::channel();
     let task =
@@ -207,6 +210,7 @@ struct Chat {
     handoff: Option<Handoff>,
     /// The running agent session, if any.
     session: Option<Session>,
+    todos: TodoList,
 }
 
 /// An agent session that can be resumed.
@@ -399,7 +403,7 @@ impl State {
         store: Store,
         stored: StateV2,
         channels: Channels,
-    ) -> Self {
+    ) -> Result<Self, StorageError> {
         let repositories = stored
             .repositories
             .into_iter()
@@ -409,7 +413,10 @@ impl State {
             .chats
             .into_iter()
             .map(|chat| {
-                (
+                // A todo list that cannot be read stops the start: an empty
+                // one would overwrite it on the next change.
+                let todos = TodoList::from_stored(store.todos(chat.id)?);
+                Ok((
                     ChatId(chat.id),
                     Chat {
                         repository: RepositoryId(chat.repository),
@@ -458,15 +465,16 @@ impl State {
                         // Agent sessions did not survive the restart, so no
                         // turn runs; resumed ones wait for the next message.
                         session: None,
+                        todos,
                     },
-                )
+                ))
             })
-            .collect();
+            .collect::<Result<_, StorageError>>()?;
         let status_changes = chats
             .values()
             .map(|chat| chat.shown.1)
             .fold(stored.next_id, u64::max);
-        Self {
+        Ok(Self {
             drivers: config.drivers,
             default_agent_cli: config.default_agent_cli,
             harness_mcp,
@@ -480,7 +488,7 @@ impl State {
             next_id: stored.next_id,
             generation: 0,
             status_changes,
-        }
+        })
     }
 
     /// Resumes the agent session of every chat that had one.
@@ -553,6 +561,22 @@ impl State {
             Command::ListChats => Ok(self.list_chats()),
             Command::ReadChat { chat } => self.read_chat(chat).await,
             Command::ChangeAgentCli { chat, agent_cli } => self.change_agent_cli(chat, agent_cli),
+            Command::ListTodos { chat } => self.todo_list(chat).map(|todos| Response::Todos {
+                todos: todos.todos().to_vec(),
+            }),
+            Command::AddTodo { chat, text } => self
+                .change_todos(chat, TodoChange::Add { text })
+                .and_then(|added| {
+                    added
+                        .map(|todo| Response::TodoAdded { todo })
+                        .ok_or(CommandError::EmptyTodo)
+                }),
+            Command::SetTodoDone { chat, todo, done } => self
+                .change_todos(chat, TodoChange::SetDone { todo, done })
+                .map(|_| Response::TodoUpdated),
+            Command::RemoveTodo { chat, todo } => self
+                .change_todos(chat, TodoChange::Remove { todo })
+                .map(|_| Response::TodoRemoved),
             Command::ListCliExtensions { repository } => self.list_cli_extensions(repository).await,
             Command::ReadCliExtensionFile { repository, file } => {
                 self.read_cli_extension_file(repository, file).await
@@ -667,6 +691,7 @@ impl State {
             agent_sessions: BTreeMap::new(),
             handoff: None,
             session: None,
+            todos: TodoList::default(),
         };
         self.chats.insert(chat, new);
         if let Err(error) = self.save() {
@@ -1229,11 +1254,62 @@ impl State {
         Ok(Response::AgentCliChanged)
     }
 
+    fn todo_list(&self, id: ChatId) -> Result<&TodoList, CommandError> {
+        self.chats
+            .get(&id)
+            .map(|chat| &chat.todos)
+            .ok_or(CommandError::UnknownChat { chat: id })
+    }
+
+    /// Changes the chat's todo list, stores it and reports the new list.
+    /// For an added todo, returns its id.
+    fn change_todos(
+        &mut self,
+        id: ChatId,
+        change: TodoChange,
+    ) -> Result<Option<TodoId>, CommandError> {
+        let chat = self
+            .chats
+            .get_mut(&id)
+            .ok_or(CommandError::UnknownChat { chat: id })?;
+        let mut todos = chat.todos.clone();
+        let added = todos.apply(change).map_err(|error| match error {
+            TodoError::Empty => CommandError::EmptyTodo,
+            TodoError::Unknown(todo) => CommandError::UnknownTodo { chat: id, todo },
+        })?;
+        // Stored first, so the list never shows a change that is lost.
+        self.store.save_todos(id.0, &todos.to_stored())?;
+        let list = todos.todos().to_vec();
+        chat.todos = todos;
+        self.emit(Event::TodosChanged {
+            chat: id,
+            todos: list,
+        });
+        Ok(added)
+    }
+
     /// Answers a tool call of the harness MCP server.
-    fn on_call(&self, call: HarnessCall) {
+    fn on_call(&mut self, call: HarnessCall) {
         match call {
             HarnessCall::ReadChat(read) => self.on_read(read),
             HarnessCall::NameBranch(naming) => self.on_name_branch(naming),
+            HarnessCall::Todos(TodoCall {
+                chat,
+                change,
+                reply,
+            }) => {
+                let result = change
+                    .map(|change| self.change_todos(chat, change))
+                    .transpose()
+                    .and_then(|added| {
+                        Ok(TodoAnswer {
+                            added: added.flatten(),
+                            todos: self.todo_list(chat)?.todos().to_vec(),
+                        })
+                    });
+                // The agent CLI may have stopped waiting; nothing to do then.
+                let _ = reply.send(result);
+            }
         }
     }
 
@@ -1280,24 +1356,40 @@ impl State {
 
     /// Resumes the chat's agent session on its agent CLI, or starts one if
     /// it has none there. Every agent session gets its own address of the
-    /// harness MCP server.
+    /// harness MCP server, with the tools the repository's config switches
+    /// on when the agent session opens.
     fn open_session(&mut self, id: ChatId) -> Result<(), CommandError> {
         let chat = self
             .chats
             .get_mut(&id)
             .ok_or(CommandError::UnknownChat { chat: id })?;
+        let repository =
+            self.repositories
+                .get(&chat.repository)
+                .ok_or(CommandError::UnknownRepository {
+                    repository: chat.repository,
+                })?;
+        let config =
+            RepositoryConfig::load(repository).map_err(|error| CommandError::RepositoryConfig {
+                reason: error.to_string(),
+            })?;
         let driver =
             self.drivers
                 .get(&chat.agent_cli)
                 .ok_or(CommandError::AgentCliNotConfigured {
                     agent_cli: chat.agent_cli,
                 })?;
-        let harness_mcp_url =
-            self.harness_mcp
-                .register(id)
-                .map_err(|error| CommandError::AgentCli {
-                    reason: error.to_string(),
-                })?;
+        let harness_mcp_url = self
+            .harness_mcp
+            .register(
+                id,
+                Tools {
+                    todo_list: config.agent_access.todo_list,
+                },
+            )
+            .map_err(|error| CommandError::AgentCli {
+                reason: error.to_string(),
+            })?;
         let spec = SessionSpec {
             working_directory: chat.working_directory.clone(),
             harness_mcp_url,
