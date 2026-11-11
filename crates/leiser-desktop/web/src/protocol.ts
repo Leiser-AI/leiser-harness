@@ -19,7 +19,8 @@ export type Command =
   | { type: "interrupt_turn"; chat: ChatId }
   | { type: "list_repositories" }
   | { type: "list_chats" }
-  | { type: "read_chat"; chat: ChatId };
+  | { type: "read_chat"; chat: ChatId }
+  | { type: "read_service_status" };
 
 export type Response =
   | { type: "repository_added"; repository: RepositoryId }
@@ -31,7 +32,8 @@ export type Response =
   | { type: "agent_cli_changed" }
   | { type: "repositories"; repositories: RepositoryOverview[] }
   | { type: "chats"; chats: ChatOverview[] }
-  | { type: "chat"; status: ChatStatus; branch: Branch; transcript: TranscriptEntry[] };
+  | { type: "chat"; status: ChatStatus; branch: Branch; transcript: TranscriptEntry[] }
+  | { type: "service_status"; version: string; update_waiting: boolean };
 
 export type CommandError =
   | { type: "not_a_git_repository"; path: string }
@@ -81,4 +83,11 @@ export type ServiceEvent =
   | { type: "agent"; chat: ChatId; event: AgentEvent }
   | { type: "message_queued"; chat: ChatId; text: string; reason: QueueReason }
   | { type: "message_steered"; chat: ChatId; text: string }
-  | { type: "queued_message_sent"; chat: ChatId; text: string };
+  | { type: "queued_message_sent"; chat: ChatId; text: string }
+  | { type: "service_update_waiting" };
+
+/** The app's connection to the harness service (not part of the service's protocol). */
+export type ServiceConnection =
+  | { state: "connecting" }
+  | { state: "connected"; service_version: string }
+  | { state: "unavailable"; reason: string };

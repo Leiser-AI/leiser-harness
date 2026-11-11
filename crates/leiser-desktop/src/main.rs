@@ -2,64 +2,65 @@
 //! service reports. It holds no chat state of its own; the UI reads chats
 //! from the service and re-reads them on every service event.
 //!
-//! For v1 the app hosts the harness service in-process and forwards the
-//! service's local interface 1:1: the `execute` command takes a
-//! [`Command`] and answers with its [`Response`], and every service
-//! [`Event`](leiser_service::Event) reaches the UI as `service-event`. The
-//! service keeps its data in the app's data directory, so chats survive
-//! restarts. Once the service runs as its own process, only this file
-//! changes.
+//! The harness service runs as its own process, so the app can be closed or
+//! updated while turns run (ADR 0005, ADR 0007). The app connects to it
+//! over the local interface and starts it when none runs (see
+//! `connection.rs`). It forwards the interface 1:1: the `execute` command
+//! takes a [`Command`] and answers with its [`Response`], and every service
+//! [`Event`](leiser_service::Event) reaches the UI as `service-event`.
 
 // Release builds on Windows open no console window next to the app.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod agents;
+mod connection;
 
 use std::path::PathBuf;
 
-use leiser_service::{Command, CommandError, Response, Service, ServiceHandle};
-use tauri::{AppHandle, Emitter, Manager, State};
+use connection::{ConnectionState, ServiceConnection};
+use leiser_service::{Command, CommandError, Response};
+use tauri::{AppHandle, Manager, State};
 use tauri_plugin_dialog::DialogExt;
-use tokio::sync::broadcast::{self, error::RecvError};
-
-/// The UI event that carries one service event.
-const SERVICE_EVENT: &str = "service-event";
-/// The UI event sent when service events were lost; the UI re-reads all.
-const SERVICE_EVENTS_LOST: &str = "service-events-lost";
 
 fn main() -> Result<(), tauri::Error> {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
-            let config = agents::service_config(app.path().app_data_dir()?)?;
-            // `start` spawns the service's command loop on the current
-            // runtime, which lives as long as the app.
-            let service = tauri::async_runtime::block_on(async { leiser_service::start(config) })?;
-            let connection = service.connect();
-            tauri::async_runtime::spawn(forward_events(
+            let program = connection::service_program(&app.path().app_data_dir()?)?;
+            let service = ServiceConnection::default();
+            app.manage(service.clone());
+            tauri::async_runtime::spawn(connection::keep_connected(
                 app.handle().clone(),
-                connection.subscribe(),
+                program,
+                service,
             ));
-            app.manage(HostedService { _service: service });
-            app.manage(connection);
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![execute, pick_folder])
+        .invoke_handler(tauri::generate_handler![
+            execute,
+            service_connection,
+            pick_folder
+        ])
         .run(tauri::generate_context!())
-}
-
-/// Keeps the harness service running as long as the app.
-struct HostedService {
-    _service: Service,
 }
 
 /// Runs a command in the harness service.
 #[tauri::command]
 async fn execute(
-    service: State<'_, ServiceHandle>,
+    service: State<'_, ServiceConnection>,
     command: Command,
 ) -> Result<Response, CommandError> {
-    service.execute(command).await
+    let client = service.client().ok_or(CommandError::ServiceStopped)?;
+    client.execute(command).await
+}
+
+/// The app's connection to the harness service right now; changes arrive
+/// as `service-connection` events. Never fails; Tauri needs a `Result` from
+/// an async command that borrows state.
+#[tauri::command]
+async fn service_connection(
+    service: State<'_, ServiceConnection>,
+) -> Result<ConnectionState, CommandError> {
+    Ok(service.state())
 }
 
 /// Asks the developer for a folder; `None` when they cancel.
@@ -70,18 +71,4 @@ async fn pick_folder(app: AppHandle) -> Option<PathBuf> {
         .file()
         .blocking_pick_folder()
         .and_then(|folder| folder.into_path().ok())
-}
-
-async fn forward_events(app: AppHandle, mut events: broadcast::Receiver<leiser_service::Event>) {
-    loop {
-        let sent = match events.recv().await {
-            Ok(event) => app.emit(SERVICE_EVENT, event),
-            Err(RecvError::Lagged(_)) => app.emit(SERVICE_EVENTS_LOST, ()),
-            Err(RecvError::Closed) => return,
-        };
-        // Emitting fails only when the app is shutting down.
-        if sent.is_err() {
-            return;
-        }
-    }
 }

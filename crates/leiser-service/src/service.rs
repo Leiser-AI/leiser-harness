@@ -85,10 +85,18 @@ pub fn start(config: ServiceConfig) -> Result<Service, StartError> {
     let mut state = State::load(config, harness_mcp, store, stored, events.clone(), sessions);
     state.resume_all();
     let (stop, stopped) = oneshot::channel();
-    let task = tokio::spawn(state.run(receiver, session_messages, read_requests, stopped));
+    let (update, update_requests) = mpsc::channel(1);
+    let task = tokio::spawn(state.run(
+        receiver,
+        session_messages,
+        read_requests,
+        update_requests,
+        stopped,
+    ));
     Ok(Service {
         handle: ServiceHandle { commands, events },
         stop,
+        update,
         task,
     })
 }
@@ -99,6 +107,7 @@ pub fn start(config: ServiceConfig) -> Result<Service, StartError> {
 pub struct Service {
     handle: ServiceHandle,
     stop: oneshot::Sender<()>,
+    update: mpsc::Sender<()>,
     task: JoinHandle<()>,
 }
 
@@ -116,6 +125,20 @@ impl Service {
     pub async fn shutdown(self) {
         // The loop may have stopped already; then there is nothing to stop.
         let _ = self.stop.send(());
+        let _ = self.task.await;
+    }
+
+    /// Makes way for an update of the harness service without interrupting
+    /// a turn (ADR 0005): announces [`Event::ServiceUpdateWaiting`], keeps
+    /// running every turn, also queued messages, and stops once no turn
+    /// runs. Returns when it has stopped; the caller then starts the new
+    /// version on the same data, which resumes every agent session.
+    ///
+    /// Messages the developer sends meanwhile still start their turns, and
+    /// the update waits for them too.
+    pub async fn stop_for_update(self) {
+        // The loop may have stopped already; then it is done waiting.
+        let _ = self.update.send(()).await;
         let _ = self.task.await;
     }
 }
@@ -149,6 +172,12 @@ impl ServiceHandle {
     #[must_use]
     pub fn subscribe(&self) -> broadcast::Receiver<Event> {
         self.events.subscribe()
+    }
+
+    /// Waits until the harness service has stopped, for example for an
+    /// update.
+    pub async fn stopped(&self) {
+        self.commands.closed().await;
     }
 }
 
@@ -252,6 +281,8 @@ struct State {
     chats: BTreeMap<ChatId, Chat>,
     next_id: u64,
     generation: u64,
+    /// An update of the harness service waits until no turn runs.
+    update_waiting: bool,
 }
 
 impl State {
@@ -314,6 +345,7 @@ impl State {
             chats,
             next_id: stored.next_id,
             generation: 0,
+            update_waiting: false,
         }
     }
 
@@ -338,6 +370,7 @@ impl State {
         mut commands: mpsc::Receiver<Request>,
         mut sessions: mpsc::Receiver<SessionMessage>,
         mut reads: mpsc::Receiver<ChatRead>,
+        mut updates: mpsc::Receiver<()>,
         mut stopped: oneshot::Receiver<()>,
     ) {
         loop {
@@ -348,6 +381,10 @@ impl State {
                 Some(message) = sessions.recv() => self.on_session(message).await,
                 // Never closes: the harness MCP server holds a sender.
                 Some(read) = reads.recv() => self.on_read(read),
+                Some(()) = updates.recv(), if !self.update_waiting => {
+                    self.update_waiting = true;
+                    self.emit(Event::ServiceUpdateWaiting);
+                }
                 Some((command, reply)) = commands.recv() => {
                     let result = self.execute(command).await;
                     // The caller may have stopped waiting; nothing to do then.
@@ -355,7 +392,19 @@ impl State {
                 }
                 else => break,
             }
+            // Checked after every step, so a turn that ends and starts the
+            // next queued message keeps the update waiting.
+            if self.update_waiting && self.no_turn_running() {
+                tracing::info!("no turn runs; stopping for the update");
+                break;
+            }
         }
+    }
+
+    fn no_turn_running(&self) -> bool {
+        self.chats
+            .values()
+            .all(|chat| chat.status() == ChatStatus::Idle)
     }
 
     async fn execute(&mut self, command: Command) -> Result<Response, CommandError> {
@@ -375,6 +424,10 @@ impl State {
             Command::ListChats => Ok(self.list_chats()),
             Command::ReadChat { chat } => self.read_chat(chat).await,
             Command::ChangeAgentCli { chat, agent_cli } => self.change_agent_cli(chat, agent_cli),
+            Command::ReadServiceStatus => Ok(Response::ServiceStatus {
+                version: env!("CARGO_PKG_VERSION").to_owned(),
+                update_waiting: self.update_waiting,
+            }),
         }
     }
 

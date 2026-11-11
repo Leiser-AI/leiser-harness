@@ -79,6 +79,9 @@ pub enum Command {
     ListChats,
     /// Reads a chat's status, branch and transcript.
     ReadChat { chat: ChatId },
+    /// Reads the harness service's version and whether an update of it
+    /// waits for running turns to end.
+    ReadServiceStatus,
 }
 
 /// The answer to a successful [`Command`].
@@ -114,6 +117,12 @@ pub enum Response {
         /// The branch checked out where the chat works.
         branch: Branch,
         transcript: Vec<TranscriptEntry>,
+    },
+    ServiceStatus {
+        /// The version of the running harness service.
+        version: String,
+        /// An update of the harness service waits until no turn runs.
+        update_waiting: bool,
     },
 }
 
@@ -228,17 +237,22 @@ pub enum Event {
     MessageSteered { chat: ChatId, text: String },
     /// A queued message was sent and starts the next turn.
     QueuedMessageSent { chat: ChatId, text: String },
+    /// An update of the harness service waits until no turn runs. Then the
+    /// service restarts on the new version and resumes every agent session.
+    ServiceUpdateWaiting,
 }
 
 impl Event {
-    /// The chat the event belongs to.
+    /// The chat the event belongs to; `None` for events of the whole
+    /// harness service.
     #[must_use]
-    pub fn chat(&self) -> ChatId {
+    pub fn chat(&self) -> Option<ChatId> {
         match self {
             Self::Agent { chat, .. }
             | Self::MessageQueued { chat, .. }
             | Self::MessageSteered { chat, .. }
-            | Self::QueuedMessageSent { chat, .. } => *chat,
+            | Self::QueuedMessageSent { chat, .. } => Some(*chat),
+            Self::ServiceUpdateWaiting => None,
         }
     }
 }

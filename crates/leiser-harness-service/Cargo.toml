@@ -1,0 +1,24 @@
+[package]
+name = "leiser-harness-service"
+description = "The harness service as its own process: serves the local interface and applies its own updates without interrupting a turn (ADR 0005, ADR 0007)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+leiser-service = { version = "0.1.0", path = "../leiser-service" }
+# Chats can run on the testkit's fake agent CLI to try the app without a
+# subscription.
+leiser-testkit = { version = "0.1.0", path = "../leiser-testkit" }
+thiserror = "2.0.21"
+tokio = { version = "1.54.1", features = ["rt", "time", "net"] }
+tracing = { version = "0.1.44", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+tempfile = "3.27.0"
+tokio = { version = "1.54.1", features = ["rt", "time", "net", "macros"] }
