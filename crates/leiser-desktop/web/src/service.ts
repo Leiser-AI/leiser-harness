@@ -15,6 +15,10 @@ import type {
   CliExtension,
   Command,
   CommandError,
+  CommitAuthor,
+  HostAccountBinding,
+  HostAccountId,
+  HostAccountOverview,
   DiffRange,
   FileDiff,
   PermissionMode,
@@ -48,6 +52,9 @@ export interface ChatView {
   agentCli: AgentCli;
   /** `null`: the agent CLI's own default login. */
   subscription: SubscriptionId | null;
+  hostAccount: HostAccountBinding;
+  /** Who commits are made by where the chat works; `null` when git has no author. */
+  commitAuthor: CommitAuthor | null;
   /** The usage limit the last turn stopped at, until the next turn. */
   usageLimit: UsageLimit | null;
   transcript: TranscriptEntry[];
@@ -121,6 +128,26 @@ function describe(error: CommandError): string {
       return `Todo ${error.todo} no longer exists.`;
     case "storage":
       return `The harness service could not store the chat: ${error.reason}`;
+    case "unknown_host_account":
+      return "This host account was removed.";
+    case "unknown_host_account_name":
+      return `The repository's .leiser/config.toml names a host account "${error.name}" that is not registered. Add it under Host accounts.`;
+    case "host_account_name_taken":
+      return `A host account is already named "${error.name}".`;
+    case "empty_host_account_field":
+      return `A host account needs a ${error.field}.`;
+    case "host_account_setup":
+      return `Could not set up the host account: ${error.reason}`;
+    case "no_host_account":
+      return 'Push blocked: this repository is bound to no host account. Name one in its .leiser/config.toml, for example host_account = "Work GitHub".';
+    case "host_account_mismatch":
+      return `Push blocked: it would sign in to ${error.git_host} as ${error.actual}, but this repository is bound to host account "${error.name}" (${error.expected}). Log in to "${error.name}" again as ${error.expected}.`;
+    case "host_account_unverified":
+      return `Push blocked: could not check host account "${error.name}": ${error.reason}`;
+    case "no_branch":
+      return "No branch is checked out to push.";
+    case "push_failed":
+      return `The push failed: ${error.reason}`;
     case "repo_check_not_configured":
       return "repo-check is not set up in the harness service.";
     case "repo_check_running":
@@ -250,6 +277,8 @@ export async function readChat(chat: ChatId): Promise<ChatView> {
         openRequests: response.open_requests,
         agentCli: response.agent_cli,
         subscription: response.subscription,
+        hostAccount: response.host_account,
+        commitAuthor: response.commit_author,
         usageLimit: response.usage_limit,
         transcript: response.transcript,
       }
@@ -299,6 +328,38 @@ export async function changeSubscription(
 ): Promise<void> {
   const response = await execute({ type: "change_subscription", chat, provider, subscription });
   if (response.type !== "subscription_changed") unexpected(response);
+}
+
+export async function listHostAccounts(): Promise<HostAccountOverview[]> {
+  const response = await execute({ type: "list_host_accounts" });
+  return response.type === "host_accounts" ? response.host_accounts : unexpected(response);
+}
+
+export async function addHostAccount(
+  name: string,
+  gitHost: string,
+  login: string,
+  author: CommitAuthor,
+): Promise<HostAccountId> {
+  const response = await execute({ type: "add_host_account", name, git_host: gitHost, login, author });
+  return response.type === "host_account_added" ? response.host_account : unexpected(response);
+}
+
+export async function removeHostAccount(hostAccount: HostAccountId): Promise<void> {
+  const response = await execute({ type: "remove_host_account", host_account: hostAccount });
+  if (response.type !== "host_account_removed") unexpected(response);
+}
+
+/** Runs the git host's login (`gh auth login`) for the host account. */
+export async function logInHostAccount(hostAccount: HostAccountId): Promise<void> {
+  const response = await execute({ type: "log_in_host_account", host_account: hostAccount });
+  if (response.type !== "host_account_login_started") unexpected(response);
+}
+
+/** Pushes the chat's branch once the host account checks out; returns the branch. */
+export async function push(chat: ChatId): Promise<string> {
+  const response = await execute({ type: "push", chat });
+  return response.type === "pushed" ? response.branch : unexpected(response);
 }
 
 export async function setInterchangeable(

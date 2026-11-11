@@ -300,7 +300,7 @@ async fn other_tables_of_the_repository_config_are_left_alone() -> TestResult {
     let repo = TestRepo::new()?;
     write_config(
         &repo,
-        "[host_account]\nlogin = \"someone\"\n\n[repo_check.off]\nG2 = \"Handled by a global ignore file.\"\n",
+        "[future_feature]\nsetting = \"something\"\n\n[repo_check.off]\nG2 = \"Handled by a global ignore file.\"\n",
     )?;
 
     let (service, repository) = add_and_check(&harness, &repo).await?;

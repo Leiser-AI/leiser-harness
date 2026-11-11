@@ -61,6 +61,8 @@ const VERSION: u32 = 3;
 const STATE_FILE: &str = "state.json";
 const CHATS_DIR: &str = "chats";
 const SUBSCRIPTIONS_DIR: &str = "subscriptions";
+/// Holds one `gh` config directory per host account.
+const HOST_ACCOUNTS_DIR: &str = "host-accounts";
 
 const REPO_CHECKS_DIR: &str = "repo-checks";
 
@@ -111,7 +113,20 @@ pub(crate) struct StateV3 {
     pub next_id: u64,
     pub repositories: Vec<RepositoryV1>,
     pub subscriptions: Vec<SubscriptionV3>,
+    /// Added after version 3 was released; older files have none.
+    #[serde(default)]
+    pub host_accounts: Vec<HostAccountV3>,
     pub chats: Vec<ChatV3>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct HostAccountV3 {
+    pub id: u64,
+    pub name: String,
+    pub git_host: String,
+    pub login: String,
+    pub author_name: String,
+    pub author_email: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -402,6 +417,7 @@ impl Store {
             next_id: state.next_id,
             repositories: state.repositories,
             subscriptions: Vec::new(),
+            host_accounts: Vec::new(),
             chats: state
                 .chats
                 .into_iter()
@@ -633,6 +649,10 @@ impl Store {
     /// The directory that holds one directory per subscription.
     pub fn subscriptions_dir(&self) -> PathBuf {
         self.dir.join(SUBSCRIPTIONS_DIR)
+    }
+
+    pub fn host_accounts_dir(&self) -> PathBuf {
+        self.dir.join(HOST_ACCOUNTS_DIR)
     }
 
     /// Stores the repository's last `repo-check` result.

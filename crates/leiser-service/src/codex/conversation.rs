@@ -5,10 +5,10 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 
 use super::wire::{
     self, ApprovalDecision, ApprovalResponse, ClientInfo, ClientNotification, ClientRequest,
-    ErrorResponse, Incoming, InitializeParams, Item, Notification, RateLimits, Request, RequestId,
-    RpcError, ThreadResumeParams, ThreadStartParams, ThreadStarted, Turn, TurnError,
-    TurnInterruptParams, TurnStartParams, TurnStarted, TurnStatus, TurnSteerParams, UserInput,
-    UserInputAnswer, UserInputResponse, WireError,
+    ErrorResponse, Incoming, InitializeParams, Item, NO_AI_ATTRIBUTION, Notification, RateLimits,
+    Request, RequestId, RpcError, ThreadResumeParams, ThreadStartParams, ThreadStarted, Turn,
+    TurnError, TurnInterruptParams, TurnStartParams, TurnStarted, TurnStatus, TurnSteerParams,
+    UserInput, UserInputAnswer, UserInputResponse, WireError,
 };
 use crate::{AgentEvent, Answer, PermissionMode, Question, QuestionOption};
 
@@ -440,6 +440,7 @@ impl Conversation {
                         approval_policy,
                         approvals_reviewer,
                         sandbox: self.sandbox,
+                        developer_instructions: NO_AI_ATTRIBUTION,
                         exclude_turns: true,
                     };
                     self.request(output, Pending::ThreadResume, params)?;
@@ -449,6 +450,7 @@ impl Conversation {
                         approval_policy,
                         approvals_reviewer,
                         sandbox: self.sandbox,
+                        developer_instructions: NO_AI_ATTRIBUTION,
                     };
                     self.request(output, Pending::ThreadStart, params)?;
                 }
@@ -1227,6 +1229,22 @@ mod tests {
             assert_eq!(params["approvalPolicy"], policy, "{mode:?}");
             assert_eq!(params["approvalsReviewer"], reviewer, "{mode:?}");
             assert_eq!(params["sandbox"], "workspace-write", "{mode:?}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn new_and_resumed_threads_are_told_to_add_no_ai_attribution() -> TestResult {
+        let started = thread_start(PermissionMode::Auto)?;
+        let (mut conversation, _) =
+            Conversation::resume("/repo".to_owned(), PermissionMode::Auto, "t1".to_owned())?;
+        let output = receive(&mut conversation, &json!({"id": 0, "result": {}}))?;
+        let resumed = lines(&output)?[1]["params"].clone();
+
+        for params in [started, resumed] {
+            let instructions = params["developerInstructions"].as_str().unwrap_or_default();
+            assert!(instructions.contains("Co-authored-by"), "{params}");
+            assert!(instructions.contains("Generated with"), "{params}");
         }
         Ok(())
     }
