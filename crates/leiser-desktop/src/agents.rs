@@ -20,23 +20,29 @@ const FAKE_TURNS: usize = 1000;
 pub struct FakeAgentCliError(#[from] io::Error);
 
 /// The harness service's configuration. Chats start on Claude Code and can
-/// change to Codex; `repo-check` runs on Claude Code, which has the skill.
-/// With `LEISER_FAKE_AGENT_CLI` set, both run on the fake agent CLI instead
-/// and keep their data apart from real chats.
-pub fn service_config(data_dir: PathBuf) -> Result<ServiceConfig, FakeAgentCliError> {
+/// change to Codex; their worktrees go to `worktrees_dir`. `repo-check`
+/// runs on Claude Code, which has the skill. With `LEISER_FAKE_AGENT_CLI`
+/// set, both run on the fake agent CLI instead and keep their data and
+/// worktrees apart from real chats.
+pub fn service_config(
+    data_dir: PathBuf,
+    worktrees_dir: PathBuf,
+) -> Result<ServiceConfig, FakeAgentCliError> {
     if let Some(program) = env::var_os(FAKE_AGENT_CLI_VARIABLE) {
         let program = PathBuf::from(program);
         return Ok(ServiceConfig::new(
             AgentCli::ClaudeCode,
             Arc::new(fake_driver(&program)?),
-            data_dir.join("fake-agent-cli"),
+            data_dir.join(FAKE_DIR),
         )
+        .with_worktrees_dir(worktrees_dir.join(FAKE_DIR))
         .with_repo_check(Arc::new(fake_repo_check(&program)?)));
     }
     let claude_code = Arc::new(ClaudeCodeDriver::installed());
     Ok(
         ServiceConfig::new(AgentCli::ClaudeCode, claude_code.clone(), data_dir)
             .with_driver(AgentCli::Codex, Arc::new(CodexDriver::installed()))
+            .with_worktrees_dir(worktrees_dir)
             .with_repo_check(claude_code),
     )
 }
@@ -46,6 +52,9 @@ fn fake_repo_check(program: &std::path::Path) -> io::Result<FakeDriver> {
     let script = Script::new().turn([Step::message(SAMPLE_REPO_CHECK_REPORT)]);
     FakeDriver::new(program, &script)
 }
+
+/// Where the fake agent CLI's chats keep their data and worktrees.
+const FAKE_DIR: &str = "fake-agent-cli";
 
 /// A driver that answers every message with a tool call, its result and
 /// the message itself.

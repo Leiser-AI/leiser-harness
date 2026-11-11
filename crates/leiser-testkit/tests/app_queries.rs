@@ -141,19 +141,26 @@ async fn a_chat_is_titled_by_the_first_line_of_its_first_message() -> TestResult
             chat: talked_in,
             repository,
             title: Some("Fix the login bug".to_owned()),
-            status: ChatStatus::Idle,
+            status: ChatStatus::WaitingForYou,
+            worktree: None,
         },
         ChatOverview {
             chat: untouched,
             repository,
             title: None,
-            status: ChatStatus::Idle,
+            status: ChatStatus::WaitingForYou,
+            worktree: None,
         },
     ];
-    assert_eq!(list_chats(&app).await?, expected);
+    // Titles, not the sidebar's order, are what this test is about.
+    let by_chat = |mut chats: Vec<ChatOverview>| {
+        chats.sort_by_key(|chat| chat.chat);
+        chats
+    };
+    assert_eq!(by_chat(list_chats(&app).await?), expected);
     // The title comes back after a restart, from the stored transcript.
     let service = service.restart().await?;
-    assert_eq!(list_chats(&service.connect()).await?, expected);
+    assert_eq!(by_chat(list_chats(&service.connect()).await?), expected);
     Ok(())
 }
 

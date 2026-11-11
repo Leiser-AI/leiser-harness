@@ -25,9 +25,11 @@ mod harness_mcp;
 mod protocol;
 mod repo_check;
 mod repo_config;
+mod script;
 mod service;
 mod store;
 mod version;
+mod worktree;
 
 pub use claude_code::ClaudeCodeDriver;
 pub use codex::CodexDriver;
@@ -39,7 +41,8 @@ pub use harness_mcp::HarnessMcpError;
 pub use protocol::{
     AgentCli, AgentEvent, Branch, ChatId, ChatOverview, ChatStatus, CheckId, Checkout, Command,
     CommandError, Event, Finding, InvalidCheckId, OptOuts, QueueReason, RepoCheck, RepoCheckReport,
-    RepositoryId, RepositoryOverview, Response, SwitchedOffCheck, TranscriptEntry,
+    RepositoryId, RepositoryOverview, RepositoryScript, Response, SwitchedOffCheck,
+    TranscriptEntry,
 };
 pub use service::{Service, ServiceConfig, ServiceHandle, StartError, start};
 pub use store::StorageError;

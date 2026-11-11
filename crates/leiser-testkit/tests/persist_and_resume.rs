@@ -109,7 +109,7 @@ async fn closing_the_desktop_app_does_not_stop_a_running_turn() -> TestResult {
     assert_eq!(
         read_chat(&reopened, chat).await?,
         (
-            ChatStatus::Idle,
+            ChatStatus::WaitingForYou,
             vec![
                 user("take your time"),
                 agent(message("done")),
@@ -199,7 +199,11 @@ async fn the_reopened_app_shows_all_chats_and_their_transcripts_after_a_restart(
         after.iter().map(|chat| chat.chat).collect::<Vec<_>>(),
         vec![answered, untouched]
     );
-    assert!(after.iter().all(|chat| chat.status == ChatStatus::Idle));
+    assert!(
+        after
+            .iter()
+            .all(|chat| chat.status == ChatStatus::WaitingForYou)
+    );
     assert_eq!(
         read_chat(&app, answered).await?.1,
         vec![
