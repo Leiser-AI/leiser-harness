@@ -16,7 +16,9 @@ mod script;
 mod service;
 mod turn;
 
-pub use fake_driver::{FAKE_LOGIN_FILE, FakeDriver, FakeLogin, UNSET};
+pub use fake_driver::{
+    FAKE_LOGIN_FILE, FAKE_USAGE_LIMIT_FILE, FakeDriver, FakeLogin, FakeUsageLimit, UNSET,
+};
 pub use gate::Gate;
 pub use harness_mcp_client::{HarnessMcpClient, McpClientError, ToolOutput};
 pub use keychain::MemoryKeychain;

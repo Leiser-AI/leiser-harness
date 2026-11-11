@@ -21,6 +21,11 @@
 //! (`<dir>/<id>.json`), so `--resume` continues with the turn after the last
 //! one the session played. Resuming an unknown session fails.
 //!
+//! While its config directory, `CLAUDE_CONFIG_DIR` or `CODEX_HOME`, holds
+//! [`FAKE_USAGE_LIMIT_FILE`], every message ends its turn at that usage
+//! limit at once. Such a turn plays no scripted turn: the next message
+//! without the limit gets the turn this one would have played.
+//!
 //! `fake-agent-cli --version` prints [`FAKE_VERSION`], older than any agent
 //! CLI the harness supports, for tests of the minimum version check.
 //!
@@ -41,7 +46,8 @@ use std::time::Duration;
 use leiser_service::{AgentEvent, Answer, PermissionMode, Question};
 use leiser_service::{CLAUDE_CONFIG_DIR, CODEX_HOME};
 use leiser_testkit::{
-    FAKE_LOGIN_FILE, FakeInput, FakeLogin, HarnessMcpClient, McpClientError, Script, Step, UNSET,
+    FAKE_LOGIN_FILE, FAKE_USAGE_LIMIT_FILE, FakeInput, FakeLogin, FakeUsageLimit, HarnessMcpClient,
+    McpClientError, Script, Step, UNSET,
 };
 use serde::{Deserialize, Serialize};
 
@@ -226,6 +232,17 @@ fn run() -> Result<(), FakeError> {
     while let Ok(input) = inputs.recv() {
         match input? {
             FakeInput::UserMessage { text } => {
+                if let Some(limit) = usage_limit()? {
+                    emit(
+                        &mut out,
+                        &AgentEvent::UsageLimitReached {
+                            limit: limit.limit,
+                            resets_in_seconds: limit.resets_in_seconds,
+                        },
+                    )?;
+                    emit(&mut out, &AgentEvent::TurnEnded)?;
+                    continue;
+                }
                 let mut turn = Turn {
                     message: text,
                     steer: None,
@@ -265,6 +282,26 @@ fn run() -> Result<(), FakeError> {
     Ok(())
 }
 
+/// The config directory the fake agent CLI runs in, if its environment
+/// names one, and the variable that named it.
+fn config_directory() -> Option<(&'static str, OsString)> {
+    [CLAUDE_CONFIG_DIR, CODEX_HOME]
+        .into_iter()
+        .find_map(|variable| std::env::var_os(variable).map(|home| (variable, home)))
+}
+
+/// The usage limit its config directory holds, if any.
+fn usage_limit() -> Result<Option<FakeUsageLimit>, FakeError> {
+    let Some((_, home)) = config_directory() else {
+        return Ok(None);
+    };
+    match std::fs::read(Path::new(&home).join(FAKE_USAGE_LIMIT_FILE)) {
+        Ok(bytes) => Ok(Some(serde_json::from_slice(&bytes)?)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
 fn login(fail: bool, ask_for_code: bool) -> Result<(), FakeError> {
     let mut out = io::stdout().lock();
     writeln!(out, "Open https://login.invalid/fake to sign in.")?;
@@ -280,10 +317,7 @@ fn login(fail: bool, ask_for_code: bool) -> Result<(), FakeError> {
     } else {
         None
     };
-    let (variable, home) = [CLAUDE_CONFIG_DIR, CODEX_HOME]
-        .into_iter()
-        .find_map(|variable| std::env::var_os(variable).map(|home| (variable, home)))
-        .ok_or(FakeError::NoConfigDirectory)?;
+    let (variable, home) = config_directory().ok_or(FakeError::NoConfigDirectory)?;
     let login = FakeLogin {
         variable: variable.to_owned(),
         code,
