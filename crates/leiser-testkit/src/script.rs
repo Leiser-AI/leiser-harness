@@ -5,7 +5,8 @@ use serde::{Deserialize, Serialize};
 
 /// The turns the fake agent CLI plays back, one per message it receives.
 /// Every turn ends with [`AgentEvent::TurnEnded`]; a message after the last
-/// turn gets an empty turn.
+/// turn gets an empty turn. A resumed agent session continues with the turn
+/// after the last one it played.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Script {
     pub turns: Vec<Vec<Step>>,
@@ -35,6 +36,8 @@ pub enum Step {
     EchoUserMessage,
     /// Answers with the directory the fake agent CLI runs in.
     ReportWorkingDirectory,
+    /// Waits before the next step, so the turn keeps running for a while.
+    Sleep { millis: u64 },
 }
 
 impl Step {
