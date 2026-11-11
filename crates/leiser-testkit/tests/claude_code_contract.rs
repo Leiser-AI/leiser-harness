@@ -1,5 +1,5 @@
 //! Contract tests: the real Claude Code behaves like the fake agent CLI for
-//! start, send, read events, queue, steer and interrupt, so the service
+//! start, send, read events, queue, steer, interrupt and resume, so the service
 //! tests with the fake agent CLI also hold for Claude Code.
 //!
 //! They need Claude Code signed in to one of the developer's subscriptions,
@@ -20,9 +20,9 @@ use std::time::Duration;
 
 use leiser_service::{
     AgentEvent, ChatId, Checkout, ClaudeCodeDriver, Command, Driver, Event, QueueReason, Response,
-    ServiceConfig, ServiceHandle, SessionSpec,
+    ServiceHandle, SessionSpec,
 };
-use leiser_testkit::TestRepo;
+use leiser_testkit::{TestRepo, TestService};
 use tokio::sync::broadcast;
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
@@ -39,10 +39,10 @@ fn driver() -> ClaudeCodeDriver {
     })
 }
 
-async fn start_chat(repo: &TestRepo) -> TestResult<(ServiceHandle, ChatId)> {
-    let service = leiser_service::start(ServiceConfig {
-        driver: Arc::new(driver()),
-    });
+/// A chat on Claude Code; the [`TestService`] keeps the service running.
+async fn start_chat(repo: &TestRepo) -> TestResult<(TestService, ServiceHandle, ChatId)> {
+    let harness = TestService::with_driver(Arc::new(driver()))?;
+    let service = harness.connect();
     let Response::RepositoryAdded { repository } = service
         .execute(Command::AddRepository {
             path: repo.path().to_path_buf(),
@@ -60,7 +60,7 @@ async fn start_chat(repo: &TestRepo) -> TestResult<(ServiceHandle, ChatId)> {
     else {
         return Err("expected ChatStarted".into());
     };
-    Ok((service, chat))
+    Ok((harness, service, chat))
 }
 
 async fn send(service: &ServiceHandle, chat: ChatId, text: &str) -> TestResult {
@@ -122,7 +122,7 @@ async fn a_message_reaches_claude_code_and_its_events_come_back() -> TestResult 
     let marker = "leiser-contract-marker-5d1c";
     let repo = TestRepo::new()?;
     std::fs::write(repo.path().join("marker.txt"), marker)?;
-    let (service, chat) = start_chat(&repo).await?;
+    let (_harness, service, chat) = start_chat(&repo).await?;
     let mut events = service.subscribe();
 
     send(
@@ -158,7 +158,7 @@ async fn a_message_reaches_claude_code_and_its_events_come_back() -> TestResult 
 async fn the_next_message_continues_the_same_agent_session() -> TestResult {
     let word = "lantern-4217";
     let repo = TestRepo::new()?;
-    let (service, chat) = start_chat(&repo).await?;
+    let (_harness, service, chat) = start_chat(&repo).await?;
     let mut events = service.subscribe();
 
     send(
@@ -176,6 +176,37 @@ async fn the_next_message_continues_the_same_agent_session() -> TestResult {
     .await?;
 
     // A new agent session would not know the word.
+    let turn = collect_turn(&mut events, chat).await?;
+    assert!(messages(&turn).contains(word), "{turn:?}");
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "needs Claude Code signed in to a subscription; run locally with --ignored"]
+async fn a_chat_continues_its_agent_session_after_a_service_restart() -> TestResult {
+    let word = "harbor-8831";
+    let repo = TestRepo::new()?;
+    let (harness, service, chat) = start_chat(&repo).await?;
+    let mut events = service.subscribe();
+    send(
+        &service,
+        chat,
+        &format!("Remember the code word {word}. Reply with only: OK"),
+    )
+    .await?;
+    collect_turn(&mut events, chat).await?;
+
+    let harness = harness.restart().await?;
+
+    let service = harness.connect();
+    let mut events = service.subscribe();
+    send(
+        &service,
+        chat,
+        "What was the code word? Reply with only the code word.",
+    )
+    .await?;
+    // Only the resumed agent session knows the word.
     let turn = collect_turn(&mut events, chat).await?;
     assert!(messages(&turn).contains(word), "{turn:?}");
     Ok(())
@@ -207,7 +238,7 @@ async fn an_agent_session_ends_when_its_input_is_dropped() -> TestResult {
 #[ignore = "needs Claude Code signed in to a subscription; run locally with --ignored"]
 async fn an_interrupted_turn_ends_as_interrupted_and_the_chat_goes_on() -> TestResult {
     let repo = TestRepo::new()?;
-    let (service, chat) = start_chat(&repo).await?;
+    let (_harness, service, chat) = start_chat(&repo).await?;
     let mut events = service.subscribe();
     send(&service, chat, LONG_TURN).await?;
     // Claude Code writes whole messages, not parts, so there is no event
@@ -229,7 +260,7 @@ async fn an_interrupted_turn_ends_as_interrupted_and_the_chat_goes_on() -> TestR
 #[ignore = "needs Claude Code signed in to a subscription; run locally with --ignored"]
 async fn queued_and_steered_messages_wait_for_the_running_turn() -> TestResult {
     let repo = TestRepo::new()?;
-    let (service, chat) = start_chat(&repo).await?;
+    let (_harness, service, chat) = start_chat(&repo).await?;
     let mut events = service.subscribe();
     send(&service, chat, LONG_TURN).await?;
 

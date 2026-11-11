@@ -8,7 +8,8 @@ use serde::{Deserialize, Serialize};
 /// The turns the fake agent CLI plays back, one per message it receives.
 /// Every turn ends with [`AgentEvent::TurnEnded`], or with
 /// [`AgentEvent::TurnInterrupted`] when it is interrupted; a message after
-/// the last turn gets an empty turn.
+/// the last turn gets an empty turn. A resumed agent session continues
+/// with the turn after the last one it played.
 ///
 /// The fake agent CLI exits with an error on input a real one would not
 /// get from a correct harness service: a message while a turn runs, or a

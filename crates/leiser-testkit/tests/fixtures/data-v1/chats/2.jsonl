@@ -1,0 +1,4 @@
+{"type":"user_message","text":"hello"}
+{"type":"agent","event":{"type":"tool_call","name":"read_file","detail":"README.md"}}
+{"type":"agent","event":{"type":"message","text":"hi"}}
+{"type":"agent","event":{"type":"turn_ended"}}

@@ -5,10 +5,9 @@ use std::error::Error;
 use std::sync::Arc;
 
 use leiser_service::{
-    ClaudeCodeDriver, Command, CommandError, Driver, DriverError, Response, ServiceConfig,
-    SessionSpec, Version,
+    ClaudeCodeDriver, Command, CommandError, Driver, DriverError, Response, SessionSpec, Version,
 };
-use leiser_testkit::TestRepo;
+use leiser_testkit::{TestRepo, TestService};
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
@@ -41,9 +40,8 @@ async fn claude_code_below_the_minimum_version_is_refused_with_the_reason() -> T
 
 #[tokio::test]
 async fn the_developer_learns_why_a_chat_cannot_start_claude_code() -> TestResult {
-    let service = leiser_service::start(ServiceConfig {
-        driver: Arc::new(ClaudeCodeDriver::new(FAKE_AGENT_CLI)),
-    });
+    let harness = TestService::with_driver(Arc::new(ClaudeCodeDriver::new(FAKE_AGENT_CLI)))?;
+    let service = harness.connect();
     let repo = TestRepo::new()?;
     let Response::RepositoryAdded { repository } = service
         .execute(Command::AddRepository {

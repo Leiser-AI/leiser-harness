@@ -6,11 +6,11 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 /// A repository added to the harness.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct RepositoryId(pub(crate) u64);
 
 /// A chat: one conversation of the developer with agents about one task.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ChatId(pub(crate) u64);
 
 /// Where a chat works.
@@ -47,6 +47,10 @@ pub enum Command {
     /// Asks the agent CLI to stop the running turn. The turn ends with
     /// [`AgentEvent::TurnInterrupted`]; queued messages are sent after it.
     InterruptTurn { chat: ChatId },
+    /// Lists every chat with its current status.
+    ListChats,
+    /// Reads a chat's status and transcript.
+    ReadChat { chat: ChatId },
 }
 
 /// The answer to a successful [`Command`].
@@ -69,6 +73,45 @@ pub enum Response {
     MessageSteered,
     /// The agent CLI was asked to stop the running turn.
     InterruptRequested,
+    Chats {
+        chats: Vec<ChatOverview>,
+    },
+    Chat {
+        status: ChatStatus,
+        transcript: Vec<TranscriptEntry>,
+    },
+}
+
+/// A chat as the sidebar lists it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatOverview {
+    pub chat: ChatId,
+    pub repository: RepositoryId,
+    pub status: ChatStatus,
+}
+
+/// What a chat is doing right now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatStatus {
+    /// No turn is running.
+    Idle,
+    /// A turn is running.
+    Working,
+}
+
+/// One entry of a chat's transcript, in the order it happened.
+///
+/// The harness service stores these on disk, so a change that breaks
+/// reading old entries needs a storage migration (see `store.rs`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum TranscriptEntry {
+    /// A message the developer sent to the agent session, also a queued
+    /// one once it was sent, or one steered into the running turn.
+    UserMessage { text: String },
+    /// An event from the chat's agent session.
+    Agent { event: AgentEvent },
 }
 
 /// Why a message was queued instead of being delivered now.
@@ -98,6 +141,8 @@ pub enum CommandError {
     NoTurnRunning(ChatId),
     #[error("the agent CLI failed: {reason}")]
     AgentCli { reason: String },
+    #[error("the harness service could not store the chat: {reason}")]
+    Storage { reason: String },
     #[error("the harness service has stopped")]
     ServiceStopped,
 }
@@ -134,6 +179,8 @@ impl Event {
 }
 
 /// An event from an agent session, the same for every agent CLI.
+///
+/// Stored in chat transcripts; see [`TranscriptEntry`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEvent {

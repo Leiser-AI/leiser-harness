@@ -6,6 +6,9 @@
 //! message types of the Agent SDK,
 //! <https://code.claude.com/docs/en/agent-sdk/typescript>.
 //!
+//! Resume runs Claude Code with `--resume <session id>`; the id comes from
+//! the `session_id` field of Claude Code's output lines.
+//!
 //! Interrupt uses Claude Code's control protocol. Steering is not supported
 //! yet, so the harness service queues steered messages: it is not verified
 //! how Claude Code ends turns when a message arrives mid-turn.
@@ -18,9 +21,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, ChildStdout, Command};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
-use crate::{AgentEvent, AgentSession, Driver, DriverError, SessionInput, SessionSpec, Version};
+use crate::{
+    AgentEvent, AgentSession, AgentSessionId, Driver, DriverError, SessionInput, SessionSpec,
+    Version,
+};
 
 const AGENT_CLI: &str = "Claude Code";
 const CHANNEL_BUFFER: usize = 64;
@@ -109,9 +115,32 @@ impl Driver for ClaudeCodeDriver {
     /// Checks the installed version, then starts Claude Code in the
     /// working directory.
     fn start(&self, spec: SessionSpec) -> Result<AgentSession, DriverError> {
+        self.spawn(&spec, None)
+    }
+
+    /// Like [`Driver::start`], with `--resume`.
+    fn resume(
+        &self,
+        spec: SessionSpec,
+        session: &AgentSessionId,
+    ) -> Result<AgentSession, DriverError> {
+        self.spawn(&spec, Some(session))
+    }
+}
+
+impl ClaudeCodeDriver {
+    fn spawn(
+        &self,
+        spec: &SessionSpec,
+        resume: Option<&AgentSessionId>,
+    ) -> Result<AgentSession, DriverError> {
         self.check_version()?;
-        let mut child = Command::new(&self.program)
-            .args(ARGUMENTS)
+        let mut command = Command::new(&self.program);
+        command.args(ARGUMENTS);
+        if let Some(session) = resume {
+            command.arg("--resume").arg(session.as_str());
+        }
+        let mut child = command
             .current_dir(&spec.working_directory)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -121,11 +150,12 @@ impl Driver for ClaudeCodeDriver {
         let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
             return Err(DriverError::MissingStreams);
         };
+        let (id_sender, id) = oneshot::channel();
         let (input, input_receiver) = mpsc::channel(CHANNEL_BUFFER);
         let (event_sender, events) = mpsc::channel(CHANNEL_BUFFER);
         tokio::spawn(write_input(stdin, input_receiver));
         tokio::spawn(async move {
-            if read_events(stdout, &event_sender).await == ReadEnd::ProtocolBroken {
+            if read_events(stdout, id_sender, &event_sender).await == ReadEnd::ProtocolBroken {
                 // The process may still wait for input; it is of no use now.
                 let _ = child.start_kill();
             }
@@ -133,7 +163,7 @@ impl Driver for ClaudeCodeDriver {
             let _ = child.wait().await;
             let _ = event_sender.send(AgentEvent::SessionEnded).await;
         });
-        Ok(AgentSession { input, events })
+        Ok(AgentSession { id, input, events })
     }
 }
 
@@ -171,10 +201,24 @@ enum ReadEnd {
     ProtocolBroken,
 }
 
-async fn read_events(stdout: ChildStdout, events: &mpsc::Sender<AgentEvent>) -> ReadEnd {
+async fn read_events(
+    stdout: ChildStdout,
+    id: oneshot::Sender<AgentSessionId>,
+    events: &mpsc::Sender<AgentEvent>,
+) -> ReadEnd {
     let mut lines = BufReader::new(stdout).lines();
     let mut parser = Parser::default();
+    let mut id = Some(id);
     while let Ok(Some(line)) = lines.next_line().await {
+        if let Some(sender) = id.take() {
+            match session_id(&line) {
+                // The service may have dropped the agent session already.
+                Some(session) => {
+                    let _ = sender.send(session);
+                }
+                None => id = Some(sender),
+            }
+        }
         let Some(parsed) = parser.parse_line(&line) else {
             return ReadEnd::ProtocolBroken;
         };
@@ -185,6 +229,18 @@ async fn read_events(stdout: ChildStdout, events: &mpsc::Sender<AgentEvent>) -> 
         }
     }
     ReadEnd::Closed
+}
+
+/// The agent session id that Claude Code puts on its output lines, first
+/// on the `system` `init` line.
+fn session_id(line: &str) -> Option<AgentSessionId> {
+    #[derive(Deserialize)]
+    struct WithSessionId {
+        session_id: String,
+    }
+    serde_json::from_str::<WithSessionId>(line)
+        .ok()
+        .map(|line| AgentSessionId::new(line.session_id))
 }
 
 /// Turns Claude Code's output into agent events, line by line.
@@ -532,8 +588,8 @@ impl RateLimitInfo {
 
 #[cfg(test)]
 mod tests {
-    use super::{ControlRequest, InputLine, OutputLine, Parser};
-    use crate::AgentEvent;
+    use super::{ControlRequest, InputLine, OutputLine, Parser, session_id};
+    use crate::{AgentEvent, AgentSessionId};
 
     /// The events of `lines`, read in order by one parser.
     fn events(lines: &[&str]) -> Vec<AgentEvent> {
@@ -699,6 +755,18 @@ mod tests {
         ] {
             assert_eq!(parse_line(line), Some(vec![]), "{line}");
         }
+    }
+
+    #[test]
+    fn the_agent_session_id_comes_from_the_output_lines() {
+        let init = r#"{"type":"system","subtype":"init","session_id":"0b6c1f4e-0000-4000-8000-000000000001","claude_code_version":"2.1.321"}"#;
+
+        assert_eq!(
+            session_id(init),
+            Some(AgentSessionId::new("0b6c1f4e-0000-4000-8000-000000000001"))
+        );
+        assert_eq!(session_id(r#"{"type":"stream_event","event":{}}"#), None);
+        assert_eq!(session_id("Not JSON"), None);
     }
 
     #[test]

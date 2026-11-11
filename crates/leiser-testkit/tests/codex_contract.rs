@@ -1,5 +1,5 @@
 //! Contract tests: the real Codex behaves like the fake agent CLI for
-//! start, send, read events, queue, steer and interrupt.
+//! start, send, read events, queue, steer, interrupt and resume.
 //!
 //! Each contract runs twice: against the fake agent CLI, in CI, and against
 //! the developer's installed Codex, only on demand, because it needs a
@@ -10,7 +10,7 @@
 //! ```
 //!
 //! `LEISER_CODEX` names the Codex program (default: `codex` on `PATH`).
-//! Approve and resume join once the driver interface has them.
+//! Approve joins once the driver interface has it.
 
 use std::error::Error;
 use std::path::Path;
@@ -19,9 +19,9 @@ use std::time::Duration;
 
 use leiser_service::{
     AgentEvent, ChatId, Checkout, CodexDriver, Command, Driver, Event, QueueReason, Response,
-    ServiceConfig, ServiceHandle, SessionSpec,
+    ServiceHandle, SessionSpec,
 };
-use leiser_testkit::{FakeDriver, Gate, Script, Step, TestRepo, collect_turn_within};
+use leiser_testkit::{FakeDriver, Gate, Script, Step, TestRepo, TestService, collect_turn_within};
 use tokio::sync::broadcast;
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
@@ -57,6 +57,7 @@ fn fake(script: &Script) -> TestResult<Arc<dyn Driver>> {
 }
 
 struct Chat {
+    harness: TestService,
     service: ServiceHandle,
     id: ChatId,
     events: broadcast::Receiver<Event>,
@@ -64,7 +65,8 @@ struct Chat {
 
 impl Chat {
     async fn start(driver: Arc<dyn Driver>, repo: &TestRepo) -> TestResult<Self> {
-        let service = leiser_service::start(ServiceConfig { driver });
+        let harness = TestService::with_driver(driver)?;
+        let service = harness.connect();
         let Response::RepositoryAdded { repository } = service
             .execute(Command::AddRepository {
                 path: repo.path().to_path_buf(),
@@ -84,6 +86,7 @@ impl Chat {
         };
         let events = service.subscribe();
         Ok(Self {
+            harness,
             service,
             id: chat,
             events,
@@ -100,6 +103,19 @@ impl Chat {
             .await?;
         assert_eq!(response, Response::MessageSent);
         Ok(())
+    }
+
+    /// Restarts the harness service; the chat keeps its id.
+    async fn restart(self) -> TestResult<Self> {
+        let harness = self.harness.restart().await?;
+        let service = harness.connect();
+        let events = service.subscribe();
+        Ok(Self {
+            harness,
+            service,
+            id: self.id,
+            events,
+        })
     }
 
     async fn execute(&self, command: Command) -> TestResult<Response> {
@@ -168,6 +184,28 @@ async fn the_next_message_continues_the_same_agent_session(driver: Arc<dyn Drive
         .await?;
 
     assert!(mentions(&answer, "kiwi"), "{answer:?}");
+    Ok(())
+}
+
+async fn a_chat_continues_its_agent_session_after_a_service_restart(
+    driver: Arc<dyn Driver>,
+) -> TestResult {
+    let repo = TestRepo::new()?;
+    let mut chat = Chat::start(driver, &repo).await?;
+    chat.turn(&format!(
+        "Remember the code word mango. Reply with the single word ok. {NO_TOOLS}"
+    ))
+    .await?;
+
+    let mut chat = chat.restart().await?;
+
+    let answer = chat
+        .turn(&format!(
+            "What was the code word? Reply with only that word. {NO_TOOLS}"
+        ))
+        .await?;
+    // Only the resumed agent session knows the word.
+    assert!(mentions(&answer, "mango"), "{answer:?}");
     Ok(())
 }
 
@@ -291,6 +329,14 @@ async fn fake_the_next_message_continues_the_same_agent_session() -> TestResult 
 }
 
 #[tokio::test]
+async fn fake_a_chat_continues_its_agent_session_after_a_service_restart() -> TestResult {
+    let script = Script::new()
+        .turn([Step::message("ok")])
+        .turn([Step::message("mango")]);
+    a_chat_continues_its_agent_session_after_a_service_restart(fake(&script)?).await
+}
+
+#[tokio::test]
 async fn fake_the_agent_works_in_the_chats_checkout() -> TestResult {
     the_agent_works_in_the_chats_checkout(fake(
         &Script::new().turn([Step::ReportWorkingDirectory]),
@@ -343,6 +389,12 @@ async fn codex_a_message_gets_an_answer_and_the_turn_ends() -> TestResult {
 #[ignore = "needs Codex and a subscription; see the module docs"]
 async fn codex_the_next_message_continues_the_same_agent_session() -> TestResult {
     the_next_message_continues_the_same_agent_session(codex()).await
+}
+
+#[tokio::test]
+#[ignore = "needs Codex and a subscription; see the module docs"]
+async fn codex_a_chat_continues_its_agent_session_after_a_service_restart() -> TestResult {
+    a_chat_continues_its_agent_session_after_a_service_restart(codex()).await
 }
 
 #[tokio::test]

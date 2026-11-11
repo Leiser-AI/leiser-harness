@@ -3,13 +3,12 @@
 
 use std::error::Error;
 use std::path::Path;
-use std::sync::Arc;
 
 use leiser_service::{
     AgentEvent, ChatId, Checkout, Command, CommandError, Event, QueueReason, Response,
-    ServiceConfig, ServiceHandle,
+    ServiceHandle,
 };
-use leiser_testkit::{FakeDriver, Gate, Script, Step, TestRepo, collect_turn, next_event};
+use leiser_testkit::{Gate, Script, Step, TestRepo, TestService, collect_turn, next_event};
 use tokio::sync::broadcast;
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
@@ -21,14 +20,13 @@ struct Setup {
     service: ServiceHandle,
     chat: ChatId,
     events: broadcast::Receiver<Event>,
+    _harness: TestService,
     _repo: TestRepo,
 }
 
 async fn setup(script: &Script) -> TestResult<Setup> {
-    let driver = FakeDriver::new(Path::new(FAKE_AGENT_CLI), script)?;
-    let service = leiser_service::start(ServiceConfig {
-        driver: Arc::new(driver),
-    });
+    let harness = TestService::start(Path::new(FAKE_AGENT_CLI), script)?;
+    let service = harness.connect();
     let repo = TestRepo::new()?;
     let response = service
         .execute(Command::AddRepository {
@@ -52,6 +50,7 @@ async fn setup(script: &Script) -> TestResult<Setup> {
         service,
         chat,
         events,
+        _harness: harness,
         _repo: repo,
     })
 }

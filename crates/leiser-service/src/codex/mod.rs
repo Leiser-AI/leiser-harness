@@ -2,6 +2,7 @@
 //! `codex app-server` and talks to it over its JSON-RPC protocol on
 //! standard input and output. Steer uses `turn/steer`, interrupt
 //! `turn/interrupt`; both wait for the turn's id when they come before it.
+//! Resume uses `thread/resume` with the thread's id as the agent session id.
 
 mod conversation;
 mod wire;
@@ -12,10 +13,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 use self::conversation::{Conversation, Output, ProtocolError};
-use crate::{AgentEvent, AgentSession, Driver, DriverError, SessionInput, SessionSpec, Version};
+use crate::{
+    AgentEvent, AgentSession, AgentSessionId, Driver, DriverError, SessionInput, SessionSpec,
+    Version,
+};
 
 const AGENT_CLI: &str = "Codex";
 
@@ -102,6 +106,31 @@ impl Driver for CodexDriver {
     /// Checks the installed version, then starts `codex app-server` in the
     /// working directory.
     fn start(&self, spec: SessionSpec) -> Result<AgentSession, DriverError> {
+        self.spawn(&spec, None)
+    }
+
+    /// Like [`Driver::start`], then resumes the thread instead of starting
+    /// a new one.
+    fn resume(
+        &self,
+        spec: SessionSpec,
+        session: &AgentSessionId,
+    ) -> Result<AgentSession, DriverError> {
+        self.spawn(&spec, Some(session.as_str().to_owned()))
+    }
+
+    /// Codex takes messages mid-turn with `turn/steer`.
+    fn supports_steer(&self) -> bool {
+        true
+    }
+}
+
+impl CodexDriver {
+    fn spawn(
+        &self,
+        spec: &SessionSpec,
+        resume: Option<String>,
+    ) -> Result<AgentSession, DriverError> {
         self.check_version()?;
         let working_directory = spec
             .working_directory
@@ -126,6 +155,7 @@ impl Driver for CodexDriver {
         let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
             return Err(DriverError::MissingStreams);
         };
+        let (id_sender, id) = oneshot::channel();
         let (input, input_receiver) = mpsc::channel(CHANNEL_BUFFER);
         let (event_sender, events) = mpsc::channel(CHANNEL_BUFFER);
         tokio::spawn(async move {
@@ -135,6 +165,8 @@ impl Driver for CodexDriver {
             // variant for it.
             let _ = run(
                 working_directory,
+                resume,
+                id_sender,
                 stdin,
                 stdout,
                 input_receiver,
@@ -144,12 +176,7 @@ impl Driver for CodexDriver {
             stop(child).await;
             let _ = event_sender.send(AgentEvent::SessionEnded).await;
         });
-        Ok(AgentSession { input, events })
-    }
-
-    /// Codex takes messages mid-turn with `turn/steer`.
-    fn supports_steer(&self) -> bool {
-        true
+        Ok(AgentSession { id, input, events })
     }
 }
 
@@ -168,13 +195,19 @@ enum SessionStop {
 
 async fn run(
     working_directory: String,
+    resume: Option<String>,
+    id: oneshot::Sender<AgentSessionId>,
     mut stdin: ChildStdin,
     stdout: ChildStdout,
     mut input: mpsc::Receiver<SessionInput>,
     events: &mpsc::Sender<AgentEvent>,
 ) -> Result<(), SessionStop> {
-    let (mut conversation, output) = Conversation::start(working_directory)?;
-    deliver(&mut stdin, events, output).await?;
+    let (mut conversation, output) = match resume {
+        Some(thread_id) => Conversation::resume(working_directory, thread_id)?,
+        None => Conversation::start(working_directory)?,
+    };
+    let mut id = Some(id);
+    deliver(&mut stdin, events, &mut id, output).await?;
     let mut lines = BufReader::new(stdout).lines();
     loop {
         let output = tokio::select! {
@@ -189,15 +222,22 @@ async fn run(
                 None => return Err(SessionStop::OutputClosed),
             },
         };
-        deliver(&mut stdin, events, output).await?;
+        deliver(&mut stdin, events, &mut id, output).await?;
     }
 }
 
 async fn deliver(
     stdin: &mut ChildStdin,
     events: &mpsc::Sender<AgentEvent>,
+    id: &mut Option<oneshot::Sender<AgentSessionId>>,
     output: Output,
 ) -> Result<(), SessionStop> {
+    if let Some(thread_id) = output.thread_id {
+        if let Some(sender) = id.take() {
+            // The service may have dropped the agent session already.
+            let _ = sender.send(AgentSessionId::new(thread_id));
+        }
+    }
     for line in output.lines {
         stdin.write_all(line.as_bytes()).await?;
         stdin.write_all(b"\n").await?;

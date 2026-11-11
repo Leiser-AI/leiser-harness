@@ -5,9 +5,9 @@ use std::collections::{HashMap, VecDeque};
 
 use super::wire::{
     self, ClientInfo, ClientNotification, ClientRequest, ErrorResponse, Incoming, InitializeParams,
-    Item, Notification, RateLimits, Request, RequestId, RpcError, ThreadStartParams, ThreadStarted,
-    Turn, TurnInterruptParams, TurnStartParams, TurnStarted, TurnStatus, TurnSteerParams,
-    UserInput, WireError,
+    Item, Notification, RateLimits, Request, RequestId, RpcError, ThreadResumeParams,
+    ThreadStartParams, ThreadStarted, Turn, TurnInterruptParams, TurnStartParams, TurnStarted,
+    TurnStatus, TurnSteerParams, UserInput, WireError,
 };
 use crate::AgentEvent;
 
@@ -39,12 +39,16 @@ pub(super) struct Output {
     pub lines: Vec<String>,
     /// Events for the harness service, in order.
     pub events: Vec<AgentEvent>,
+    /// The thread's id, once Codex has started or resumed it. The harness
+    /// service resumes the agent session with it.
+    pub thread_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Pending {
     Initialize,
     ThreadStart,
+    ThreadResume,
     TurnStart,
     TurnSteer { text: String },
     TurnInterrupt,
@@ -55,6 +59,7 @@ impl Pending {
         match self {
             Self::Initialize => "initialize",
             Self::ThreadStart => "thread/start",
+            Self::ThreadResume => "thread/resume",
             Self::TurnStart => "turn/start",
             Self::TurnSteer { .. } => "turn/steer",
             Self::TurnInterrupt => "turn/interrupt",
@@ -97,6 +102,8 @@ enum MidTurn {
 #[derive(Debug)]
 pub(super) struct Conversation {
     working_directory: String,
+    /// The thread to resume instead of starting a new one.
+    resume: Option<String>,
     phase: Phase,
     /// Turns waiting for the thread to start or the running turn to end,
     /// each with its messages: the first one, then any steered into it
@@ -108,10 +115,27 @@ pub(super) struct Conversation {
 }
 
 impl Conversation {
-    /// Starts the handshake. The returned lines must be written first.
+    /// Starts the handshake for a new thread. The returned lines must be
+    /// written first.
     pub fn start(working_directory: String) -> Result<(Self, Output), ProtocolError> {
+        Self::open(working_directory, None)
+    }
+
+    /// Starts the handshake for resuming the thread `thread_id`.
+    pub fn resume(
+        working_directory: String,
+        thread_id: String,
+    ) -> Result<(Self, Output), ProtocolError> {
+        Self::open(working_directory, Some(thread_id))
+    }
+
+    fn open(
+        working_directory: String,
+        resume: Option<String>,
+    ) -> Result<(Self, Output), ProtocolError> {
         let mut conversation = Self {
             working_directory,
+            resume,
             phase: Phase::Initializing,
             waiting: VecDeque::new(),
             pending: HashMap::new(),
@@ -298,15 +322,28 @@ impl Conversation {
                         method: "initialized",
                     })?);
                 self.phase = Phase::StartingThread;
-                let params = ThreadStartParams {
-                    cwd: self.working_directory.clone(),
-                    approval_policy: APPROVAL_POLICY,
-                    sandbox: SANDBOX,
-                };
-                self.request(output, Pending::ThreadStart, params)?;
+                let cwd = self.working_directory.clone();
+                if let Some(thread_id) = self.resume.clone() {
+                    let params = ThreadResumeParams {
+                        thread_id,
+                        cwd,
+                        approval_policy: APPROVAL_POLICY,
+                        sandbox: SANDBOX,
+                        exclude_turns: true,
+                    };
+                    self.request(output, Pending::ThreadResume, params)?;
+                } else {
+                    let params = ThreadStartParams {
+                        cwd,
+                        approval_policy: APPROVAL_POLICY,
+                        sandbox: SANDBOX,
+                    };
+                    self.request(output, Pending::ThreadStart, params)?;
+                }
             }
-            (result, pending @ Pending::ThreadStart) => {
+            (result, pending @ (Pending::ThreadStart | Pending::ThreadResume)) => {
                 let started: ThreadStarted = result.parse(pending.method())?;
+                output.thread_id = Some(started.thread.id.clone());
                 self.phase = Phase::Ready {
                     thread_id: started.thread.id,
                     turn: TurnState::Idle,
@@ -533,6 +570,44 @@ mod tests {
         assert_eq!(next[1]["params"]["cwd"], "/repo");
         assert_eq!(next[1]["params"]["approvalPolicy"], "untrusted");
         assert_eq!(next[1]["params"]["sandbox"], "workspace-write");
+        Ok(())
+    }
+
+    #[test]
+    fn the_thread_id_is_reported_once_the_thread_started() -> TestResult {
+        let (mut conversation, _) = Conversation::start("/repo".to_owned())?;
+        receive(&mut conversation, &json!({"id": 0, "result": {}}))?;
+
+        let output = receive(
+            &mut conversation,
+            &json!({"id": 1, "result": {"thread": {"id": "t1"}}}),
+        )?;
+
+        assert_eq!(output.thread_id.as_deref(), Some("t1"));
+        Ok(())
+    }
+
+    #[test]
+    fn resuming_asks_codex_for_the_earlier_thread_and_continues_in_it() -> TestResult {
+        let (mut conversation, _) = Conversation::resume("/repo".to_owned(), "t1".to_owned())?;
+        conversation.user_message("again".to_owned())?;
+
+        let output = receive(&mut conversation, &json!({"id": 0, "result": {}}))?;
+        let resume = &lines(&output)?[1];
+        assert_eq!(resume["method"], "thread/resume");
+        assert_eq!(resume["params"]["threadId"], "t1");
+        assert_eq!(resume["params"]["cwd"], "/repo");
+        assert_eq!(resume["params"]["approvalPolicy"], "untrusted");
+        assert_eq!(resume["params"]["sandbox"], "workspace-write");
+
+        let output = receive(
+            &mut conversation,
+            &json!({"id": 1, "result": {"thread": {"id": "t1"}}}),
+        )?;
+        assert_eq!(output.thread_id.as_deref(), Some("t1"));
+        let turn = &lines(&output)?[0];
+        assert_eq!(turn["method"], "turn/start");
+        assert_eq!(turn["params"]["threadId"], "t1");
         Ok(())
     }
 

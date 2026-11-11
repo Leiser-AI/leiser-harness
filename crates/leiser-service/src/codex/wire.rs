@@ -368,6 +368,20 @@ pub(super) struct ThreadStartParams {
     pub sandbox: &'static str,
 }
 
+/// Resumes an earlier thread, with the same settings as
+/// [`ThreadStartParams`]. Its answer has the same `thread` as
+/// [`ThreadStarted`].
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ThreadResumeParams {
+    pub thread_id: String,
+    pub cwd: String,
+    pub approval_policy: &'static str,
+    pub sandbox: &'static str,
+    /// The chat already has the earlier turns; Codex need not send them.
+    pub exclude_turns: bool,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct TurnStartParams {
