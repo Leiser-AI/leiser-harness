@@ -5,18 +5,23 @@ export type RepositoryId = number;
 export type ChatId = number;
 
 export type AgentCli = "claude_code" | "codex";
-export type Checkout = "main";
-export type ChatStatus = "idle" | "working";
-export type QueueReason = "requested" | "steer_unsupported";
+export type Checkout =
+  | { type: "main" }
+  | { type: "new_worktree" }
+  | { type: "worktree"; chat: ChatId };
+export type ChatStatus = "working" | "waiting_for_you" | "done";
+export type QueueReason = "requested" | "steer_unsupported" | "setting_up";
+export type RepositoryScript = "setup" | "done";
 
 export type Command =
   | { type: "add_repository"; path: string }
-  | { type: "start_chat"; repository: RepositoryId; checkout: Checkout }
+  | { type: "start_chat"; repository: RepositoryId; checkout?: Checkout }
   | { type: "send_message"; chat: ChatId; text: string }
   | { type: "change_agent_cli"; chat: ChatId; agent_cli: AgentCli }
   | { type: "queue_message"; chat: ChatId; text: string }
   | { type: "steer_message"; chat: ChatId; text: string }
   | { type: "interrupt_turn"; chat: ChatId }
+  | { type: "mark_chat_done"; chat: ChatId }
   | { type: "list_repositories" }
   | { type: "list_chats" }
   | { type: "read_chat"; chat: ChatId }
@@ -38,6 +43,7 @@ export type Response =
   | { type: "message_steered" }
   | { type: "interrupt_requested" }
   | { type: "agent_cli_changed" }
+  | { type: "chat_marked_done" }
   | { type: "repositories"; repositories: RepositoryOverview[] }
   | { type: "chats"; chats: ChatOverview[] }
   | { type: "chat"; status: ChatStatus; branch: Branch; transcript: TranscriptEntry[] }
@@ -49,6 +55,11 @@ export type CommandError =
   | { type: "not_a_git_repository"; path: string }
   | { type: "unknown_repository"; repository: RepositoryId }
   | { type: "unknown_chat"; chat: ChatId }
+  | { type: "chat_in_another_repository"; chat: ChatId }
+  | { type: "not_in_a_worktree"; chat: ChatId }
+  | { type: "setting_up"; chat: ChatId }
+  | { type: "worktree"; reason: string }
+  | { type: "repository_config"; reason: string }
   | { type: "turn_running"; chat: ChatId }
   | { type: "no_turn_running"; chat: ChatId }
   | { type: "agent_cli_not_configured"; agent_cli: AgentCli }
@@ -71,6 +82,8 @@ export interface ChatOverview {
   repository: RepositoryId;
   title: string | null;
   status: ChatStatus;
+  /** The worktree the chat works in; `null` in the main checkout. */
+  worktree: string | null;
 }
 
 /** A skill, MCP server, hook or instruction file an agent CLI loads. */
@@ -104,7 +117,8 @@ export type Branch =
 
 export type TranscriptEntry =
   | { type: "user_message"; text: string }
-  | { type: "agent"; agent_cli: AgentCli; event: AgentEvent };
+  | { type: "agent"; agent_cli: AgentCli; event: AgentEvent }
+  | { type: "script_finished"; script: RepositoryScript; exit_code: number | null; output: string };
 
 export type AgentEvent =
   | { type: "message"; text: string }
@@ -121,4 +135,13 @@ export type ServiceEvent =
   | { type: "agent"; chat: ChatId; event: AgentEvent }
   | { type: "message_queued"; chat: ChatId; text: string; reason: QueueReason }
   | { type: "message_steered"; chat: ChatId; text: string }
-  | { type: "queued_message_sent"; chat: ChatId; text: string };
+  | { type: "queued_message_sent"; chat: ChatId; text: string }
+  | { type: "script_started"; chat: ChatId; script: RepositoryScript }
+  | {
+      type: "script_finished";
+      chat: ChatId;
+      script: RepositoryScript;
+      exit_code: number | null;
+      output: string;
+    }
+  | { type: "status_changed"; chat: ChatId; status: ChatStatus };

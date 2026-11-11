@@ -23,9 +23,12 @@ mod git;
 mod handoff;
 mod harness_mcp;
 mod protocol;
+mod repo_config;
+mod script;
 mod service;
 mod store;
 mod version;
+mod worktree;
 
 pub use claude_code::ClaudeCodeDriver;
 pub use codex::CodexDriver;
@@ -37,7 +40,7 @@ pub use harness_mcp::HarnessMcpError;
 pub use protocol::{
     AgentCli, AgentEvent, Branch, ChatId, ChatOverview, ChatStatus, Checkout, CliExtension,
     CliExtensionKind, Command, CommandError, Event, QueueReason, RepositoryId, RepositoryOverview,
-    Response, TranscriptEntry, UnreadableCliExtensionFile,
+    RepositoryScript, Response, TranscriptEntry, UnreadableCliExtensionFile,
 };
 pub use service::{Service, ServiceConfig, ServiceHandle, StartError, start};
 pub use store::StorageError;
