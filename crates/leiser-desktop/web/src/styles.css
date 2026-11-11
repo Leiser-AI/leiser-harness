@@ -1524,3 +1524,200 @@ body {
   border-radius: var(--radius-sm);
   background: var(--color-selected);
 }
+
+/* ---- Diff panel: a chat's changes per turn and of its whole branch ---- */
+
+.diff {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.diff-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+  padding: var(--space-2) var(--space-4);
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-bg-sidebar);
+}
+
+/* The range picker takes the room; the restore buttons wrap below it. */
+.diff-range {
+  display: flex;
+  flex: 1 1 320px;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.diff-range select {
+  flex: 1;
+  min-width: 0;
+}
+
+.diff-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-2);
+}
+
+.diff-actions button {
+  height: var(--control-height-sm);
+  padding: 0 var(--space-2);
+  font-size: var(--text-sm);
+}
+
+.diff-confirm {
+  max-width: 420px;
+  color: var(--color-warning);
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+}
+
+.diff-summary {
+  margin: var(--space-3) var(--space-4) var(--space-2);
+  font-size: var(--text-md);
+}
+
+.diff-restored {
+  color: var(--color-success);
+  font-weight: var(--weight-medium);
+}
+
+.diff-files {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  overflow: auto;
+  padding: 0 var(--space-4) var(--space-4);
+}
+
+.diff-file {
+  flex-shrink: 0;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  overflow: hidden;
+}
+
+.diff-file-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-height: 34px;
+  padding: var(--space-1) var(--space-3);
+  background: var(--color-surface-raised);
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+
+.diff-file-header::-webkit-details-marker {
+  display: none;
+}
+
+.diff-file-header::before {
+  content: "";
+  flex: none;
+  width: 5px;
+  height: 5px;
+  margin: 0 2px;
+  border-right: 1.5px solid var(--color-text-muted);
+  border-bottom: 1.5px solid var(--color-text-muted);
+  transform: rotate(-45deg);
+  transition: transform 0.12s;
+}
+
+.diff-file[open] > .diff-file-header {
+  border-bottom: 1px solid var(--color-border);
+}
+
+.diff-file[open] > .diff-file-header::before {
+  transform: rotate(45deg);
+}
+
+.diff-file-path {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+}
+
+.diff-file-change,
+.diff-file-counts {
+  color: var(--color-text-muted);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+}
+
+.diff-file-counts {
+  font-family: var(--font-mono);
+}
+
+.diff-file-change.added {
+  color: var(--color-success);
+}
+
+.diff-file-change.deleted {
+  color: var(--color-danger);
+}
+
+.diff-note {
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  font-size: var(--text-sm);
+}
+
+.diff-lines {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+}
+
+.diff-lines td {
+  padding: 0 var(--space-2);
+  vertical-align: top;
+}
+
+.diff-hunk td {
+  padding: 2px var(--space-3);
+  background: var(--color-accent-soft);
+  color: var(--color-text-muted);
+}
+
+.diff-number {
+  width: 1%;
+  color: var(--color-text-faint);
+  text-align: right;
+  white-space: nowrap;
+  user-select: none;
+}
+
+.diff-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.diff-sign {
+  display: inline-block;
+  width: 1.2em;
+  color: var(--color-text-faint);
+  user-select: none;
+}
+
+.diff-line.added {
+  background: var(--color-diff-added);
+}
+
+.diff-line.removed {
+  background: var(--color-diff-removed);
+}

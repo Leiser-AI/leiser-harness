@@ -2,7 +2,8 @@
 // repositories, their repo-check results and the selected chat from the
 // harness service and reads them again on every service event. The only
 // thing it keeps is what is selected: a chat, a repository's repo-check or
-// a repository's CLI extensions panel.
+// a repository's CLI extensions panel, and whether a chat shows its diff
+// panel instead of its transcript.
 
 import type {
   AgentEvent,
@@ -29,6 +30,7 @@ import type {
   TranscriptEntry,
   UsageLimit,
 } from "./protocol";
+import * as diffPanel from "./diff";
 import * as extensions from "./extensions";
 import { icon, type IconName } from "./icons";
 import * as service from "./service";
@@ -85,6 +87,7 @@ const todoList = byId("todo-list");
 const todoForm = byId<HTMLFormElement>("todo-form");
 const todoInput = byId<HTMLInputElement>("todo-text");
 extensions.mount(byId("extensions"));
+diffPanel.mount(byId("diff"), showError);
 
 function byId<T extends HTMLElement = HTMLElement>(id: string): T {
   const element = document.getElementById(id);
@@ -211,6 +214,7 @@ async function refresh(): Promise<void> {
   if (selectedExtensions !== null) {
     const shown = repositories.find((overview) => overview.repository === selectedExtensions);
     repoCheckView.hidden = true;
+    diffPanel.hide();
     renderExtensionsTopBar(shown ?? null);
     renderTodos(null, null);
     terminal.show(null);
@@ -219,6 +223,7 @@ async function refresh(): Promise<void> {
   const checked = repositories.find((overview) => overview.repository === selectedCheck);
   const check = selectedCheck === null ? undefined : checks.get(selectedCheck);
   if (checked && check) {
+    diffPanel.hide();
     renderRepoCheck(checked, check);
     renderTodos(null, null);
     terminal.show(null);
@@ -234,6 +239,14 @@ async function refresh(): Promise<void> {
     subscriptions,
   );
   renderTodos(chat, todos);
+  if (diffPanel.isOpen()) {
+    if (chat === null || view === null) {
+      diffPanel.hide();
+    } else {
+      transcript.hidden = true;
+      await diffPanel.show(chat, selectedWorking);
+    }
+  }
 }
 
 function renderTodos(chat: ChatId | null, todos: Todo[] | null): void {
@@ -537,6 +550,21 @@ function permissionModePicker(chat: ChatId, view: ChatView): HTMLElement {
 /** The top bar's buttons for the selected chat. */
 function chatActions(overview: ChatOverview, checkout: string | undefined): HTMLElement[] {
   const actions: HTMLElement[] = [];
+  const changes = topBarAction("diff", diffPanel.isOpen() ? "Show chat" : "Show changes", "ghost");
+  changes.title = "Each turn's changes, the whole branch's, and restoring a turn's checkpoint";
+  changes.setAttribute("aria-pressed", String(diffPanel.isOpen()));
+  changes.addEventListener("click", () =>
+    act(async () => {
+      if (diffPanel.isOpen()) {
+        diffPanel.hide();
+        transcript.hidden = false;
+      } else {
+        await diffPanel.show(overview.chat, selectedWorking);
+      }
+      await refresh();
+    }),
+  );
+  actions.push(changes);
   const toggleTerminal = topBarAction("terminal", terminal.isOpen() ? "Hide terminal" : "Terminal", "ghost");
   toggleTerminal.title = "A shell in the chat's checkout";
   toggleTerminal.setAttribute("aria-pressed", String(terminal.isOpen()));

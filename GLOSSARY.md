@@ -54,6 +54,13 @@ The part of a chat that the harness gives a new agent session so it can
 continue: a selection of the chat's real messages, not a summary.
 _Avoid_: summary, context transfer, migration
 
+**Checkpoint**:
+The files of a chat's working directory before or after one of its turns,
+kept by the harness as a commit under a hidden git ref, outside every
+branch. The diff panel shows a turn's changes between its two checkpoints;
+restoring one puts the files back.
+_Avoid_: snapshot, savepoint
+
 **Harness service**:
 The part of the harness that runs in the background and keeps agent
 sessions running while the desktop app is closed or updated.
