@@ -278,6 +278,14 @@ pub enum AgentEvent {
     TurnEnded,
     /// The turn ended early because the developer interrupted it.
     TurnInterrupted,
+    /// The turn ended early because the agent CLI reported an error, such
+    /// as a rejected API key. A turn that hit a usage limit ends with
+    /// [`AgentEvent::UsageLimitReached`] and [`AgentEvent::TurnEnded`]
+    /// instead.
+    TurnFailed {
+        /// The agent CLI's error message, with secrets removed.
+        reason: String,
+    },
     /// The agent session ended; the agent CLI exited or broke its protocol.
     SessionEnded,
 }

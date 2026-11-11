@@ -79,6 +79,7 @@ fn quoted(transcript: &[TranscriptEntry]) -> Vec<Quoted<'_>> {
                     | AgentEvent::UsageLimitReached { .. }
                     | AgentEvent::TurnEnded
                     | AgentEvent::TurnInterrupted
+                    | AgentEvent::TurnFailed { .. }
                     | AgentEvent::SessionEnded => return None,
                 },
             };

@@ -75,6 +75,7 @@ export type AgentEvent =
   | { type: "usage_limit_reached"; limit: string; resets_in_seconds: number | null }
   | { type: "turn_ended" }
   | { type: "turn_interrupted" }
+  | { type: "turn_failed"; reason: string }
   | { type: "session_ended" };
 
 export type ServiceEvent =

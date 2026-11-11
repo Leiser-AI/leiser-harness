@@ -226,6 +226,11 @@ function renderAgentEvent(event: AgentEvent, agentCli: string): HTMLElement {
       return el("li", "turn-ended", "Turn ended");
     case "turn_interrupted":
       return el("li", "turn-ended", "Turn interrupted");
+    case "turn_failed": {
+      const item = el("li", "entry notice failed");
+      item.append(el("div", "entry-label", "Turn failed"), el("div", "entry-text", event.reason));
+      return item;
+    }
     case "session_ended":
       return el("li", "entry notice", "The agent session ended.");
   }
