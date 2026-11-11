@@ -13,4 +13,4 @@ mod turn;
 pub use fake_driver::FakeDriver;
 pub use repo::TestRepo;
 pub use script::{FakeInput, Script, Step};
-pub use turn::{TurnError, collect_turn};
+pub use turn::{TurnError, collect_turn, collect_turn_within};

@@ -50,4 +50,17 @@ pub enum DriverError {
     Spawn(#[source] std::io::Error),
     #[error("the agent CLI did not provide its standard streams")]
     MissingStreams,
+    #[error("could not read the version of {agent_cli} from {output:?}")]
+    VersionUnreadable {
+        agent_cli: &'static str,
+        output: String,
+    },
+    #[error(
+        "{agent_cli} {found} is older than {minimum}, the oldest version the harness supports; update {agent_cli}"
+    )]
+    VersionTooOld {
+        agent_cli: &'static str,
+        found: String,
+        minimum: String,
+    },
 }
