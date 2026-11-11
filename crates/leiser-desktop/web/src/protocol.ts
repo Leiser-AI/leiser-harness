@@ -19,7 +19,9 @@ export type Command =
   | { type: "interrupt_turn"; chat: ChatId }
   | { type: "list_repositories" }
   | { type: "list_chats" }
-  | { type: "read_chat"; chat: ChatId };
+  | { type: "read_chat"; chat: ChatId }
+  | { type: "run_repo_check"; repository: RepositoryId }
+  | { type: "read_repo_check"; repository: RepositoryId };
 
 export type Response =
   | { type: "repository_added"; repository: RepositoryId }
@@ -31,7 +33,9 @@ export type Response =
   | { type: "agent_cli_changed" }
   | { type: "repositories"; repositories: RepositoryOverview[] }
   | { type: "chats"; chats: ChatOverview[] }
-  | { type: "chat"; status: ChatStatus; branch: Branch; transcript: TranscriptEntry[] };
+  | { type: "chat"; status: ChatStatus; branch: Branch; transcript: TranscriptEntry[] }
+  | { type: "repo_check_started" }
+  | { type: "repo_check"; check: RepoCheck };
 
 export type CommandError =
   | { type: "not_a_git_repository"; path: string }
@@ -42,7 +46,41 @@ export type CommandError =
   | { type: "agent_cli_not_configured"; agent_cli: AgentCli }
   | { type: "agent_cli"; reason: string }
   | { type: "storage"; reason: string }
+  | { type: "repo_check_not_configured" }
+  | { type: "repo_check_running"; repository: RepositoryId }
   | { type: "service_stopped" };
+
+/** A rule of `repo-check`, such as `D3`. */
+export type CheckId = string;
+
+export type RepoCheck =
+  | { state: "not_run" }
+  | { state: "running" }
+  | { state: "done"; report: RepoCheckReport; opt_outs: OptOuts }
+  | { state: "unreadable"; reason: string; output: string }
+  | { state: "failed"; reason: string };
+
+export interface RepoCheckReport {
+  commit: string | null;
+  summary: string;
+  must: Finding[];
+  should: Finding[];
+}
+
+export interface Finding {
+  title: string;
+  checks: CheckId[];
+  details: string;
+}
+
+export type OptOuts =
+  | { type: "applied"; checks: SwitchedOffCheck[] }
+  | { type: "unreadable"; reason: string };
+
+export interface SwitchedOffCheck {
+  check: CheckId;
+  reason: string;
+}
 
 export interface RepositoryOverview {
   repository: RepositoryId;
@@ -81,4 +119,6 @@ export type ServiceEvent =
   | { type: "agent"; chat: ChatId; event: AgentEvent }
   | { type: "message_queued"; chat: ChatId; text: string; reason: QueueReason }
   | { type: "message_steered"; chat: ChatId; text: string }
-  | { type: "queued_message_sent"; chat: ChatId; text: string };
+  | { type: "queued_message_sent"; chat: ChatId; text: string }
+  | { type: "repo_check_started"; repository: RepositoryId }
+  | { type: "repo_check_finished"; repository: RepositoryId };

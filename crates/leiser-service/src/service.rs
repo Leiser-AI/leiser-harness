@@ -9,11 +9,13 @@ use tokio::task::JoinHandle;
 
 use crate::handoff::{self, Handoff, ReadError};
 use crate::harness_mcp::{ChatRead, HarnessMcp, HarnessMcpError};
+use crate::repo_check::{self, Outcome};
+use crate::repo_config::RepoConfig;
 use crate::store::{AgentSessionV2, ChatV2, HandoffV2, RepositoryV1, StateV2, StorageError, Store};
 use crate::{
-    AgentCli, AgentEvent, AgentSessionId, ChatId, ChatOverview, ChatStatus, Checkout, Command,
-    CommandError, Driver, Event, QueueReason, RepositoryId, RepositoryOverview, Response,
-    SessionInput, SessionSpec, TranscriptEntry,
+    Access, AgentCli, AgentEvent, AgentSessionId, ChatId, ChatOverview, ChatStatus, Checkout,
+    Command, CommandError, Driver, Event, OptOuts, QueueReason, RepoCheck, RepositoryId,
+    RepositoryOverview, Response, SessionInput, SessionSpec, TranscriptEntry,
 };
 
 /// Commands waiting for the command loop. Small, so callers feel back
@@ -25,14 +27,17 @@ const EVENT_BUFFER: usize = 1024;
 const SESSION_BUFFER: usize = 256;
 /// Read-chat calls from the harness MCP server waiting for the command loop.
 const READ_BUFFER: usize = 64;
+/// Finished `repo-check` runs waiting for the command loop.
+const REPO_CHECK_BUFFER: usize = 16;
 
-/// What the harness service is started with: one driver per agent CLI and
-/// a data directory.
+/// What the harness service is started with: one driver per agent CLI, a
+/// data directory and, optionally, the driver `repo-check` runs on.
 #[derive(Debug)]
 pub struct ServiceConfig {
     default_agent_cli: AgentCli,
     drivers: BTreeMap<AgentCli, Arc<dyn Driver>>,
     data_dir: PathBuf,
+    repo_check: Option<Arc<dyn Driver>>,
 }
 
 impl ServiceConfig {
@@ -45,7 +50,18 @@ impl ServiceConfig {
             default_agent_cli: agent_cli,
             drivers: BTreeMap::from([(agent_cli, driver)]),
             data_dir,
+            repo_check: None,
         }
+    }
+
+    /// Runs `repo-check` on `driver`, read-only: when a repository is
+    /// added, and on [`Command::RunRepoCheck`]. The driver's agent CLI must
+    /// have the `repo-check` skill, as Claude Code has it in
+    /// `~/.claude/skills/`. Without this, `repo-check` does not run.
+    #[must_use]
+    pub fn with_repo_check(mut self, driver: Arc<dyn Driver>) -> Self {
+        self.repo_check = Some(driver);
+        self
     }
 
     /// Adds the driver of another agent CLI that chats can change to, or
@@ -81,11 +97,23 @@ pub fn start(config: ServiceConfig) -> Result<Service, StartError> {
     let (events, _) = broadcast::channel(EVENT_BUFFER);
     let (sessions, session_messages) = mpsc::channel(SESSION_BUFFER);
     let (reads, read_requests) = mpsc::channel(READ_BUFFER);
+    let (repo_checks, finished_checks) = mpsc::channel(REPO_CHECK_BUFFER);
     let harness_mcp = HarnessMcp::start(reads)?;
-    let mut state = State::load(config, harness_mcp, store, stored, events.clone(), sessions);
+    let channels = Channels {
+        events: events.clone(),
+        sessions,
+        repo_checks,
+    };
+    let mut state = State::load(config, harness_mcp, store, stored, channels);
     state.resume_all();
     let (stop, stopped) = oneshot::channel();
-    let task = tokio::spawn(state.run(receiver, session_messages, read_requests, stopped));
+    let task = tokio::spawn(state.run(
+        receiver,
+        session_messages,
+        read_requests,
+        finished_checks,
+        stopped,
+    ));
     Ok(Service {
         handle: ServiceHandle { commands, events },
         stop,
@@ -240,15 +268,37 @@ enum SessionMessage {
     },
 }
 
+/// A `repo-check` run that has finished, for the command loop.
+type FinishedCheck = (RepositoryId, Outcome);
+
+/// Where the command loop's work comes back to it, besides commands.
+struct Channels {
+    events: broadcast::Sender<Event>,
+    /// Where the agent sessions' ids and events arrive.
+    sessions: mpsc::Sender<SessionMessage>,
+    /// Where finished `repo-check` runs arrive.
+    repo_checks: mpsc::Sender<FinishedCheck>,
+}
+
+/// A repository's `repo-check`, once it has run or runs.
+enum CheckState {
+    Running,
+    Finished(Outcome),
+}
+
 struct State {
     drivers: BTreeMap<AgentCli, Arc<dyn Driver>>,
     default_agent_cli: AgentCli,
+    repo_check: Option<Arc<dyn Driver>>,
     harness_mcp: HarnessMcp,
     store: Store,
     events: broadcast::Sender<Event>,
     /// Where the agent sessions' ids and events arrive.
     sessions: mpsc::Sender<SessionMessage>,
+    /// Where finished `repo-check` runs arrive.
+    finished_checks: mpsc::Sender<FinishedCheck>,
     repositories: BTreeMap<RepositoryId, PathBuf>,
+    repo_checks: BTreeMap<RepositoryId, CheckState>,
     chats: BTreeMap<ChatId, Chat>,
     next_id: u64,
     generation: u64,
@@ -260,13 +310,27 @@ impl State {
         harness_mcp: HarnessMcp,
         store: Store,
         stored: StateV2,
-        events: broadcast::Sender<Event>,
-        sessions: mpsc::Sender<SessionMessage>,
+        channels: Channels,
     ) -> Self {
-        let repositories = stored
+        let repositories: BTreeMap<RepositoryId, PathBuf> = stored
             .repositories
             .into_iter()
             .map(|repository| (RepositoryId(repository.id), repository.path))
+            .collect();
+        let repo_checks = repositories
+            .keys()
+            .filter_map(|id| {
+                let outcome = match store.repo_check(id.0) {
+                    Ok(outcome) => outcome?,
+                    Err(error) => {
+                        tracing::warn!(repository = ?id, %error, "could not read a repo-check result");
+                        Outcome::Failed {
+                            reason: format!("could not read the last result: {error}"),
+                        }
+                    }
+                };
+                Some((*id, CheckState::Finished(outcome)))
+            })
             .collect();
         let chats = stored
             .chats
@@ -306,11 +370,14 @@ impl State {
         Self {
             drivers: config.drivers,
             default_agent_cli: config.default_agent_cli,
+            repo_check: config.repo_check,
             harness_mcp,
             store,
-            events,
-            sessions,
+            events: channels.events,
+            sessions: channels.sessions,
+            finished_checks: channels.repo_checks,
             repositories,
+            repo_checks,
             chats,
             next_id: stored.next_id,
             generation: 0,
@@ -338,6 +405,7 @@ impl State {
         mut commands: mpsc::Receiver<Request>,
         mut sessions: mpsc::Receiver<SessionMessage>,
         mut reads: mpsc::Receiver<ChatRead>,
+        mut finished_checks: mpsc::Receiver<FinishedCheck>,
         mut stopped: oneshot::Receiver<()>,
     ) {
         loop {
@@ -348,6 +416,10 @@ impl State {
                 Some(message) = sessions.recv() => self.on_session(message).await,
                 // Never closes: the harness MCP server holds a sender.
                 Some(read) = reads.recv() => self.on_read(read),
+                // Never closes: `self` holds a sender.
+                Some((repository, outcome)) = finished_checks.recv() => {
+                    self.finish_repo_check(repository, outcome);
+                }
                 Some((command, reply)) = commands.recv() => {
                     let result = self.execute(command).await;
                     // The caller may have stopped waiting; nothing to do then.
@@ -375,6 +447,10 @@ impl State {
             Command::ListChats => Ok(self.list_chats()),
             Command::ReadChat { chat } => self.read_chat(chat).await,
             Command::ChangeAgentCli { chat, agent_cli } => self.change_agent_cli(chat, agent_cli),
+            Command::RunRepoCheck { repository } => self
+                .start_repo_check(repository)
+                .map(|()| Response::RepoCheckStarted),
+            Command::ReadRepoCheck { repository } => self.read_repo_check(repository),
         }
     }
 
@@ -399,7 +475,108 @@ impl State {
             self.repositories.remove(&repository);
             return Err(error);
         }
+        // The first time the repository is opened. A failure to start is
+        // kept as the result, for the desktop app to show.
+        if self.repo_check.is_some()
+            && let Err(error) = self.start_repo_check(repository)
+        {
+            tracing::warn!(?repository, %error, "could not start repo-check");
+        }
         Ok(Response::RepositoryAdded { repository })
+    }
+
+    /// Starts `repo-check` in a read-only agent session of its own, which
+    /// ends with its one turn.
+    fn start_repo_check(&mut self, repository: RepositoryId) -> Result<(), CommandError> {
+        let path = self
+            .repositories
+            .get(&repository)
+            .ok_or(CommandError::UnknownRepository { repository })?;
+        let driver = self
+            .repo_check
+            .clone()
+            .ok_or(CommandError::RepoCheckNotConfigured)?;
+        if let Some(CheckState::Running) = self.repo_checks.get(&repository) {
+            return Err(CommandError::RepoCheckRunning { repository });
+        }
+        let spec = SessionSpec {
+            working_directory: path.clone(),
+            harness_mcp_url: None,
+            access: Access::ReadOnly,
+        };
+        let session = match driver.start(spec) {
+            Ok(session) => session,
+            Err(error) => {
+                let reason = error.to_string();
+                self.finish_repo_check(
+                    repository,
+                    Outcome::Failed {
+                        reason: reason.clone(),
+                    },
+                );
+                return Err(CommandError::AgentCli { reason });
+            }
+        };
+        self.repo_checks.insert(repository, CheckState::Running);
+        self.emit(Event::RepoCheckStarted { repository });
+        let finished = self.finished_checks.clone();
+        tokio::spawn(async move {
+            tokio::select! {
+                outcome = repo_check::run(session) => {
+                    // The service may have stopped meanwhile.
+                    let _ = finished.send((repository, outcome)).await;
+                }
+                // The service stopped: the agent session ends with it.
+                () = finished.closed() => {}
+            }
+        });
+        Ok(())
+    }
+
+    fn finish_repo_check(&mut self, repository: RepositoryId, outcome: Outcome) {
+        if let Err(error) = self.store.save_repo_check(repository.0, &outcome) {
+            tracing::error!(?repository, %error, "could not store a repo-check result");
+        }
+        self.repo_checks
+            .insert(repository, CheckState::Finished(outcome));
+        self.emit(Event::RepoCheckFinished { repository });
+    }
+
+    /// The last `repo-check` result, without the checks the repository's
+    /// `.leiser/config.toml` switches off now.
+    fn read_repo_check(&self, repository: RepositoryId) -> Result<Response, CommandError> {
+        let path = self
+            .repositories
+            .get(&repository)
+            .ok_or(CommandError::UnknownRepository { repository })?;
+        let check = match self.repo_checks.get(&repository) {
+            None => RepoCheck::NotRun,
+            Some(CheckState::Running) => RepoCheck::Running,
+            Some(CheckState::Finished(Outcome::Done { report })) => match RepoConfig::load(path) {
+                Ok(config) => RepoCheck::Done {
+                    report: repo_check::without(report, &config.repo_check_off),
+                    opt_outs: OptOuts::Applied {
+                        checks: config.switched_off(),
+                    },
+                },
+                Err(error) => RepoCheck::Done {
+                    report: report.clone(),
+                    opt_outs: OptOuts::Unreadable {
+                        reason: error.to_string(),
+                    },
+                },
+            },
+            Some(CheckState::Finished(Outcome::Unreadable { reason, output })) => {
+                RepoCheck::Unreadable {
+                    reason: reason.clone(),
+                    output: output.clone(),
+                }
+            }
+            Some(CheckState::Finished(Outcome::Failed { reason })) => RepoCheck::Failed {
+                reason: reason.clone(),
+            },
+        };
+        Ok(Response::RepoCheck { check })
     }
 
     fn start_chat(
@@ -693,7 +870,8 @@ impl State {
                 })?;
         let spec = SessionSpec {
             working_directory: chat.working_directory.clone(),
-            harness_mcp_url,
+            harness_mcp_url: Some(harness_mcp_url),
+            access: Access::Chat,
         };
         let (started, resume) = match chat.agent_sessions.get(&chat.agent_cli) {
             Some(session) => (driver.resume(spec, &session.id), Resume::Untried),

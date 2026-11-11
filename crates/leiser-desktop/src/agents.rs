@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::{env, io};
 
 use leiser_service::{AgentCli, AgentEvent, ClaudeCodeDriver, CodexDriver, ServiceConfig};
-use leiser_testkit::{FakeDriver, Script, Step};
+use leiser_testkit::{FakeDriver, SAMPLE_REPO_CHECK_REPORT, Script, Step};
 
 /// When set, chats run on the `fake-agent-cli` program at this path.
 const FAKE_AGENT_CLI_VARIABLE: &str = "LEISER_FAKE_AGENT_CLI";
@@ -20,23 +20,31 @@ const FAKE_TURNS: usize = 1000;
 pub struct FakeAgentCliError(#[from] io::Error);
 
 /// The harness service's configuration. Chats start on Claude Code and can
-/// change to Codex. With `LEISER_FAKE_AGENT_CLI` set, they run on the fake
-/// agent CLI instead and keep their data apart from real chats.
+/// change to Codex; `repo-check` runs on Claude Code, which has the skill.
+/// With `LEISER_FAKE_AGENT_CLI` set, both run on the fake agent CLI instead
+/// and keep their data apart from real chats.
 pub fn service_config(data_dir: PathBuf) -> Result<ServiceConfig, FakeAgentCliError> {
     if let Some(program) = env::var_os(FAKE_AGENT_CLI_VARIABLE) {
-        let driver = fake_driver(&PathBuf::from(program))?;
+        let program = PathBuf::from(program);
         return Ok(ServiceConfig::new(
             AgentCli::ClaudeCode,
-            Arc::new(driver),
+            Arc::new(fake_driver(&program)?),
             data_dir.join("fake-agent-cli"),
-        ));
+        )
+        .with_repo_check(Arc::new(fake_repo_check(&program)?)));
     }
-    Ok(ServiceConfig::new(
-        AgentCli::ClaudeCode,
-        Arc::new(ClaudeCodeDriver::installed()),
-        data_dir,
+    let claude_code = Arc::new(ClaudeCodeDriver::installed());
+    Ok(
+        ServiceConfig::new(AgentCli::ClaudeCode, claude_code.clone(), data_dir)
+            .with_driver(AgentCli::Codex, Arc::new(CodexDriver::installed()))
+            .with_repo_check(claude_code),
     )
-    .with_driver(AgentCli::Codex, Arc::new(CodexDriver::installed())))
+}
+
+/// A `repo-check` that answers with a made-up sample report.
+fn fake_repo_check(program: &std::path::Path) -> io::Result<FakeDriver> {
+    let script = Script::new().turn([Step::message(SAMPLE_REPO_CHECK_REPORT)]);
+    FakeDriver::new(program, &script)
 }
 
 /// A driver that answers every message with a tool call, its result and

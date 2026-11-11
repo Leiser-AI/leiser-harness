@@ -10,6 +10,11 @@
 //! a handoff: real entries of the chat's transcript within a token budget,
 //! never a summary. Every agent session also gets the harness MCP server,
 //! whose `read_chat` tool reads the entries a handoff left out.
+//!
+//! When a repository is added, and on demand, the harness service runs
+//! the `repo-check` skill in a read-only agent session and keeps the Must
+//! and Should findings of its report. It never fixes them. A repository's
+//! `.leiser/config.toml` can switch single checks off.
 
 mod claude_code;
 mod codex;
@@ -18,6 +23,8 @@ mod git;
 mod handoff;
 mod harness_mcp;
 mod protocol;
+mod repo_check;
+mod repo_config;
 mod service;
 mod store;
 mod version;
@@ -25,13 +32,14 @@ mod version;
 pub use claude_code::ClaudeCodeDriver;
 pub use codex::CodexDriver;
 pub use driver::{
-    AgentSession, AgentSessionId, Driver, DriverError, HARNESS_MCP_SERVER, SessionInput,
+    Access, AgentSession, AgentSessionId, Driver, DriverError, HARNESS_MCP_SERVER, SessionInput,
     SessionSpec,
 };
 pub use harness_mcp::HarnessMcpError;
 pub use protocol::{
-    AgentCli, AgentEvent, Branch, ChatId, ChatOverview, ChatStatus, Checkout, Command,
-    CommandError, Event, QueueReason, RepositoryId, RepositoryOverview, Response, TranscriptEntry,
+    AgentCli, AgentEvent, Branch, ChatId, ChatOverview, ChatStatus, CheckId, Checkout, Command,
+    CommandError, Event, Finding, InvalidCheckId, OptOuts, QueueReason, RepoCheck, RepoCheckReport,
+    RepositoryId, RepositoryOverview, Response, SwitchedOffCheck, TranscriptEntry,
 };
 pub use service::{Service, ServiceConfig, ServiceHandle, StartError, start};
 pub use store::StorageError;

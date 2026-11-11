@@ -15,6 +15,8 @@ use crate::AgentEvent;
 const APPROVAL_POLICY: &str = "untrusted";
 /// Codex's own sandbox: writes only inside the working directory.
 const SANDBOX: &str = "workspace-write";
+/// Codex's own sandbox for a read-only agent session: writes nowhere.
+const READ_ONLY_SANDBOX: &str = "read-only";
 
 /// Why the agent session cannot go on.
 #[derive(Debug, thiserror::Error)]
@@ -104,6 +106,8 @@ pub(super) struct Conversation {
     working_directory: String,
     /// The thread to resume instead of starting a new one.
     resume: Option<String>,
+    /// The sandbox the thread runs in.
+    sandbox: &'static str,
     phase: Phase,
     /// Turns waiting for the thread to start or the running turn to end,
     /// each with its messages: the first one, then any steered into it
@@ -121,6 +125,14 @@ impl Conversation {
         Self::open(working_directory, None)
     }
 
+    /// Runs the thread in Codex's read-only sandbox. Must be called before
+    /// Codex answers the handshake.
+    #[must_use]
+    pub fn read_only(mut self) -> Self {
+        self.sandbox = READ_ONLY_SANDBOX;
+        self
+    }
+
     /// Starts the handshake for resuming the thread `thread_id`.
     pub fn resume(
         working_directory: String,
@@ -136,6 +148,7 @@ impl Conversation {
         let mut conversation = Self {
             working_directory,
             resume,
+            sandbox: SANDBOX,
             phase: Phase::Initializing,
             waiting: VecDeque::new(),
             pending: HashMap::new(),
@@ -328,7 +341,7 @@ impl Conversation {
                         thread_id,
                         cwd,
                         approval_policy: APPROVAL_POLICY,
-                        sandbox: SANDBOX,
+                        sandbox: self.sandbox,
                         exclude_turns: true,
                     };
                     self.request(output, Pending::ThreadResume, params)?;
@@ -336,7 +349,7 @@ impl Conversation {
                     let params = ThreadStartParams {
                         cwd,
                         approval_policy: APPROVAL_POLICY,
-                        sandbox: SANDBOX,
+                        sandbox: self.sandbox,
                     };
                     self.request(output, Pending::ThreadStart, params)?;
                 }
@@ -579,6 +592,19 @@ mod tests {
         assert_eq!(next[1]["params"]["cwd"], "/repo");
         assert_eq!(next[1]["params"]["approvalPolicy"], "untrusted");
         assert_eq!(next[1]["params"]["sandbox"], "workspace-write");
+        Ok(())
+    }
+
+    #[test]
+    fn a_read_only_thread_runs_in_the_read_only_sandbox() -> TestResult {
+        let (conversation, _) = Conversation::start("/repo".to_owned())?;
+        let mut conversation = conversation.read_only();
+
+        let output = receive(&mut conversation, &json!({"id": 0, "result": {}}))?;
+
+        let next = lines(&output)?;
+        assert_eq!(next[1]["method"], "thread/start");
+        assert_eq!(next[1]["params"]["sandbox"], "read-only");
         Ok(())
     }
 

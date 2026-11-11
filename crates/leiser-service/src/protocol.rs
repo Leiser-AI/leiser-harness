@@ -79,6 +79,12 @@ pub enum Command {
     ListChats,
     /// Reads a chat's status, branch and transcript.
     ReadChat { chat: ChatId },
+    /// Runs `repo-check` on the repository again, read-only. It also runs
+    /// by itself when the repository is added. Fails while it runs.
+    RunRepoCheck { repository: RepositoryId },
+    /// Reads the repository's last `repo-check` result, without the checks
+    /// that its `.leiser/config.toml` switches off.
+    ReadRepoCheck { repository: RepositoryId },
 }
 
 /// The answer to a successful [`Command`].
@@ -114,6 +120,11 @@ pub enum Response {
         /// The branch checked out where the chat works.
         branch: Branch,
         transcript: Vec<TranscriptEntry>,
+    },
+    /// `repo-check` runs; [`Event::RepoCheckFinished`] follows.
+    RepoCheckStarted,
+    RepoCheck {
+        check: RepoCheck,
     },
 }
 
@@ -186,6 +197,127 @@ pub enum QueueReason {
     SteerUnsupported,
 }
 
+/// A repository's `repo-check`: the harness runs Timo's `repo-check`
+/// skill read-only and shows what it found. It never fixes a finding.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum RepoCheck {
+    /// It has not run, for example because the harness service restarted
+    /// while it ran.
+    NotRun,
+    Running,
+    /// It ran and its report was read.
+    Done {
+        /// Without the switched-off checks.
+        report: RepoCheckReport,
+        opt_outs: OptOuts,
+    },
+    /// It ran, but its answer was not a report the harness can read; shown
+    /// as it came.
+    Unreadable {
+        reason: String,
+        output: String,
+    },
+    /// It could not run or did not finish.
+    Failed {
+        reason: String,
+    },
+}
+
+/// What `repo-check` found, ranked as the skill ranks it. Its `Later`,
+/// `Nicht geprüft` and `In Ordnung` sections are not shown.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepoCheckReport {
+    /// The commit the report names in its heading.
+    pub commit: Option<String>,
+    /// The report's first paragraph: the repository's profile and verdict.
+    pub summary: String,
+    /// Real risks now.
+    pub must: Vec<Finding>,
+    /// Clear wins that are cheap to make.
+    pub should: Vec<Finding>,
+}
+
+/// One finding of `repo-check`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Finding {
+    pub title: String,
+    /// The rules it breaks; empty when the report named none.
+    pub checks: Vec<CheckId>,
+    /// Evidence, why it matters and the lightest fix, as the report
+    /// words them (`Beleg:`, `Warum:`, `Fix:`).
+    pub details: String,
+}
+
+/// The checks a repository's `.leiser/config.toml` switches off.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum OptOuts {
+    /// These checks are left out of the report.
+    Applied { checks: Vec<SwitchedOffCheck> },
+    /// The file could not be read, so nothing is left out.
+    Unreadable { reason: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwitchedOffCheck {
+    pub check: CheckId,
+    pub reason: String,
+}
+
+/// A rule of `repo-check`, such as `D3`: a capital letter and a number,
+/// sometimes followed by a small letter (`B3a`).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct CheckId(String);
+
+impl CheckId {
+    /// `None` when `text` is not a rule id.
+    #[must_use]
+    pub fn parse(text: &str) -> Option<Self> {
+        let mut chars = text.chars();
+        let letter = chars.next()?;
+        let rest = chars.as_str();
+        let digits = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+        let suffix = &rest[digits..];
+        let valid = letter.is_ascii_uppercase()
+            && (1..=2).contains(&digits)
+            && (suffix.is_empty()
+                || (suffix.len() == 1 && suffix.chars().all(|c| c.is_ascii_lowercase())));
+        valid.then(|| Self(text.to_owned()))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for CheckId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// A text that is not a [`CheckId`].
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("not a repo-check rule such as `D3`: {0:?}")]
+pub struct InvalidCheckId(String);
+
+impl TryFrom<String> for CheckId {
+    type Error = InvalidCheckId;
+
+    fn try_from(text: String) -> Result<Self, Self::Error> {
+        Self::parse(&text).ok_or(InvalidCheckId(text))
+    }
+}
+
+impl From<CheckId> for String {
+    fn from(check: CheckId) -> Self {
+        check.0
+    }
+}
+
 /// Why a [`Command`] failed.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -208,6 +340,10 @@ pub enum CommandError {
     AgentCli { reason: String },
     #[error("the harness service could not store the chat: {reason}")]
     Storage { reason: String },
+    #[error("repo-check is not set up in the harness service")]
+    RepoCheckNotConfigured,
+    #[error("repo-check is already running in repository {repository:?}")]
+    RepoCheckRunning { repository: RepositoryId },
     #[error("the harness service has stopped")]
     ServiceStopped,
 }
@@ -228,17 +364,23 @@ pub enum Event {
     MessageSteered { chat: ChatId, text: String },
     /// A queued message was sent and starts the next turn.
     QueuedMessageSent { chat: ChatId, text: String },
+    /// `repo-check` started in the repository.
+    RepoCheckStarted { repository: RepositoryId },
+    /// `repo-check` finished in the repository; read the result with
+    /// [`Command::ReadRepoCheck`].
+    RepoCheckFinished { repository: RepositoryId },
 }
 
 impl Event {
-    /// The chat the event belongs to.
+    /// The chat the event belongs to; `None` for a repository's event.
     #[must_use]
-    pub fn chat(&self) -> ChatId {
+    pub fn chat(&self) -> Option<ChatId> {
         match self {
             Self::Agent { chat, .. }
             | Self::MessageQueued { chat, .. }
             | Self::MessageSteered { chat, .. }
-            | Self::QueuedMessageSent { chat, .. } => *chat,
+            | Self::QueuedMessageSent { chat, .. } => Some(*chat),
+            Self::RepoCheckStarted { .. } | Self::RepoCheckFinished { .. } => None,
         }
     }
 }

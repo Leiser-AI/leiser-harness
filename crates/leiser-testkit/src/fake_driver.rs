@@ -6,7 +6,8 @@ use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use leiser_service::{
-    AgentEvent, AgentSession, AgentSessionId, Driver, DriverError, SessionInput, SessionSpec,
+    Access, AgentEvent, AgentSession, AgentSessionId, Driver, DriverError, SessionInput,
+    SessionSpec,
 };
 use tempfile::TempDir;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -65,15 +66,21 @@ impl FakeDriver {
         mode: &str,
         id: AgentSessionId,
     ) -> Result<AgentSession, DriverError> {
-        let mut child = Command::new(&self.program)
+        let mut command = Command::new(&self.program);
+        command
             .arg("--script")
             .arg(&self.script_file)
             .arg("--sessions")
             .arg(&self.sessions)
             .arg(mode)
-            .arg(id.as_str())
-            .arg("--harness-mcp")
-            .arg(&spec.harness_mcp_url)
+            .arg(id.as_str());
+        if let Some(url) = &spec.harness_mcp_url {
+            command.arg("--harness-mcp").arg(url);
+        }
+        if spec.access == Access::ReadOnly {
+            command.arg("--access").arg("read-only");
+        }
+        let mut child = command
             .current_dir(&spec.working_directory)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

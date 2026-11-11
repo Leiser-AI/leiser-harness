@@ -291,3 +291,86 @@ button:disabled {
 .entry.failed {
   border-color: #d05050;
 }
+
+.transcript[hidden],
+.repo-check[hidden] {
+  display: none;
+}
+
+.repo-check {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px;
+  max-width: 860px;
+  user-select: text;
+}
+
+.repo-check-intro {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.repo-check-summary,
+.finding-details {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.repo-check-problem {
+  padding: 8px 12px;
+  border-radius: 6px;
+  background: var(--warn);
+}
+
+.repo-check-output {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+}
+
+.findings h2 {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  font-size: 16px;
+  margin: 20px 0 8px;
+}
+
+.findings-meaning {
+  font-size: 12px;
+  font-weight: normal;
+}
+
+.findings.must h2 {
+  color: #c03030;
+}
+
+.finding-list {
+  margin: 0;
+  padding-left: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.finding-title {
+  font-weight: 600;
+}
+
+.check-id {
+  margin-left: 6px;
+  padding: 0 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: normal;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.finding-details {
+  color: var(--text);
+  font-size: 13px;
+}

@@ -10,7 +10,9 @@ events). The service keeps its data in the app's data directory (on macOS
 `~/Library/Application Support/ai.leiser.harness`).
 
 Chats start on the installed Claude Code (`claude` on `PATH`); Codex
-(`codex` on `PATH`) is configured as a second agent CLI.
+(`codex` on `PATH`) is configured as a second agent CLI. `repo-check` runs
+on Claude Code, read-only, when a repository is added and on demand; it
+needs the `repo-check` skill in `~/.claude/skills/`.
 
 ## Run it
 
@@ -23,7 +25,8 @@ npm run tauri dev
 ```
 
 To try the app without a subscription, run it on the testkit's fake agent
-CLI, which answers every message with a tool call, its result and an echo.
+CLI, which answers every message with a tool call, its result and an echo,
+and every `repo-check` with a made-up sample report.
 Its chats are kept apart from real ones.
 
 ```bash

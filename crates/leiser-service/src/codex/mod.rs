@@ -3,6 +3,8 @@
 //! standard input and output. Steer uses `turn/steer`, interrupt
 //! `turn/interrupt`; both wait for the turn's id when they come before it.
 //! Resume uses `thread/resume` with the thread's id as the agent session id.
+//! A read-only agent session runs in Codex's `read-only` sandbox.
+//!
 //! The harness MCP server is configured with `-c mcp_servers.<name>.url`,
 //! which Codex reaches over streamable HTTP.
 
@@ -19,7 +21,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use self::conversation::{Conversation, Output, ProtocolError};
 use crate::{
-    AgentEvent, AgentSession, AgentSessionId, Driver, DriverError, HARNESS_MCP_SERVER,
+    Access, AgentEvent, AgentSession, AgentSessionId, Driver, DriverError, HARNESS_MCP_SERVER,
     SessionInput, SessionSpec, Version,
 };
 
@@ -144,12 +146,14 @@ impl CodexDriver {
                 ))
             })?
             .to_owned();
-        let mut child = Command::new(&self.program)
-            .arg("-c")
-            .arg(format!(
+        let mut command = Command::new(&self.program);
+        if let Some(url) = &spec.harness_mcp_url {
+            command.arg("-c").arg(format!(
                 "mcp_servers.{HARNESS_MCP_SERVER}.url={}",
-                toml_string(&spec.harness_mcp_url)
-            ))
+                toml_string(url)
+            ));
+        }
+        let mut child = command
             .arg("app-server")
             .current_dir(&spec.working_directory)
             .stdin(Stdio::piped())
@@ -165,14 +169,18 @@ impl CodexDriver {
         let (id_sender, id) = oneshot::channel();
         let (input, input_receiver) = mpsc::channel(CHANNEL_BUFFER);
         let (event_sender, events) = mpsc::channel(CHANNEL_BUFFER);
+        let access = spec.access;
         tokio::spawn(async move {
             // Ends the agent session however the conversation stopped:
             // the input was dropped, Codex exited, or Codex broke the
             // protocol. The cause is not reported yet: `AgentEvent` has no
             // variant for it.
             let _ = run(
-                working_directory,
-                resume,
+                Thread {
+                    working_directory,
+                    resume,
+                    access,
+                },
                 id_sender,
                 stdin,
                 stdout,
@@ -207,18 +215,29 @@ enum SessionStop {
     Protocol(#[from] ProtocolError),
 }
 
-async fn run(
+/// The Codex thread an agent session opens.
+struct Thread {
     working_directory: String,
+    /// The thread to resume instead of starting a new one.
     resume: Option<String>,
+    access: Access,
+}
+
+async fn run(
+    thread: Thread,
     id: oneshot::Sender<AgentSessionId>,
     mut stdin: ChildStdin,
     stdout: ChildStdout,
     mut input: mpsc::Receiver<SessionInput>,
     events: &mpsc::Sender<AgentEvent>,
 ) -> Result<(), SessionStop> {
-    let (mut conversation, output) = match resume {
-        Some(thread_id) => Conversation::resume(working_directory, thread_id)?,
-        None => Conversation::start(working_directory)?,
+    let (conversation, output) = match thread.resume {
+        Some(thread_id) => Conversation::resume(thread.working_directory, thread_id)?,
+        None => Conversation::start(thread.working_directory)?,
+    };
+    let mut conversation = match thread.access {
+        Access::Chat => conversation,
+        Access::ReadOnly => conversation.read_only(),
     };
     let mut id = Some(id);
     deliver(&mut stdin, events, &mut id, output).await?;

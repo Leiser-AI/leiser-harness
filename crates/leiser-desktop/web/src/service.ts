@@ -12,6 +12,7 @@ import type {
   Command,
   CommandError,
   QueueReason,
+  RepoCheck,
   RepositoryId,
   RepositoryOverview,
   Response,
@@ -56,6 +57,10 @@ function describe(error: CommandError): string {
       return `The agent CLI failed: ${error.reason}`;
     case "storage":
       return `The harness service could not store the chat: ${error.reason}`;
+    case "repo_check_not_configured":
+      return "repo-check is not set up in the harness service.";
+    case "repo_check_running":
+      return "repo-check is already running in this repository.";
     case "service_stopped":
       return "The harness service has stopped.";
   }
@@ -121,6 +126,18 @@ export async function readChat(chat: ChatId): Promise<ChatView> {
   return response.type === "chat"
     ? { status: response.status, branch: response.branch, transcript: response.transcript }
     : unexpected(response);
+}
+
+/** Runs repo-check on the repository again; it only reads. */
+export async function runRepoCheck(repository: RepositoryId): Promise<void> {
+  const response = await execute({ type: "run_repo_check", repository });
+  if (response.type !== "repo_check_started") unexpected(response);
+}
+
+/** The repository's last repo-check, without the checks it switches off. */
+export async function readRepoCheck(repository: RepositoryId): Promise<RepoCheck> {
+  const response = await execute({ type: "read_repo_check", repository });
+  return response.type === "repo_check" ? response.check : unexpected(response);
 }
 
 /** Asks the developer for a folder; `null` when they cancel. */
