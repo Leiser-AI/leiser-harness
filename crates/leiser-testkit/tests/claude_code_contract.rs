@@ -92,7 +92,9 @@ async fn collect_turn(
                 AgentEvent::SessionEnded => {
                     return Err(format!("the agent session ended during the turn: {turn:?}").into());
                 }
-                AgentEvent::TurnEnded | AgentEvent::TurnInterrupted => {
+                AgentEvent::TurnEnded
+                | AgentEvent::TurnInterrupted
+                | AgentEvent::TurnFailed { .. } => {
                     turn.push(event);
                     return Ok(turn);
                 }

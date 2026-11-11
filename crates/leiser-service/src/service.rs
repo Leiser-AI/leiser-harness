@@ -1355,7 +1355,9 @@ impl State {
         }
         let session_ended = match event {
             AgentEvent::SessionEnded => Some(true),
-            AgentEvent::TurnEnded | AgentEvent::TurnInterrupted => Some(false),
+            AgentEvent::TurnEnded | AgentEvent::TurnInterrupted | AgentEvent::TurnFailed { .. } => {
+                Some(false)
+            }
             _ => None,
         };
         self.emit(Event::Agent { chat: id, event });
