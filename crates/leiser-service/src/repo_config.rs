@@ -14,6 +14,10 @@
 //! # Runs in a worktree when the last chat in it is done.
 //! done_script = "cargo clean"
 //!
+//! # `repo-check` rules switched off, each with the reason why.
+//! [repo_check.off]
+//! D3 = "No pre-commit hook: the full check runs in CI in under a minute."
+//!
 //! [agent_access]
 //! # Agent sessions may read and change the chat's todo list through the
 //! # harness MCP server. Default: false, only the developer uses it.
@@ -31,7 +35,8 @@
 //!
 //! A repository without the file uses the defaults. Sections other
 //! features read may be present; unknown keys inside `[worktree]` and
-//! `[agent_access]` are refused, so a typo does not go unnoticed.
+//! `[repo_check]` and `[agent_access]` are refused, so a typo does not go
+//! unnoticed.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -40,7 +45,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-use crate::Provider;
+use crate::{CheckId, Provider, SwitchedOffCheck};
 
 /// Where the file lives, relative to the main checkout.
 const CONFIG_FILE: [&str; 2] = [".leiser", "config.toml"];
@@ -68,7 +73,31 @@ pub(crate) struct RepositoryConfig {
     #[serde(default)]
     pub subscriptions: BTreeMap<Provider, String>,
     #[serde(default)]
+    pub repo_check: RepoCheckConfig,
+    #[serde(default)]
     pub agent_access: AgentAccess,
+}
+
+/// Which `repo-check` rules the repository switches off.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RepoCheckConfig {
+    /// Each switched-off rule with its reason.
+    #[serde(default)]
+    pub off: BTreeMap<CheckId, String>,
+}
+
+impl RepoCheckConfig {
+    /// The switched-off checks, in order, as the desktop app lists them.
+    pub fn switched_off(&self) -> Vec<SwitchedOffCheck> {
+        self.off
+            .iter()
+            .map(|(check, reason)| SwitchedOffCheck {
+                check: check.clone(),
+                reason: reason.trim().to_owned(),
+            })
+            .collect()
+    }
 }
 
 /// Which harness features agent sessions may use. Off by default: only the
@@ -105,10 +134,23 @@ impl RepositoryConfig {
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Self::default()),
             Err(source) => return Err(ConfigError::Io { path, source }),
         };
-        toml::from_str(&text).map_err(|error| ConfigError::Invalid {
-            path,
+        let config: Self = toml::from_str(&text).map_err(|error| ConfigError::Invalid {
+            path: path.clone(),
             message: error.message().to_owned(),
-        })
+        })?;
+        // Every switched-off check says why, for the next reader.
+        if let Some((check, _)) = config
+            .repo_check
+            .off
+            .iter()
+            .find(|(_, reason)| reason.trim().is_empty())
+        {
+            return Err(ConfigError::Invalid {
+                path,
+                message: format!("`repo_check.off.{check}` needs a reason"),
+            });
+        }
+        Ok(config)
     }
 }
 

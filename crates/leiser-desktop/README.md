@@ -25,6 +25,8 @@ profile, restart the app. The service also looks in common install
 directories and, for Claude Code, at the copy the Claude desktop app
 bundles (see `crates/leiser-service/src/installed.rs`). To run another
 program, set `LEISER_CLAUDE_CODE` or `LEISER_CODEX` to its path.
+`repo-check` runs on Claude Code, read-only, when a repository is added and
+on demand; it needs the `repo-check` skill in `~/.claude/skills/`.
 
 ## Run it
 
@@ -51,6 +53,7 @@ Its chats are kept apart from real ones (data directory
 `fake-agent-cli/`). A fake turn waits after its tool call while the file
 `fake-agent-cli/fake-agent-cli-state/turn-gate` in the data directory is
 missing: delete it to hold turns open, create it again to let them finish.
+Every `repo-check` gets a made-up sample report.
 
 ```bash
 cargo build -p leiser-testkit --bin fake-agent-cli

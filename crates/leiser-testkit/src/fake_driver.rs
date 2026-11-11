@@ -6,7 +6,7 @@ use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use leiser_service::{
-    AgentCli, AgentEvent, AgentSession, AgentSessionId, Driver, DriverError, LoginProcess,
+    Access, AgentCli, AgentEvent, AgentSession, AgentSessionId, Driver, DriverError, LoginProcess,
     SessionInput, SessionSpec, SubscriptionAccess,
 };
 use serde::{Deserialize, Serialize};
@@ -129,15 +129,20 @@ impl FakeDriver {
         if let Some(subscription) = &spec.subscription {
             subscription.environment(self.agent_cli).apply(&mut command);
         }
-        let mut child = command
+        command
             .arg("--script")
             .arg(&self.script_file)
             .arg("--sessions")
             .arg(&self.sessions)
             .arg(mode)
-            .arg(id.as_str())
-            .arg("--harness-mcp")
-            .arg(&spec.harness_mcp_url)
+            .arg(id.as_str());
+        if let Some(url) = &spec.harness_mcp_url {
+            command.arg("--harness-mcp").arg(url);
+        }
+        if spec.access == Access::ReadOnly {
+            command.arg("--access").arg("read-only");
+        }
+        let mut child = command
             .current_dir(&spec.working_directory)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

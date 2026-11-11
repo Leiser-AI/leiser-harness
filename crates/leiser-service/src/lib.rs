@@ -18,6 +18,11 @@
 //! agent CLI's own login in a config directory of their own, or by an API
 //! key kept in the OS keychain ([`Keychain`]).
 //!
+//! When a repository is added, and on demand, the harness service runs
+//! the `repo-check` skill in a read-only agent session and keeps the Must
+//! and Should findings of its report. It never fixes them. A repository's
+//! `.leiser/config.toml` can switch single checks off.
+//!
 //! The CLI extensions an agent CLI loads from a repository (skills, MCP
 //! servers, hooks, instruction files) can be listed, read and saved in the
 //! agent CLI's own files; they are not part of the harness (ADR 0003).
@@ -38,6 +43,7 @@ mod keychain;
 mod local_interface;
 mod program;
 mod protocol;
+mod repo_check;
 mod repo_config;
 mod script;
 mod service;
@@ -50,7 +56,7 @@ mod worktree;
 pub use claude_code::ClaudeCodeDriver;
 pub use codex::CodexDriver;
 pub use driver::{
-    ANTHROPIC_API_KEY, AgentSession, AgentSessionId, CLAUDE_CONFIG_DIR, CODEX_HOME, Driver,
+    ANTHROPIC_API_KEY, Access, AgentSession, AgentSessionId, CLAUDE_CONFIG_DIR, CODEX_HOME, Driver,
     DriverError, HARNESS_MCP_SERVER, LoginProcess, OPENAI_API_KEY, SessionInput, SessionSpec,
     SubscriptionAccess, SubscriptionEnvironment,
 };
@@ -63,10 +69,11 @@ pub use local_interface::{
 };
 pub use program::{ArgsError, SERVICE_LOG_FILE, ServiceProgram};
 pub use protocol::{
-    AgentCli, AgentEvent, ApiKey, Branch, ChatId, ChatOverview, ChatStatus, Checkout, CliExtension,
-    CliExtensionKind, Command, CommandError, Event, LoginAnswer, LoginOutcome, Provider,
-    QueueReason, RepositoryId, RepositoryOverview, RepositoryScript, Response, SignIn,
-    SubscriptionId, SubscriptionKind, SubscriptionOverview, Todo, TodoId, TranscriptEntry,
+    AgentCli, AgentEvent, ApiKey, Branch, ChatId, ChatOverview, ChatStatus, CheckId, Checkout,
+    CliExtension, CliExtensionKind, Command, CommandError, Event, Finding, InvalidCheckId,
+    LoginAnswer, LoginOutcome, OptOuts, Provider, QueueReason, RepoCheck, RepoCheckReport,
+    RepositoryId, RepositoryOverview, RepositoryScript, Response, SignIn, SubscriptionId,
+    SubscriptionKind, SubscriptionOverview, SwitchedOffCheck, Todo, TodoId, TranscriptEntry,
     UnreadableCliExtensionFile,
 };
 pub use service::{Service, ServiceConfig, ServiceHandle, StartError, start};

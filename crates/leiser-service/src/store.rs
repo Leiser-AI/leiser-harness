@@ -12,13 +12,16 @@
 //! - `subscriptions/<subscription id>/`: a subscription's config directory
 //!   for its agent CLI (see `subscriptions.rs`). API keys are not here:
 //!   they are in the OS keychain.
+//! - `repo-checks/<repository id>.json`: the repository's last
+//!   `repo-check` result, replaced atomically when the next one finishes.
+//!   It has its own storage version, [`REPO_CHECK_VERSION`].
 //! - `todos/<chat id>.json`: one chat's todo list, replaced atomically on
 //!   every change. A chat without the file has an empty todo list. Added in
 //!   version 2 without a version bump: an older harness service never
 //!   reads or writes these files, so it cannot damage them.
 //!
 //! The stored types are separate from the protocol types, except for
-//! [`TranscriptEntry`]. A change that old data no longer parses with bumps
+//! [`TranscriptEntry`] and the `repo-check` report. A change that old data no longer parses with bumps
 //! [`VERSION`] and migrates the older version in [`Store::open`].
 
 use std::fs::{self, File, OpenOptions};
@@ -27,6 +30,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::repo_check::Outcome;
 use crate::{AgentCli, AgentEvent, Provider, SubscriptionKind, TranscriptEntry};
 
 /// The storage version this harness service writes.
@@ -45,6 +49,24 @@ const STATE_FILE: &str = "state.json";
 const CHATS_DIR: &str = "chats";
 const SUBSCRIPTIONS_DIR: &str = "subscriptions";
 
+const REPO_CHECKS_DIR: &str = "repo-checks";
+
+/// The storage version of a stored `repo-check` result.
+///
+/// - 1: the outcome of the run, with the report before opt-outs.
+const REPO_CHECK_VERSION: u32 = 1;
+
+#[derive(Serialize)]
+struct RepoCheckRef<'a> {
+    version: u32,
+    outcome: &'a Outcome,
+}
+
+#[derive(Deserialize)]
+struct StoredRepoCheck {
+    version: u32,
+    outcome: serde_json::Value,
+}
 const TODOS_DIR: &str = "todos";
 
 /// Why the harness service could not read or write its data.
@@ -495,6 +517,56 @@ impl Store {
     /// The directory that holds one directory per subscription.
     pub fn subscriptions_dir(&self) -> PathBuf {
         self.dir.join(SUBSCRIPTIONS_DIR)
+    }
+
+    /// Stores the repository's last `repo-check` result.
+    pub fn save_repo_check(&self, repository: u64, outcome: &Outcome) -> Result<(), StorageError> {
+        let dir = self.dir.join(REPO_CHECKS_DIR);
+        fs::create_dir_all(&dir).map_err(|source| StorageError::Io {
+            path: dir.clone(),
+            source,
+        })?;
+        let path = self.repo_check_path(repository);
+        let mut bytes = serde_json::to_vec_pretty(&RepoCheckRef {
+            version: REPO_CHECK_VERSION,
+            outcome,
+        })
+        .map_err(|source| StorageError::Io {
+            path: path.clone(),
+            source: source.into(),
+        })?;
+        bytes.push(b'\n');
+        replace(&path, &bytes)
+    }
+
+    /// The repository's last `repo-check` result; `None` if it never ran.
+    pub fn repo_check(&self, repository: u64) -> Result<Option<Outcome>, StorageError> {
+        let path = self.repo_check_path(repository);
+        let bytes = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(source) => return Err(StorageError::Io { path, source }),
+        };
+        let corrupt = |source| StorageError::Corrupt {
+            path: path.clone(),
+            source,
+        };
+        let stored: StoredRepoCheck = serde_json::from_slice(&bytes).map_err(corrupt)?;
+        if stored.version != REPO_CHECK_VERSION {
+            return Err(StorageError::UnsupportedVersion {
+                found: stored.version,
+                supported: REPO_CHECK_VERSION,
+            });
+        }
+        serde_json::from_value(stored.outcome)
+            .map(Some)
+            .map_err(corrupt)
+    }
+
+    fn repo_check_path(&self, repository: u64) -> PathBuf {
+        self.dir
+            .join(REPO_CHECKS_DIR)
+            .join(format!("{repository}.json"))
     }
 
     fn transcript_path(&self, chat: u64) -> PathBuf {

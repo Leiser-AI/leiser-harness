@@ -14,6 +14,7 @@ use crate::harness_mcp::{
     BranchNaming, ChatRead, HarnessCall, HarnessMcp, HarnessMcpError, TodoAnswer, TodoCall, Tools,
 };
 use crate::keychain::KeychainError;
+use crate::repo_check::{self, Outcome};
 use crate::repo_config::RepositoryConfig;
 use crate::store::{
     AgentSessionV2, ChatSubscriptionV3, ChatV3, HandoffV2, RepositoryV1, StateV3, StorageError,
@@ -23,11 +24,11 @@ use crate::subscriptions::{SubscriptionError, Subscriptions};
 use crate::todos::{TodoChange, TodoError, TodoList};
 use crate::worktree::{self, WorktreeError};
 use crate::{
-    AgentCli, AgentEvent, AgentSessionId, Branch, ChatId, ChatOverview, ChatStatus, Checkout,
-    Command, CommandError, Driver, Event, Keychain, LoginAnswer, LoginOutcome, LoginProcess,
-    OsKeychain, Provider, QueueReason, RepositoryId, RepositoryOverview, RepositoryScript,
-    Response, SessionInput, SessionSpec, SignIn, SubscriptionId, SubscriptionKind, TodoId,
-    TranscriptEntry, script,
+    Access, AgentCli, AgentEvent, AgentSessionId, Branch, ChatId, ChatOverview, ChatStatus,
+    Checkout, Command, CommandError, Driver, Event, Keychain, LoginAnswer, LoginOutcome,
+    LoginProcess, OptOuts, OsKeychain, Provider, QueueReason, RepoCheck, RepositoryId,
+    RepositoryOverview, RepositoryScript, Response, SessionInput, SessionSpec, SignIn,
+    SubscriptionId, SubscriptionKind, TodoId, TranscriptEntry, script,
 };
 
 /// Commands waiting for the command loop. Small, so callers feel back
@@ -46,8 +47,8 @@ const BACKGROUND_BUFFER: usize = 64;
 const WORKTREES_DIR: &str = "worktrees";
 
 /// What the harness service is started with: one driver per agent CLI, a
-/// data directory, where chats' worktrees go, the keychain for API keys
-/// and the shared Codex home.
+/// data directory, where chats' worktrees go, the keychain for API keys,
+/// the shared Codex home and, optionally, the driver `repo-check` runs on.
 #[derive(Debug)]
 pub struct ServiceConfig {
     default_agent_cli: AgentCli,
@@ -56,6 +57,7 @@ pub struct ServiceConfig {
     worktrees_dir: PathBuf,
     keychain: Arc<dyn Keychain>,
     codex_home: Option<PathBuf>,
+    repo_check: Option<Arc<dyn Driver>>,
 }
 
 impl ServiceConfig {
@@ -77,7 +79,18 @@ impl ServiceConfig {
             data_dir,
             keychain: Arc::new(OsKeychain),
             codex_home: default_codex_home(),
+            repo_check: None,
         }
+    }
+
+    /// Runs `repo-check` on `driver`, read-only: when a repository is
+    /// added, and on [`Command::RunRepoCheck`]. The driver's agent CLI must
+    /// have the `repo-check` skill, as Claude Code has it in
+    /// `~/.claude/skills/`. Without this, `repo-check` does not run.
+    #[must_use]
+    pub fn with_repo_check(mut self, driver: Arc<dyn Driver>) -> Self {
+        self.repo_check = Some(driver);
+        self
     }
 
     /// Puts chats' worktrees in `dir`, one directory per repository.
@@ -404,6 +417,16 @@ enum Background {
         script: RepositoryScript,
         finished: script::Finished,
     },
+    RepoCheckFinished {
+        repository: RepositoryId,
+        outcome: Outcome,
+    },
+}
+
+/// A repository's `repo-check`, once it has run or runs.
+enum CheckState {
+    Running,
+    Finished(Outcome),
 }
 
 /// A chat whose worktree is being created.
@@ -472,6 +495,7 @@ impl Drop for Login {
 struct State {
     drivers: BTreeMap<AgentCli, Arc<dyn Driver>>,
     default_agent_cli: AgentCli,
+    repo_check: Option<Arc<dyn Driver>>,
     harness_mcp: HarnessMcp,
     store: Store,
     worktrees_dir: PathBuf,
@@ -480,6 +504,7 @@ struct State {
     sessions: mpsc::Sender<SessionMessage>,
     background: mpsc::Sender<Background>,
     repositories: BTreeMap<RepositoryId, PathBuf>,
+    repo_checks: BTreeMap<RepositoryId, CheckState>,
     chats: BTreeMap<ChatId, Chat>,
     subscriptions: Subscriptions,
     logins: BTreeMap<SubscriptionId, Login>,
@@ -502,11 +527,12 @@ impl State {
         stored: StateV3,
         channels: Channels,
     ) -> Result<Self, StorageError> {
-        let repositories = stored
+        let repositories: BTreeMap<RepositoryId, PathBuf> = stored
             .repositories
             .into_iter()
             .map(|repository| (RepositoryId(repository.id), repository.path))
             .collect();
+        let repo_checks = stored_repo_checks(&store, &repositories);
         let chats: BTreeMap<ChatId, Chat> = stored
             .chats
             .into_iter()
@@ -586,6 +612,7 @@ impl State {
         Ok(Self {
             drivers: config.drivers,
             default_agent_cli: config.default_agent_cli,
+            repo_check: config.repo_check,
             harness_mcp,
             store,
             worktrees_dir: config.worktrees_dir,
@@ -593,6 +620,7 @@ impl State {
             sessions: channels.sessions,
             background: channels.background,
             repositories,
+            repo_checks,
             chats,
             subscriptions,
             logins: BTreeMap::new(),
@@ -716,6 +744,10 @@ impl State {
                 provider,
                 subscription,
             } => self.change_subscription(chat, provider, subscription),
+            Command::RunRepoCheck { repository } => self
+                .start_repo_check(repository)
+                .map(|()| Response::RepoCheckStarted),
+            Command::ReadRepoCheck { repository } => self.read_repo_check(repository),
             Command::ListTodos { chat } => self.todo_list(chat).map(|todos| Response::Todos {
                 todos: todos.todos().to_vec(),
             }),
@@ -775,7 +807,114 @@ impl State {
             self.repositories.remove(&repository);
             return Err(error);
         }
+        // The first time the repository is opened. A failure to start is
+        // kept as the result, for the desktop app to show.
+        if self.repo_check.is_some()
+            && let Err(error) = self.start_repo_check(repository)
+        {
+            tracing::warn!(?repository, %error, "could not start repo-check");
+        }
         Ok(Response::RepositoryAdded { repository })
+    }
+
+    /// Starts `repo-check` in a read-only agent session of its own in the
+    /// repository's main checkout; the session ends with its one turn.
+    fn start_repo_check(&mut self, repository: RepositoryId) -> Result<(), CommandError> {
+        let path = self
+            .repositories
+            .get(&repository)
+            .ok_or(CommandError::UnknownRepository { repository })?;
+        let driver = self
+            .repo_check
+            .clone()
+            .ok_or(CommandError::RepoCheckNotConfigured)?;
+        if let Some(CheckState::Running) = self.repo_checks.get(&repository) {
+            return Err(CommandError::RepoCheckRunning { repository });
+        }
+        let spec = SessionSpec {
+            working_directory: path.clone(),
+            harness_mcp_url: None,
+            access: Access::ReadOnly,
+            // repo-check runs on the agent CLI's own default login.
+            subscription: None,
+        };
+        let session = match driver.start(spec) {
+            Ok(session) => session,
+            Err(error) => {
+                let reason = error.to_string();
+                self.finish_repo_check(
+                    repository,
+                    Outcome::Failed {
+                        reason: reason.clone(),
+                    },
+                );
+                return Err(CommandError::AgentCli { reason });
+            }
+        };
+        self.repo_checks.insert(repository, CheckState::Running);
+        self.emit(Event::RepoCheckStarted { repository });
+        let background = self.background.clone();
+        tokio::spawn(async move {
+            tokio::select! {
+                outcome = repo_check::run(session) => {
+                    // The service may have stopped meanwhile.
+                    let _ = background
+                        .send(Background::RepoCheckFinished { repository, outcome })
+                        .await;
+                }
+                // The service stopped: the agent session ends with it.
+                () = background.closed() => {}
+            }
+        });
+        Ok(())
+    }
+
+    fn finish_repo_check(&mut self, repository: RepositoryId, outcome: Outcome) {
+        if let Err(error) = self.store.save_repo_check(repository.0, &outcome) {
+            tracing::error!(?repository, %error, "could not store a repo-check result");
+        }
+        self.repo_checks
+            .insert(repository, CheckState::Finished(outcome));
+        self.emit(Event::RepoCheckFinished { repository });
+    }
+
+    /// The last `repo-check` result, without the checks the repository's
+    /// `.leiser/config.toml` switches off now.
+    fn read_repo_check(&self, repository: RepositoryId) -> Result<Response, CommandError> {
+        let path = self
+            .repositories
+            .get(&repository)
+            .ok_or(CommandError::UnknownRepository { repository })?;
+        let check = match self.repo_checks.get(&repository) {
+            None => RepoCheck::NotRun,
+            Some(CheckState::Running) => RepoCheck::Running,
+            Some(CheckState::Finished(Outcome::Done { report })) => {
+                match RepositoryConfig::load(path) {
+                    Ok(config) => RepoCheck::Done {
+                        report: repo_check::without(report, &config.repo_check.off),
+                        opt_outs: OptOuts::Applied {
+                            checks: config.repo_check.switched_off(),
+                        },
+                    },
+                    Err(error) => RepoCheck::Done {
+                        report: report.clone(),
+                        opt_outs: OptOuts::Unreadable {
+                            reason: error.to_string(),
+                        },
+                    },
+                }
+            }
+            Some(CheckState::Finished(Outcome::Unreadable { reason, output })) => {
+                RepoCheck::Unreadable {
+                    reason: reason.clone(),
+                    output: output.clone(),
+                }
+            }
+            Some(CheckState::Finished(Outcome::Failed { reason })) => RepoCheck::Failed {
+                reason: reason.clone(),
+            },
+        };
+        Ok(Response::RepoCheck { check })
     }
 
     fn start_chat(
@@ -922,6 +1061,10 @@ impl State {
                 script,
                 finished,
             } => self.script_finished(chat, script, finished).await,
+            Background::RepoCheckFinished {
+                repository,
+                outcome,
+            } => self.finish_repo_check(repository, outcome),
         }
     }
 
@@ -1839,7 +1982,8 @@ impl State {
             })?;
         let spec = SessionSpec {
             working_directory: chat.working_directory.clone(),
-            harness_mcp_url,
+            harness_mcp_url: Some(harness_mcp_url),
+            access: Access::Chat,
             subscription,
         };
         let (started, resume) = match chat.agent_sessions.get(&chat.agent_cli) {
@@ -2207,6 +2351,28 @@ fn title(text: &str) -> Option<String> {
 }
 
 /// The title of a stored chat, from its transcript.
+/// The last `repo-check` result of every repository that has one.
+fn stored_repo_checks(
+    store: &Store,
+    repositories: &BTreeMap<RepositoryId, PathBuf>,
+) -> BTreeMap<RepositoryId, CheckState> {
+    repositories
+        .keys()
+        .filter_map(|id| {
+            let outcome = match store.repo_check(id.0) {
+                Ok(outcome) => outcome?,
+                Err(error) => {
+                    tracing::warn!(repository = ?id, %error, "could not read a repo-check result");
+                    Outcome::Failed {
+                        reason: format!("could not read the last result: {error}"),
+                    }
+                }
+            };
+            Some((*id, CheckState::Finished(outcome)))
+        })
+        .collect()
+}
+
 fn stored_title(store: &Store, chat: u64) -> Option<String> {
     let transcript = match store.transcript(chat) {
         Ok(transcript) => transcript,

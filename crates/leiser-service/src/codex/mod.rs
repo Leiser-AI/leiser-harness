@@ -3,6 +3,8 @@
 //! standard input and output. Steer uses `turn/steer`, interrupt
 //! `turn/interrupt`; both wait for the turn's id when they come before it.
 //! Resume uses `thread/resume` with the thread's id as the agent session id.
+//! A read-only agent session runs in Codex's `read-only` sandbox.
+//!
 //! The harness MCP server is configured with `-c mcp_servers.<name>.url`,
 //! which Codex reaches over streamable HTTP.
 //!
@@ -27,7 +29,7 @@ use tokio::sync::{mpsc, oneshot};
 use self::conversation::{Conversation, Output, ProtocolError};
 use crate::installed::{self, Found, Program};
 use crate::{
-    AgentCli, AgentEvent, AgentSession, AgentSessionId, Driver, DriverError, Environment,
+    Access, AgentCli, AgentEvent, AgentSession, AgentSessionId, Driver, DriverError, Environment,
     HARNESS_MCP_SERVER, LoginProcess, OPENAI_API_KEY, SessionInput, SessionSpec,
     SubscriptionAccess, Version,
 };
@@ -229,14 +231,18 @@ impl CodexDriver {
         let (id_sender, id) = oneshot::channel();
         let (input, input_receiver) = mpsc::channel(CHANNEL_BUFFER);
         let (event_sender, events) = mpsc::channel(CHANNEL_BUFFER);
+        let access = spec.access;
         tokio::spawn(async move {
             // Ends the agent session however the conversation stopped:
             // the input was dropped, Codex exited, or Codex broke the
             // protocol. The cause is not reported yet: `AgentEvent` has no
             // variant for it.
             let _ = run(
-                working_directory,
-                resume,
+                Thread {
+                    working_directory,
+                    resume,
+                    access,
+                },
                 id_sender,
                 stdin,
                 stdout,
@@ -255,10 +261,12 @@ impl CodexDriver {
 /// its streams.
 /// `command`, which runs the program, set up for an agent session.
 fn session_command(mut command: Command, spec: &SessionSpec) -> Command {
-    command.arg("-c").arg(format!(
-        "mcp_servers.{HARNESS_MCP_SERVER}.url={}",
-        toml_string(&spec.harness_mcp_url)
-    ));
+    if let Some(url) = &spec.harness_mcp_url {
+        command.arg("-c").arg(format!(
+            "mcp_servers.{HARNESS_MCP_SERVER}.url={}",
+            toml_string(url)
+        ));
+    }
     if let Some(subscription) = &spec.subscription {
         for value in subscription_overrides(subscription) {
             command.arg("-c").arg(value);
@@ -291,18 +299,29 @@ enum SessionStop {
     Protocol(#[from] ProtocolError),
 }
 
-async fn run(
+/// The Codex thread an agent session opens.
+struct Thread {
     working_directory: String,
+    /// The thread to resume instead of starting a new one.
     resume: Option<String>,
+    access: Access,
+}
+
+async fn run(
+    thread: Thread,
     id: oneshot::Sender<AgentSessionId>,
     mut stdin: ChildStdin,
     stdout: ChildStdout,
     mut input: mpsc::Receiver<SessionInput>,
     events: &mpsc::Sender<AgentEvent>,
 ) -> Result<(), SessionStop> {
-    let (mut conversation, output) = match resume {
-        Some(thread_id) => Conversation::resume(working_directory, thread_id)?,
-        None => Conversation::start(working_directory)?,
+    let (conversation, output) = match thread.resume {
+        Some(thread_id) => Conversation::resume(thread.working_directory, thread_id)?,
+        None => Conversation::start(thread.working_directory)?,
+    };
+    let mut conversation = match thread.access {
+        Access::Chat => conversation,
+        Access::ReadOnly => conversation.read_only(),
     };
     let mut id = Some(id);
     deliver(&mut stdin, events, &mut id, output).await?;
@@ -374,13 +393,16 @@ mod tests {
 
     use tokio::process::Command;
 
+    use crate::Access;
+
     use super::session_command;
     use crate::{ApiKey, SessionSpec, SubscriptionAccess};
 
     fn arguments(api_key: Option<ApiKey>) -> Vec<String> {
         let spec = SessionSpec {
             working_directory: PathBuf::from("/work"),
-            harness_mcp_url: "http://127.0.0.1:1/mcp".to_owned(),
+            harness_mcp_url: Some("http://127.0.0.1:1/mcp".to_owned()),
+            access: Access::Chat,
             subscription: Some(SubscriptionAccess {
                 home: PathBuf::from("/data/subscriptions/3/codex-home"),
                 api_key,

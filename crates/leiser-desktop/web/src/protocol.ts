@@ -44,6 +44,8 @@ export type Command =
       provider: Provider;
       subscription: SubscriptionId | null;
     }
+  | { type: "run_repo_check"; repository: RepositoryId }
+  | { type: "read_repo_check"; repository: RepositoryId }
   | { type: "read_service_status" }
   | { type: "list_todos"; chat: ChatId }
   | { type: "add_todo"; chat: ChatId; text: string }
@@ -85,6 +87,8 @@ export type Response =
   | { type: "login_answered" }
   | { type: "subscriptions"; subscriptions: SubscriptionOverview[] }
   | { type: "subscription_changed" }
+  | { type: "repo_check_started" }
+  | { type: "repo_check"; check: RepoCheck }
   | { type: "service_status"; version: string; update_waiting: boolean }
   | { type: "todos"; todos: Todo[] }
   | { type: "todo_added"; todo: TodoId }
@@ -121,11 +125,45 @@ export type CommandError =
   | { type: "no_login_running"; subscription: SubscriptionId }
   | { type: "keychain"; reason: string }
   | { type: "repository_config"; reason: string }
+  | { type: "repo_check_not_configured" }
+  | { type: "repo_check_running"; repository: RepositoryId }
   | { type: "not_a_cli_extension_file"; file: string }
   | { type: "cli_extension_file_changed"; file: string }
   | { type: "invalid_cli_extension_file"; file: string; reason: string }
   | { type: "cli_extension_file_access"; file: string; reason: string }
   | { type: "service_stopped" };
+
+/** A rule of `repo-check`, such as `D3`. */
+export type CheckId = string;
+
+export type RepoCheck =
+  | { state: "not_run" }
+  | { state: "running" }
+  | { state: "done"; report: RepoCheckReport; opt_outs: OptOuts }
+  | { state: "unreadable"; reason: string; output: string }
+  | { state: "failed"; reason: string };
+
+export interface RepoCheckReport {
+  commit: string | null;
+  summary: string;
+  must: Finding[];
+  should: Finding[];
+}
+
+export interface Finding {
+  title: string;
+  checks: CheckId[];
+  details: string;
+}
+
+export type OptOuts =
+  | { type: "applied"; checks: SwitchedOffCheck[] }
+  | { type: "unreadable"; reason: string };
+
+export interface SwitchedOffCheck {
+  check: CheckId;
+  reason: string;
+}
 
 export interface RepositoryOverview {
   repository: RepositoryId;
@@ -219,6 +257,8 @@ export type ServiceEvent =
   | { type: "status_changed"; chat: ChatId; status: ChatStatus }
   | { type: "login_output"; subscription: SubscriptionId; text: string }
   | { type: "login_finished"; subscription: SubscriptionId; outcome: LoginOutcome }
+  | { type: "repo_check_started"; repository: RepositoryId }
+  | { type: "repo_check_finished"; repository: RepositoryId }
   | { type: "todos_changed"; chat: ChatId; todos: Todo[] }
   | { type: "service_update_waiting" };
 
