@@ -1,10 +1,13 @@
 //! The harness service: owns repositories, chats and agent sessions.
 //!
 //! The desktop app and tests talk to it through one local interface:
-//! [`Command`]s in, [`Event`]s out (see [`ServiceHandle`]). Agent CLIs sit
+//! [`Command`]s in, [`Event`]s out (see [`ServiceHandle`]). In its own
+//! process the service serves that interface over localhost ([`serve`]);
+//! the desktop app connects with a [`LocalClient`]. Agent CLIs sit
 //! behind the [`Driver`] interface (ADR 0002). Chats, transcripts and
 //! agent session ids are kept on disk, so a restarted service resumes every
-//! chat (ADR 0005, ADR 0006).
+//! chat (ADR 0005, ADR 0006). An update of the service waits until no turn
+//! runs ([`Service::stop_for_update`]).
 //!
 //! A chat can change agent CLI between turns. The next agent session gets
 //! a handoff: real entries of the chat's transcript within a token budget,
@@ -27,6 +30,8 @@ mod git;
 mod handoff;
 mod harness_mcp;
 mod installed;
+mod local_interface;
+mod program;
 mod protocol;
 mod repo_config;
 mod script;
@@ -44,6 +49,11 @@ pub use driver::{
 };
 pub use harness_mcp::HarnessMcpError;
 pub use installed::Environment;
+pub use local_interface::{
+    ConnectError, ENDPOINT_FILE, LOCAL_INTERFACE_VERSION, LocalClient, LocalInterface,
+    Notification, ServeError, serve,
+};
+pub use program::{ArgsError, SERVICE_LOG_FILE, ServiceProgram};
 pub use protocol::{
     AgentCli, AgentEvent, Branch, ChatId, ChatOverview, ChatStatus, Checkout, CliExtension,
     CliExtensionKind, Command, CommandError, Event, QueueReason, RepositoryId, RepositoryOverview,

@@ -52,6 +52,11 @@ The part of the harness that runs in the background and keeps agent
 sessions running while the desktop app is closed or updated.
 _Avoid_: daemon, server, backend
 
+**Service update**:
+A new version of the harness service. It waits until no turn runs; then
+the harness service restarts on it and resumes every agent session.
+_Avoid_: upgrade, hot reload
+
 **Git host**:
 A service that hosts repositories, such as GitHub or GitLab.
 _Avoid_: remote, forge, platform

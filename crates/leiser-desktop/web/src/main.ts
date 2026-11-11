@@ -13,6 +13,7 @@ import type {
   RepositoryId,
   RepositoryOverview,
   RepositoryScript,
+  ServiceConnection,
   Todo,
   TranscriptEntry,
 } from "./protocol";
@@ -34,6 +35,7 @@ const messageInput = byId<HTMLTextAreaElement>("message");
 const sendButton = byId<HTMLButtonElement>("send");
 const interruptButton = byId<HTMLButtonElement>("interrupt");
 const errorBox = byId("error");
+const serviceNotice = byId("service-notice");
 const todosPanel = byId("todos");
 const todoList = byId("todo-list");
 const todoForm = byId<HTMLFormElement>("todo-form");
@@ -79,16 +81,26 @@ async function act(action: () => Promise<void>): Promise<void> {
 // Whether the selected chat runs a turn, as last read from the service.
 let selectedWorking = false;
 
+// The connection to the harness service, as the app's Rust side reports it.
+let connection: ServiceConnection = { state: "connecting" };
+
 async function refresh(): Promise<void> {
+  // While there is no connection, the service has nothing to read.
+  if (connection.state !== "connected") {
+    renderServiceNotice(false);
+    return;
+  }
   const read = ++readCount;
   const chat = selectedChat;
-  const [repositories, chats, view, todos] = await Promise.all([
+  const [repositories, chats, view, todos, updateWaiting] = await Promise.all([
     service.listRepositories(),
     service.listChats(),
     chat === null ? Promise.resolve(null) : service.readChat(chat),
     chat === null ? Promise.resolve(null) : service.listTodos(chat),
+    service.serviceUpdateWaiting(),
   ]);
   if (read !== readCount) return;
+  renderServiceNotice(updateWaiting);
   renderSidebar(repositories, chats);
   if (selectedExtensions !== null) {
     const shown = repositories.find((overview) => overview.repository === selectedExtensions);
@@ -159,6 +171,27 @@ async function startAndSelect(repository: RepositoryId, checkout?: Checkout): Pr
   selectedChat = await service.startChat(repository, checkout);
   await refresh();
   messageInput.focus();
+}
+
+function renderServiceNotice(updateWaiting: boolean): void {
+  let text: string | null = null;
+  switch (connection.state) {
+    case "connecting":
+      text = "Connecting to the harness service…";
+      break;
+    case "unavailable":
+      text = `The harness service is not available: ${connection.reason}`;
+      break;
+    case "connected":
+      if (updateWaiting) {
+        text =
+          "A harness service update is waiting. It is applied once no turn runs; " +
+          "then every chat continues where it was.";
+      }
+      break;
+  }
+  serviceNotice.textContent = text ?? "";
+  serviceNotice.hidden = text === null;
 }
 
 /** Leaves the CLI extensions panel; refuses while it has unsaved changes. */
@@ -474,6 +507,13 @@ void act(async () => {
   await service.subscribe(
     () => void refresh().catch(showError),
     () => void refresh().catch(showError),
+    (changed) => {
+      connection = changed;
+      if (changed.state === "connected") clearError();
+      void refresh().catch(showError);
+    },
   );
+  // The connection may have changed before this window listened.
+  connection = await service.serviceConnection();
   await refresh();
 });

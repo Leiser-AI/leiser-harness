@@ -31,7 +31,8 @@ pub struct FakeDriver {
     sessions: PathBuf,
     next_session: AtomicU64,
     /// Holds the script and the agent sessions' state; removed on drop.
-    _dir: TempDir,
+    /// `None` when the caller owns the directory.
+    owned_dir: Option<TempDir>,
 }
 
 impl FakeDriver {
@@ -43,17 +44,41 @@ impl FakeDriver {
     /// Returns an error when the script cannot be written to a temporary file.
     pub fn new(program: &Path, script: &Script) -> io::Result<Self> {
         let dir = tempfile::tempdir()?;
-        let script_file = dir.path().join("script.json");
+        let mut driver = Self::in_dir(program, script, dir.path(), 1)?;
+        driver.owned_dir = Some(dir);
+        Ok(driver)
+    }
+
+    /// A driver that keeps the script and its agent sessions' state in
+    /// `dir`, which outlives it: another driver on the same directory, for
+    /// example in a harness service started again after an update, resumes
+    /// its agent sessions.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the script cannot be written to `dir`.
+    pub fn persistent(program: &Path, script: &Script, dir: &Path) -> io::Result<Self> {
+        // Agent session ids must not repeat across drivers on one directory.
+        let first = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(1, |since| {
+                u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
+            });
+        Self::in_dir(program, script, dir, first)
+    }
+
+    fn in_dir(program: &Path, script: &Script, dir: &Path, first: u64) -> io::Result<Self> {
+        let script_file = dir.join("script.json");
         std::fs::write(&script_file, serde_json::to_vec(script)?)?;
-        let sessions = dir.path().join("sessions");
-        std::fs::create_dir(&sessions)?;
+        let sessions = dir.join("sessions");
+        std::fs::create_dir_all(&sessions)?;
         Ok(Self {
             program: program.to_path_buf(),
             supports_steer: script.supports_steer,
             script_file,
             sessions,
-            next_session: AtomicU64::new(1),
-            _dir: dir,
+            next_session: AtomicU64::new(first),
+            owned_dir: None,
         })
     }
 
