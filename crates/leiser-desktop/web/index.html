@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>leiser-harness</title>
+    <link rel="stylesheet" href="./src/styles.css" />
+    <script type="module" src="./src/main.ts"></script>
+  </head>
+  <body>
+    <aside class="sidebar">
+      <header class="sidebar-header">
+        <span class="app-name">leiser-harness</span>
+        <button id="add-repository" type="button">Add repository</button>
+      </header>
+      <nav id="repositories" aria-label="Repositories and chats"></nav>
+    </aside>
+    <header class="top-bar" id="top-bar"></header>
+    <main class="chat">
+      <div id="error" class="error" role="alert" hidden></div>
+      <ol id="transcript" class="transcript" aria-live="polite"></ol>
+      <form id="composer" class="composer" hidden>
+        <textarea id="message" rows="3" placeholder="Message the agent (Enter sends, Shift+Enter adds a line)"></textarea>
+        <button type="submit">Send</button>
+      </form>
+    </main>
+  </body>
+</html>

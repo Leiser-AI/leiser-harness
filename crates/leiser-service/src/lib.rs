@@ -5,11 +5,13 @@
 //! behind the [`Driver`] interface (ADR 0002).
 
 mod driver;
+mod git;
 mod protocol;
 mod service;
 
 pub use driver::{AgentSession, Driver, DriverError, SessionInput, SessionSpec};
 pub use protocol::{
-    AgentEvent, ChatId, Checkout, Command, CommandError, Event, RepositoryId, Response,
+    AgentEvent, Branch, ChatId, ChatSummary, ChatView, Checkout, Command, CommandError, Event,
+    RepositoryId, RepositorySummary, Response, TranscriptEntry,
 };
 pub use service::{ServiceConfig, ServiceHandle, start};

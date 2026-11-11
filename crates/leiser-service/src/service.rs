@@ -2,13 +2,13 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use tokio::sync::{broadcast, mpsc, oneshot};
 
 use crate::{
-    ChatId, Checkout, Command, CommandError, Driver, Event, RepositoryId, Response, SessionInput,
-    SessionSpec,
+    AgentEvent, ChatId, ChatSummary, ChatView, Checkout, Command, CommandError, Driver, Event,
+    RepositoryId, RepositorySummary, Response, SessionInput, SessionSpec, TranscriptEntry,
 };
 
 /// Commands waiting for the command loop. Small, so callers feel back
@@ -73,9 +73,47 @@ impl ServiceHandle {
 }
 
 struct Chat {
+    repository: RepositoryId,
     working_directory: PathBuf,
     /// Input of the chat's agent session, once one has started.
     session: Option<mpsc::Sender<SessionInput>>,
+    transcript: Transcript,
+}
+
+/// A chat's transcript, shared with the task that forwards its agent
+/// session's events.
+#[derive(Clone, Default)]
+struct Transcript(Arc<Mutex<Vec<TranscriptEntry>>>);
+
+impl Transcript {
+    fn push(&self, entry: TranscriptEntry) {
+        // A panic while holding the lock cannot leave a half-pushed entry,
+        // so a poisoned transcript is still whole.
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(entry);
+    }
+
+    fn entries(&self) -> Vec<TranscriptEntry> {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    fn title(&self) -> Option<String> {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .find_map(|entry| match entry {
+                TranscriptEntry::UserMessage { text } => {
+                    text.lines().next().map(|line| line.trim().to_owned())
+                }
+                TranscriptEntry::Agent { .. } => None,
+            })
+    }
 }
 
 struct State {
@@ -103,6 +141,8 @@ impl State {
                 checkout,
             } => self.start_chat(repository, checkout),
             Command::SendMessage { chat, text } => self.send_message(chat, text).await,
+            Command::ListRepositories => Ok(self.list_repositories()),
+            Command::GetChat { chat } => self.get_chat(chat).await,
         }
     }
 
@@ -137,8 +177,10 @@ impl State {
         self.chats.insert(
             chat,
             Chat {
+                repository,
                 working_directory,
                 session: None,
+                transcript: Transcript::default(),
             },
         );
         Ok(Response::ChatStarted { chat })
@@ -160,10 +202,18 @@ impl State {
                 .map_err(|error| CommandError::AgentCli {
                     reason: error.to_string(),
                 })?;
-            tokio::spawn(forward_events(id, session.events, self.events.clone()));
+            tokio::spawn(forward_events(
+                id,
+                session.events,
+                chat.transcript.clone(),
+                self.events.clone(),
+            ));
             chat.session = Some(session.input.clone());
             session.input
         };
+        // Recorded before sending, so it precedes the agent's answer.
+        chat.transcript
+            .push(TranscriptEntry::UserMessage { text: text.clone() });
         input
             .send(SessionInput::UserMessage { text })
             .await
@@ -172,14 +222,72 @@ impl State {
             })?;
         Ok(Response::MessageSent)
     }
+
+    fn list_repositories(&self) -> Response {
+        let mut repositories: Vec<RepositorySummary> = self
+            .repositories
+            .iter()
+            .map(|(&repository, path)| {
+                let mut chats: Vec<ChatSummary> = self
+                    .chats
+                    .iter()
+                    .filter(|(_, chat)| chat.repository == repository)
+                    .map(|(&chat, state)| ChatSummary {
+                        chat,
+                        title: state.transcript.title(),
+                    })
+                    .collect();
+                chats.sort_by_key(|summary| summary.chat);
+                RepositorySummary {
+                    repository,
+                    name: directory_name(path),
+                    path: path.clone(),
+                    chats,
+                }
+            })
+            .collect();
+        repositories.sort_by_key(|summary| summary.repository);
+        Response::Repositories { repositories }
+    }
+
+    async fn get_chat(&self, id: ChatId) -> Result<Response, CommandError> {
+        let chat = self.chats.get(&id).ok_or(CommandError::UnknownChat(id))?;
+        let repository_name = self
+            .repositories
+            .get(&chat.repository)
+            .map(|path| directory_name(path))
+            .unwrap_or_default();
+        Ok(Response::Chat {
+            chat: ChatView {
+                chat: id,
+                repository: chat.repository,
+                repository_name,
+                branch: crate::git::current_branch(&chat.working_directory).await,
+                transcript: chat.transcript.entries(),
+            },
+        })
+    }
+}
+
+fn directory_name(path: &std::path::Path) -> String {
+    path.file_name().map_or_else(
+        || path.display().to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    )
 }
 
 async fn forward_events(
     chat: ChatId,
-    mut session: mpsc::Receiver<crate::AgentEvent>,
+    mut session: mpsc::Receiver<AgentEvent>,
+    transcript: Transcript,
     events: broadcast::Sender<Event>,
 ) {
     while let Some(event) = session.recv().await {
+        // Recorded before it is sent, so a subscriber that reads the chat
+        // on this event already finds it.
+        transcript.push(TranscriptEntry::Agent {
+            event: event.clone(),
+        });
         // No subscriber is not an error: the desktop app may be closed.
         let _ = events.send(Event::Agent { chat, event });
     }

@@ -1,0 +1,22 @@
+{
+  "name": "leiser-desktop",
+  "private": true,
+  "version": "0.1.0",
+  "license": "SEE LICENSE IN ../../LICENSE.md",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "check": "tsc --noEmit",
+    "tauri": "tauri",
+    "fake-agent-cli": "cargo build -p leiser-testkit --bin fake-agent-cli"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "~2.12.4"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "~2.12.4",
+    "typescript": "~7.0.2",
+    "vite": "~8.3.7"
+  }
+}

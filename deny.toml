@@ -24,6 +24,17 @@ allow = [
 ]
 confidence-threshold = 0.9
 unused-allowed-license = "allow"
+# The desktop app's Tauri pulls in these MPL-2.0 crates (CSS parsing in
+# tauri-utils and wry, `option-ext` via `dirs`). MPL-2.0 is file-level
+# copyleft: we use them unmodified from crates.io, so their source stays
+# available. Allowed per crate, not for the whole tree.
+exceptions = [
+  { crate = "cssparser", allow = ["MPL-2.0"] },
+  { crate = "cssparser-macros", allow = ["MPL-2.0"] },
+  { crate = "dtoa-short", allow = ["MPL-2.0"] },
+  { crate = "option-ext", allow = ["MPL-2.0"] },
+  { crate = "selectors", allow = ["MPL-2.0"] },
+]
 
 # Our own crates are `publish = false` and licensed under PolyForm
 # Noncommercial (LICENSE.md); `private.ignore` skips them here.

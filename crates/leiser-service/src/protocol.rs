@@ -6,11 +6,11 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 /// A repository added to the harness.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct RepositoryId(pub(crate) u64);
 
 /// A chat: one conversation of the developer with agents about one task.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ChatId(pub(crate) u64);
 
 /// Where a chat works.
@@ -35,15 +35,82 @@ pub enum Command {
     /// Sends the developer's message to the chat's agent session, starting
     /// the agent session if the chat has none yet.
     SendMessage { chat: ChatId, text: String },
+    /// Lists all repositories and their chats.
+    ListRepositories,
+    /// Reads one chat: where it works and everything said in it so far.
+    GetChat { chat: ChatId },
 }
 
 /// The answer to a successful [`Command`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Response {
-    RepositoryAdded { repository: RepositoryId },
-    ChatStarted { chat: ChatId },
+    RepositoryAdded {
+        repository: RepositoryId,
+    },
+    ChatStarted {
+        chat: ChatId,
+    },
     MessageSent,
+    Repositories {
+        repositories: Vec<RepositorySummary>,
+    },
+    Chat {
+        chat: ChatView,
+    },
+}
+
+/// A repository in the answer to [`Command::ListRepositories`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepositorySummary {
+    pub repository: RepositoryId,
+    /// The name of the repository's directory.
+    pub name: String,
+    pub path: PathBuf,
+    /// Oldest first.
+    pub chats: Vec<ChatSummary>,
+}
+
+/// A chat in the answer to [`Command::ListRepositories`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatSummary {
+    pub chat: ChatId,
+    /// The first line of the developer's first message; `None` until then.
+    pub title: Option<String>,
+}
+
+/// A chat in the answer to [`Command::GetChat`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatView {
+    pub chat: ChatId,
+    pub repository: RepositoryId,
+    pub repository_name: String,
+    /// The branch checked out where the chat works.
+    pub branch: Branch,
+    /// Everything said in the chat, oldest first.
+    pub transcript: Vec<TranscriptEntry>,
+}
+
+/// What is checked out in a working directory.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Branch {
+    /// A branch, possibly without commits yet.
+    Named { name: String },
+    /// A commit without a branch.
+    Detached { commit: String },
+    /// Git could not tell.
+    Unknown,
+}
+
+/// One entry of a chat's transcript.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum TranscriptEntry {
+    /// A message from the developer.
+    UserMessage { text: String },
+    /// An event from the chat's agent session.
+    Agent { event: AgentEvent },
 }
 
 /// Why a [`Command`] failed.
@@ -78,6 +145,8 @@ pub enum AgentEvent {
     Message { text: String },
     /// The agent called a tool.
     ToolCall { name: String, detail: String },
+    /// A tool the agent called returned.
+    ToolResult { name: String, output: String },
     /// The agent waits for the developer's approval.
     ApprovalRequested {
         request: String,
