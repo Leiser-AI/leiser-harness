@@ -6,9 +6,10 @@ use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use leiser_service::{
-    Access, AgentEvent, AgentSession, AgentSessionId, Driver, DriverError, PermissionMode,
-    SessionInput, SessionSpec,
+    Access, AgentCli, AgentEvent, AgentSession, AgentSessionId, Driver, DriverError, LoginProcess,
+    PermissionMode, SessionInput, SessionSpec, SubscriptionAccess,
 };
+use serde::{Deserialize, Serialize};
 use tempfile::TempDir;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, ChildStdout, Command};
@@ -17,6 +18,22 @@ use tokio::sync::{mpsc, oneshot};
 use crate::{FakeInput, Script};
 
 const CHANNEL_BUFFER: usize = 64;
+
+/// The file the fake agent CLI's login writes into the config directory it
+/// signed in to.
+pub const FAKE_LOGIN_FILE: &str = "fake-login.json";
+/// What [`Step::ReportEnvironment`](crate::Step::ReportEnvironment) answers
+/// for a variable that is not set.
+pub const UNSET: &str = "<unset>";
+
+/// The contents of [`FAKE_LOGIN_FILE`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FakeLogin {
+    /// The environment variable that named the config directory.
+    pub variable: String,
+    /// The code the login read, if it asked for one.
+    pub code: Option<String>,
+}
 
 /// Starts every agent session as the `fake-agent-cli` program playing back
 /// the same [`Script`] from its first turn; a resumed agent session
@@ -27,8 +44,12 @@ const CHANNEL_BUFFER: usize = 64;
 #[derive(Debug)]
 pub struct FakeDriver {
     program: PathBuf,
+    /// The agent CLI whose environment variables it gets.
+    agent_cli: AgentCli,
     supports_steer: bool,
     unsupported_permission_modes: Vec<PermissionMode>,
+    login_fails: bool,
+    login_asks_for_code: bool,
     script_file: PathBuf,
     sessions: PathBuf,
     next_session: AtomicU64,
@@ -39,7 +60,9 @@ pub struct FakeDriver {
 
 impl FakeDriver {
     /// `program` is the `fake-agent-cli` binary; integration tests get it
-    /// from `env!("CARGO_BIN_EXE_fake-agent-cli")`.
+    /// from `env!("CARGO_BIN_EXE_fake-agent-cli")`. It stands in for Claude
+    /// Code: a subscription reaches it through Claude Code's environment
+    /// variables.
     ///
     /// # Errors
     ///
@@ -76,13 +99,24 @@ impl FakeDriver {
         std::fs::create_dir_all(&sessions)?;
         Ok(Self {
             program: program.to_path_buf(),
+            agent_cli: AgentCli::ClaudeCode,
             supports_steer: script.supports_steer,
             unsupported_permission_modes: script.unsupported_permission_modes.clone(),
+            login_fails: script.login_fails,
+            login_asks_for_code: script.login_asks_for_code,
             script_file,
             sessions,
             next_session: AtomicU64::new(first),
             owned_dir: None,
         })
+    }
+
+    /// Stands in for `agent_cli` instead: a subscription reaches the program
+    /// through that agent CLI's environment variables.
+    #[must_use]
+    pub fn standing_in_for(mut self, agent_cli: AgentCli) -> Self {
+        self.agent_cli = agent_cli;
+        self
     }
 
     /// Runs the program for agent session `id`; `mode` is `--session-id`
@@ -94,6 +128,9 @@ impl FakeDriver {
         id: AgentSessionId,
     ) -> Result<AgentSession, DriverError> {
         let mut command = Command::new(&self.program);
+        if let Some(subscription) = &spec.subscription {
+            subscription.environment(self.agent_cli).apply(&mut command);
+        }
         command
             .arg("--script")
             .arg(&self.script_file)
@@ -156,6 +193,19 @@ impl Driver for FakeDriver {
 
     fn supports_steer(&self) -> bool {
         self.supports_steer
+    }
+
+    fn login(&self, access: &SubscriptionAccess) -> Result<LoginProcess, DriverError> {
+        let mut command = Command::new(&self.program);
+        command.arg("login");
+        if self.login_fails {
+            command.arg("--fail");
+        }
+        if self.login_asks_for_code {
+            command.arg("--ask-for-code");
+        }
+        access.environment(self.agent_cli).apply(&mut command);
+        LoginProcess::spawn(command)
     }
 
     fn supports_permission_mode(&self, mode: PermissionMode) -> bool {

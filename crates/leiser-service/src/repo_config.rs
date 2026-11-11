@@ -26,6 +26,12 @@
 //! # Agent sessions may read and change the chat's todo list through the
 //! # harness MCP server. Default: false, only the developer uses it.
 //! todo_list = true
+//!
+//! [subscriptions]
+//! # The subscription new chats use per provider, by name. A provider
+//! # without one runs on the agent CLI's own default login.
+//! anthropic = "Claude Team work"
+//! openai = "Codex private"
 //! ```
 //!
 //! Scripts run with `sh -c` in the worktree, on Windows with the `sh` of
@@ -43,7 +49,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-use crate::{CheckId, PermissionMode, SwitchedOffCheck};
+use crate::{CheckId, PermissionMode, Provider, SwitchedOffCheck};
 
 /// Where the file lives, relative to the main checkout.
 const CONFIG_FILE: [&str; 2] = [".leiser", "config.toml"];
@@ -69,6 +75,10 @@ pub(crate) struct RepositoryConfig {
     pub permission_mode: PermissionMode,
     #[serde(default)]
     pub worktree: WorktreeConfig,
+    /// The default subscription per provider, by name. Unknown providers
+    /// are refused.
+    #[serde(default)]
+    pub subscriptions: BTreeMap<Provider, String>,
     #[serde(default)]
     pub repo_check: RepoCheckConfig,
     #[serde(default)]
@@ -313,6 +323,23 @@ mod tests {
         assert!(pattern("<type>/<nonsense>").is_err());
         assert!(pattern("<type>/<short-name").is_err());
         assert!(pattern("<type>/fixed").is_err());
+    }
+
+    #[test]
+    fn default_subscriptions_are_read_per_provider() -> Result<(), toml::de::Error> {
+        let config: RepositoryConfig =
+            toml::from_str("[subscriptions]\nanthropic = \"Work\"\nopenai = \"Private\"\n")?;
+        assert_eq!(
+            config.subscriptions,
+            BTreeMap::from([
+                (Provider::Anthropic, "Work".to_owned()),
+                (Provider::OpenAi, "Private".to_owned()),
+            ])
+        );
+        let unknown: Result<RepositoryConfig, _> =
+            toml::from_str("[subscriptions]\ngoogle = \"x\"\n");
+        assert!(unknown.is_err());
+        Ok(())
     }
 
     #[test]

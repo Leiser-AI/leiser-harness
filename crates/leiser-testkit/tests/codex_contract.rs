@@ -302,6 +302,7 @@ async fn an_agent_session_ends_when_its_input_is_dropped(driver: Arc<dyn Driver>
         harness_mcp_url: Some("http://127.0.0.1:9/mcp/none".to_owned()),
         access: Access::Chat,
         permission_mode: PermissionMode::Supervised,
+        subscription: None,
     })?;
 
     drop(session.input);

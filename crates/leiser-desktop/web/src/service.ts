@@ -15,6 +15,7 @@ import type {
   Command,
   CommandError,
   PermissionMode,
+  Provider,
   QueueReason,
   RepoCheck,
   RepositoryId,
@@ -22,6 +23,9 @@ import type {
   Response,
   ServiceConnection,
   ServiceEvent,
+  SignIn,
+  SubscriptionId,
+  SubscriptionOverview,
   Todo,
   TodoId,
   TranscriptEntry,
@@ -36,6 +40,9 @@ export interface ChatView {
   appliedPermissionMode: PermissionMode;
   /** Approval requests and questions the running turn waits for, oldest first. */
   openRequests: string[];
+  agentCli: AgentCli;
+  /** `null`: the agent CLI's own default login. */
+  subscription: SubscriptionId | null;
   transcript: TranscriptEntry[];
 }
 
@@ -49,6 +56,17 @@ export const PERMISSION_MODE_NAMES: Record<PermissionMode, string> = {
 export const AGENT_CLI_NAMES: Record<AgentCli, string> = {
   claude_code: "Claude Code",
   codex: "Codex",
+};
+
+export const PROVIDER_NAMES: Record<Provider, string> = {
+  anthropic: "Anthropic",
+  openai: "OpenAI",
+};
+
+/** The provider whose subscriptions an agent CLI runs on. */
+export const AGENT_CLI_PROVIDERS: Record<AgentCli, Provider> = {
+  claude_code: "anthropic",
+  codex: "openai",
 };
 
 /** A command the service refused, with the reason it gave. */
@@ -110,6 +128,28 @@ function describe(error: CommandError): string {
       return `Could not access ${error.file}: ${error.reason}`;
     case "service_stopped":
       return "The harness service has stopped.";
+    case "unknown_subscription":
+      return "This chat's subscription was removed. Choose another one in the top bar.";
+    case "unknown_subscription_name":
+      return `The repository's .leiser/config.toml names a ${PROVIDER_NAMES[error.provider]} subscription "${error.name}" that is not registered.`;
+    case "subscription_name_taken":
+      return `A ${PROVIDER_NAMES[error.provider]} subscription is already named "${error.name}".`;
+    case "empty_subscription_name":
+      return "A subscription needs a name.";
+    case "empty_api_key":
+      return "Enter the API key.";
+    case "wrong_provider":
+      return `That subscription is not a ${PROVIDER_NAMES[error.provider]} subscription.`;
+    case "not_a_login_subscription":
+      return "This subscription signs in with an API key, not by login.";
+    case "no_login_running":
+      return "The login has already ended. Start it again with Log in.";
+    case "subscription_setup":
+      return `Could not set up the subscription: ${error.reason}`;
+    case "keychain":
+      return `The OS keychain failed: ${error.reason}`;
+    case "repository_config":
+      return `The repository's config is invalid: ${error.reason}`;
   }
 }
 
@@ -195,9 +235,56 @@ export async function readChat(chat: ChatId): Promise<ChatView> {
         permissionMode: response.permission_mode,
         appliedPermissionMode: response.applied_permission_mode,
         openRequests: response.open_requests,
+        agentCli: response.agent_cli,
+        subscription: response.subscription,
         transcript: response.transcript,
       }
     : unexpected(response);
+}
+
+export async function listSubscriptions(): Promise<SubscriptionOverview[]> {
+  const response = await execute({ type: "list_subscriptions" });
+  return response.type === "subscriptions" ? response.subscriptions : unexpected(response);
+}
+
+/** Registers a subscription; a login subscription's login starts at once. */
+export async function addSubscription(
+  provider: Provider,
+  name: string,
+  signIn: SignIn,
+): Promise<SubscriptionId> {
+  const response = await execute({ type: "add_subscription", provider, name, sign_in: signIn });
+  return response.type === "subscription_added" ? response.subscription : unexpected(response);
+}
+
+export async function renameSubscription(subscription: SubscriptionId, name: string): Promise<void> {
+  const response = await execute({ type: "rename_subscription", subscription, name });
+  if (response.type !== "subscription_renamed") unexpected(response);
+}
+
+export async function removeSubscription(subscription: SubscriptionId): Promise<void> {
+  const response = await execute({ type: "remove_subscription", subscription });
+  if (response.type !== "subscription_removed") unexpected(response);
+}
+
+export async function logIn(subscription: SubscriptionId): Promise<void> {
+  const response = await execute({ type: "log_in", subscription });
+  if (response.type !== "login_started") unexpected(response);
+}
+
+/** Types a line, such as the code from the browser, into a running login. */
+export async function answerLogin(subscription: SubscriptionId, answer: string): Promise<void> {
+  const response = await execute({ type: "answer_login", subscription, answer });
+  if (response.type !== "login_answered") unexpected(response);
+}
+
+export async function changeSubscription(
+  chat: ChatId,
+  provider: Provider,
+  subscription: SubscriptionId | null,
+): Promise<void> {
+  const response = await execute({ type: "change_subscription", chat, provider, subscription });
+  if (response.type !== "subscription_changed") unexpected(response);
 }
 
 /** Runs repo-check on the repository again; it only reads. */

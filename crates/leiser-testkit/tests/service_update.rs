@@ -176,6 +176,10 @@ async fn a_service_update_waits_while_the_other_chat_still_runs_a_turn() -> Test
     let quick = start_chat(&app, &repo).await?;
     let slow = start_chat(&app, &repo).await?;
     let mut events = app.subscribe();
+    // The quick turn may end before the update is announced, and waiting
+    // for the announcement skips every event before it. So the quick chat's
+    // turn is collected from its own receiver.
+    let mut quick_events = app.subscribe();
     // The slow chat plays its quick first turn, then waits in the second.
     send(&app, slow, "warm up").await?;
     collect_turn(&mut events, slow).await?;
@@ -185,7 +189,7 @@ async fn a_service_update_waits_while_the_other_chat_still_runs_a_turn() -> Test
     let update = tokio::spawn(service.update());
     update_announced(&mut events).await?;
     assert_eq!(
-        collect_turn(&mut events, quick).await?,
+        collect_turn(&mut quick_events, quick).await?,
         vec![message("quick"), AgentEvent::TurnEnded]
     );
 

@@ -485,20 +485,43 @@ async fn the_agent_is_told_when_a_todo_does_not_exist() -> TestResult {
 async fn an_invalid_repository_config_is_reported() -> TestResult {
     let harness = start_service(&Script::new())?;
     let service = harness.connect();
-    let invalid = "[agent_access]\ntodo_list = \"yes\"\n";
-    // A new chat reads the config for its permission mode.
-    let refused = start_chat(&service, &repo_with_config(invalid)?).await;
+    let repo = repo_with_config("[agent_access]\ntodo_list = \"yes\"\n")?;
+    let Response::RepositoryAdded { repository } = service
+        .execute(Command::AddRepository {
+            path: repo.path().to_path_buf(),
+        })
+        .await?
+    else {
+        return Err("expected RepositoryAdded".into());
+    };
+
+    // The config is read when the chat starts, for its default
+    // subscriptions, so the chat does not start.
+    let result = service
+        .execute(Command::StartChat {
+            repository,
+            checkout: Checkout::Main,
+        })
+        .await;
+
     assert!(
-        refused.is_err_and(|error| matches!(
-            error.downcast_ref::<CommandError>(),
-            Some(CommandError::RepositoryConfig { .. })
-        )),
-        "a chat started on an invalid config"
+        matches!(result, Err(CommandError::RepositoryConfig { .. })),
+        "{result:?}"
     );
-    // A config that breaks later is reported when the agent session starts.
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_repository_config_that_breaks_later_is_reported_when_the_agent_session_starts()
+-> TestResult {
+    let harness = start_service(&Script::new())?;
+    let service = harness.connect();
     let repo = repo_with_config("[agent_access]\ntodo_list = true\n")?;
     let chat = start_chat(&service, &repo).await?;
-    std::fs::write(repo.path().join(".leiser/config.toml"), invalid)?;
+    std::fs::write(
+        repo.path().join(".leiser/config.toml"),
+        "[agent_access]\ntodo_list = \"yes\"\n",
+    )?;
 
     let result = service
         .execute(Command::SendMessage {

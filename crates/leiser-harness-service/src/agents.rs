@@ -16,6 +16,8 @@ use leiser_testkit::{FakeDriver, SAMPLE_REPO_CHECK_REPORT, Script, Step};
 const FAKE_TURNS: usize = 1000;
 /// Where the fake agent CLI keeps its agent sessions, in the data directory.
 const FAKE_STATE_DIR: &str = "fake-agent-cli-state";
+/// The shared Codex home of fake Codex subscriptions, in the data directory.
+const FAKE_CODEX_HOME: &str = "codex-home";
 /// A fake turn waits after its tool call while this file, in
 /// [`FAKE_STATE_DIR`], is missing: delete it to hold turns open by hand,
 /// for example to try a service update during a turn. Created on start.
@@ -30,12 +32,16 @@ pub struct FakeAgentCliError(#[from] io::Error);
 /// change to Codex, or run on the fake agent CLI when the program says so.
 /// `repo-check` runs on Claude Code, which has the skill, or on the fake
 /// agent CLI. Worktrees go where the program says, by default into the
-/// data directory.
+/// data directory. API keys go to the OS keychain and Codex subscriptions
+/// share the developer's Codex home; on the fake agent CLI that shared
+/// Codex home lives in the data directory, apart from the real one.
 pub fn service_config(program: &ServiceProgram) -> Result<ServiceConfig, FakeAgentCliError> {
     let data_dir = program.data_dir().to_path_buf();
     let config = if let Some(fake) = program.fake_agent_cli() {
         let driver = fake_driver(fake, &data_dir.join(FAKE_STATE_DIR))?;
+        let codex_home = data_dir.join(FAKE_CODEX_HOME);
         ServiceConfig::new(AgentCli::ClaudeCode, Arc::new(driver), data_dir)
+            .with_codex_home(codex_home)
             .with_repo_check(Arc::new(fake_repo_check(fake)?))
     } else {
         let claude_code = Arc::new(ClaudeCodeDriver::installed());

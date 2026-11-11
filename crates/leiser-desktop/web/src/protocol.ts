@@ -3,6 +3,12 @@
 
 export type RepositoryId = number;
 export type ChatId = number;
+export type SubscriptionId = number;
+
+export type Provider = "anthropic" | "openai";
+export type SubscriptionKind = "login" | "api_key";
+export type SignIn = { type: "login" } | { type: "api_key"; api_key: string };
+export type LoginOutcome = { type: "signed_in" } | { type: "failed"; reason: string };
 export type TodoId = number;
 
 export type AgentCli = "claude_code" | "codex";
@@ -29,6 +35,18 @@ export type Command =
   | { type: "list_repositories" }
   | { type: "list_chats" }
   | { type: "read_chat"; chat: ChatId }
+  | { type: "add_subscription"; provider: Provider; name: string; sign_in: SignIn }
+  | { type: "rename_subscription"; subscription: SubscriptionId; name: string }
+  | { type: "remove_subscription"; subscription: SubscriptionId }
+  | { type: "log_in"; subscription: SubscriptionId }
+  | { type: "answer_login"; subscription: SubscriptionId; answer: string }
+  | { type: "list_subscriptions" }
+  | {
+      type: "change_subscription";
+      chat: ChatId;
+      provider: Provider;
+      subscription: SubscriptionId | null;
+    }
   | { type: "run_repo_check"; repository: RepositoryId }
   | { type: "read_repo_check"; repository: RepositoryId }
   | { type: "read_service_status" }
@@ -66,8 +84,17 @@ export type Response =
       permission_mode: PermissionMode;
       applied_permission_mode: PermissionMode;
       open_requests: string[];
+      agent_cli: AgentCli;
+      subscription: SubscriptionId | null;
       transcript: TranscriptEntry[];
     }
+  | { type: "subscription_added"; subscription: SubscriptionId }
+  | { type: "subscription_renamed" }
+  | { type: "subscription_removed" }
+  | { type: "login_started" }
+  | { type: "login_answered" }
+  | { type: "subscriptions"; subscriptions: SubscriptionOverview[] }
+  | { type: "subscription_changed" }
   | { type: "repo_check_started" }
   | { type: "repo_check"; check: RepoCheck }
   | { type: "service_status"; version: string; update_waiting: boolean }
@@ -97,6 +124,17 @@ export type CommandError =
   | { type: "empty_todo" }
   | { type: "unknown_todo"; chat: ChatId; todo: TodoId }
   | { type: "storage"; reason: string }
+  | { type: "unknown_subscription"; subscription: SubscriptionId }
+  | { type: "unknown_subscription_name"; provider: Provider; name: string }
+  | { type: "subscription_name_taken"; provider: Provider; name: string }
+  | { type: "empty_subscription_name" }
+  | { type: "empty_api_key" }
+  | { type: "wrong_provider"; subscription: SubscriptionId; provider: Provider }
+  | { type: "not_a_login_subscription"; subscription: SubscriptionId }
+  | { type: "subscription_setup"; reason: string }
+  | { type: "no_login_running"; subscription: SubscriptionId }
+  | { type: "keychain"; reason: string }
+  | { type: "repository_config"; reason: string }
   | { type: "repo_check_not_configured" }
   | { type: "repo_check_running"; repository: RepositoryId }
   | { type: "not_a_cli_extension_file"; file: string }
@@ -141,6 +179,15 @@ export interface RepositoryOverview {
   repository: RepositoryId;
   name: string;
   path: string;
+}
+
+export interface SubscriptionOverview {
+  subscription: SubscriptionId;
+  provider: Provider;
+  name: string;
+  kind: SubscriptionKind;
+  home: string;
+  logging_in: boolean;
 }
 
 export interface ChatOverview {
@@ -239,6 +286,8 @@ export type ServiceEvent =
     }
   | { type: "status_changed"; chat: ChatId; status: ChatStatus }
   | { type: "request_answered"; chat: ChatId; request: string; answer: Answer }
+  | { type: "login_output"; subscription: SubscriptionId; text: string }
+  | { type: "login_finished"; subscription: SubscriptionId; outcome: LoginOutcome }
   | { type: "repo_check_started"; repository: RepositoryId }
   | { type: "repo_check_finished"; repository: RepositoryId }
   | { type: "todos_changed"; chat: ChatId; todos: Todo[] }

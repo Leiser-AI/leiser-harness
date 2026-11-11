@@ -26,6 +26,7 @@ async fn claude_code_below_the_minimum_version_is_refused_with_the_reason() -> T
         harness_mcp_url: Some("http://127.0.0.1:9/mcp/none".to_owned()),
         access: Access::Chat,
         permission_mode: PermissionMode::Supervised,
+        subscription: None,
     });
 
     let Err(DriverError::UnsupportedVersion {
@@ -97,6 +98,7 @@ async fn a_program_that_is_not_claude_code_is_refused() -> TestResult {
         harness_mcp_url: Some("http://127.0.0.1:9/mcp/none".to_owned()),
         access: Access::Chat,
         permission_mode: PermissionMode::Supervised,
+        subscription: None,
     });
 
     assert!(
