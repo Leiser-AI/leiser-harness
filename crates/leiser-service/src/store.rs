@@ -26,6 +26,10 @@ use crate::{AgentCli, AgentEvent, TranscriptEntry};
 /// - 1: one agent session per chat; transcript entries without agent CLI.
 /// - 2: a chat can change agent CLI: it keeps one agent session per agent
 ///   CLI and a pending handoff, and agent entries name their agent CLI.
+///   Later additions that version 2 data without them reads as defaults:
+///   whether a chat works in a worktree, whether it is done and when its
+///   status last changed, and
+///   transcript entries for finished repository scripts.
 const VERSION: u32 = 2;
 
 const STATE_FILE: &str = "state.json";
@@ -72,6 +76,18 @@ pub(crate) struct ChatV2 {
     pub agent_sessions: Vec<AgentSessionV2>,
     /// The handoff the chat's next message carries.
     pub handoff: Option<HandoffV2>,
+    /// Whether `working_directory` is a worktree rather than the main
+    /// checkout.
+    #[serde(default)]
+    pub worktree: bool,
+    /// Whether the developer marked the chat as done.
+    #[serde(default)]
+    pub done: bool,
+    /// When the chat's status last changed, in the harness service's count
+    /// of status changes; the sidebar lists the latest first. `0` for
+    /// chats stored before the count existed.
+    #[serde(default)]
+    pub status_changed: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -247,6 +263,9 @@ impl Store {
                         .into_iter()
                         .collect(),
                     handoff: None,
+                    worktree: false,
+                    done: false,
+                    status_changed: 0,
                 })
                 .collect(),
         };

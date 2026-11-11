@@ -272,10 +272,42 @@ button:disabled {
   white-space: nowrap;
 }
 
+.repository-actions {
+  display: flex;
+  gap: 4px;
+}
+
+.new-chat.secondary {
+  color: var(--muted);
+}
+
 .chat-status {
+  margin-left: auto;
+  flex-shrink: 0;
   font-size: 11px;
   font-weight: normal;
+  color: var(--muted);
+}
+
+.chat-status.working {
   color: var(--accent);
+}
+
+.chat-status.waiting_for_you {
+  color: var(--text);
+  font-weight: 600;
+  padding: 0 6px;
+  border-radius: 8px;
+  background: var(--warn);
+}
+
+.chat-link.done .chat-title {
+  color: var(--muted);
+}
+
+.top-bar-action {
+  font-size: 12px;
+  padding: 2px 8px;
 }
 
 .composer-actions {
