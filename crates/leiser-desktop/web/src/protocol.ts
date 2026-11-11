@@ -29,7 +29,16 @@ export type Command =
   | { type: "list_todos"; chat: ChatId }
   | { type: "add_todo"; chat: ChatId; text: string }
   | { type: "set_todo_done"; chat: ChatId; todo: TodoId; done: boolean }
-  | { type: "remove_todo"; chat: ChatId; todo: TodoId };
+  | { type: "remove_todo"; chat: ChatId; todo: TodoId }
+  | { type: "list_cli_extensions"; repository: RepositoryId }
+  | { type: "read_cli_extension_file"; repository: RepositoryId; file: string }
+  | {
+      type: "save_cli_extension_file";
+      repository: RepositoryId;
+      file: string;
+      text: string;
+      previous: string;
+    };
 
 export type Response =
   | { type: "repository_added"; repository: RepositoryId }
@@ -46,7 +55,10 @@ export type Response =
   | { type: "todos"; todos: Todo[] }
   | { type: "todo_added"; todo: TodoId }
   | { type: "todo_updated" }
-  | { type: "todo_removed" };
+  | { type: "todo_removed" }
+  | { type: "cli_extensions"; extensions: CliExtension[]; unreadable: UnreadableCliExtensionFile[] }
+  | { type: "cli_extension_file"; text: string }
+  | { type: "cli_extension_file_saved" };
 
 export type CommandError =
   | { type: "not_a_git_repository"; path: string }
@@ -64,6 +76,10 @@ export type CommandError =
   | { type: "empty_todo" }
   | { type: "unknown_todo"; chat: ChatId; todo: TodoId }
   | { type: "storage"; reason: string }
+  | { type: "not_a_cli_extension_file"; file: string }
+  | { type: "cli_extension_file_changed"; file: string }
+  | { type: "invalid_cli_extension_file"; file: string; reason: string }
+  | { type: "cli_extension_file_access"; file: string; reason: string }
   | { type: "service_stopped" };
 
 export interface RepositoryOverview {
@@ -87,6 +103,30 @@ export interface Todo {
   done: boolean;
 }
 
+/** A skill, MCP server, hook or instruction file an agent CLI loads. */
+export interface CliExtension {
+  agent_cli: AgentCli;
+  kind: CliExtensionKind;
+  name: string;
+  /** Where the agent CLI loads it from, relative to the repository. */
+  path: string;
+  /** The file that holds it, symlinks resolved; read and save by this. */
+  file: string;
+}
+
+export type CliExtensionKind =
+  | { type: "instruction_file"; imported_by: string | null }
+  | { type: "skill"; description: string | null }
+  | { type: "mcp_server"; launch: string | null }
+  | { type: "hook"; matcher: string | null; commands: string[] };
+
+export interface UnreadableCliExtensionFile {
+  agent_cli: AgentCli;
+  path: string;
+  file: string;
+  reason: string;
+}
+
 export type Branch =
   | { type: "named"; name: string }
   | { type: "detached"; commit: string }
@@ -106,6 +146,7 @@ export type AgentEvent =
   | { type: "usage_limit_reached"; limit: string; resets_in_seconds: number | null }
   | { type: "turn_ended" }
   | { type: "turn_interrupted" }
+  | { type: "turn_failed"; reason: string }
   | { type: "session_ended" };
 
 export type ServiceEvent =

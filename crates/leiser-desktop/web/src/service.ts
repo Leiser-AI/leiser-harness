@@ -10,6 +10,7 @@ import type {
   Checkout,
   ChatOverview,
   ChatStatus,
+  CliExtension,
   Command,
   CommandError,
   QueueReason,
@@ -20,6 +21,7 @@ import type {
   Todo,
   TodoId,
   TranscriptEntry,
+  UnreadableCliExtensionFile,
 } from "./protocol";
 
 /** A chat as the service reports it. */
@@ -73,6 +75,14 @@ function describe(error: CommandError): string {
       return `Todo ${error.todo} no longer exists.`;
     case "storage":
       return `The harness service could not store the chat: ${error.reason}`;
+    case "not_a_cli_extension_file":
+      return `${error.file} holds no CLI extension of this repository any more.`;
+    case "cli_extension_file_changed":
+      return `${error.file} changed since you opened it. Reload it, then edit again.`;
+    case "invalid_cli_extension_file":
+      return `Not saved: the agent CLI could not read ${error.file} any more. ${error.reason}`;
+    case "cli_extension_file_access":
+      return `Could not access ${error.file}: ${error.reason}`;
     case "service_stopped":
       return "The harness service has stopped.";
   }
@@ -164,6 +174,35 @@ export async function setTodoDone(chat: ChatId, todo: TodoId, done: boolean): Pr
 export async function removeTodo(chat: ChatId, todo: TodoId): Promise<void> {
   const response = await execute({ type: "remove_todo", chat, todo });
   if (response.type !== "todo_removed") unexpected(response);
+}
+
+/** The CLI extensions each agent CLI loads from a repository. */
+export interface CliExtensions {
+  extensions: CliExtension[];
+  unreadable: UnreadableCliExtensionFile[];
+}
+
+export async function listCliExtensions(repository: RepositoryId): Promise<CliExtensions> {
+  const response = await execute({ type: "list_cli_extensions", repository });
+  return response.type === "cli_extensions"
+    ? { extensions: response.extensions, unreadable: response.unreadable }
+    : unexpected(response);
+}
+
+export async function readCliExtensionFile(repository: RepositoryId, file: string): Promise<string> {
+  const response = await execute({ type: "read_cli_extension_file", repository, file });
+  return response.type === "cli_extension_file" ? response.text : unexpected(response);
+}
+
+/** Saves `text` if the file still holds `previous`, the text it was opened with. */
+export async function saveCliExtensionFile(
+  repository: RepositoryId,
+  file: string,
+  text: string,
+  previous: string,
+): Promise<void> {
+  const response = await execute({ type: "save_cli_extension_file", repository, file, text, previous });
+  if (response.type !== "cli_extension_file_saved") unexpected(response);
 }
 
 /** Asks the developer for a folder; `null` when they cancel. */

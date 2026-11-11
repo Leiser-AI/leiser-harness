@@ -5,8 +5,8 @@ use std::error::Error;
 use std::path::Path;
 
 use leiser_service::{
-    AgentEvent, ChatId, Checkout, Command, CommandError, Event, QueueReason, Response,
-    ServiceHandle,
+    AgentCli, AgentEvent, ChatId, ChatStatus, Checkout, Command, CommandError, Event, QueueReason,
+    Response, ServiceHandle, TranscriptEntry,
 };
 use leiser_testkit::{Gate, Script, Step, TestRepo, TestService, collect_turn, next_event};
 use tokio::sync::broadcast;
@@ -161,6 +161,61 @@ async fn a_queued_message_is_sent_when_the_running_turn_ends() -> TestResult {
         chat.turn().await?,
         vec![message("two"), AgentEvent::TurnEnded]
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_failed_turn_ends_the_turn_with_its_reason_and_sends_the_queued_message() -> TestResult {
+    let gate = Gate::new()?;
+    let failed = AgentEvent::TurnFailed {
+        reason: "401 Unauthorized".to_owned(),
+    };
+    let script = Script::new()
+        .turn([
+            Step::message("working"),
+            gate.step(),
+            Step::FailTurn {
+                reason: "401 Unauthorized".to_owned(),
+            },
+            Step::message("never sent"),
+        ])
+        .turn([Step::EchoUserMessage]);
+    let mut chat = setup(&script).await?;
+    chat.start_turn("one", &message("working")).await?;
+    chat.queue("two").await?;
+    assert!(matches!(
+        chat.next_event().await?,
+        Event::MessageQueued { .. }
+    ));
+    gate.open()?;
+
+    assert_eq!(chat.turn().await?, vec![failed.clone()]);
+    assert_eq!(
+        chat.next_event().await?,
+        Event::QueuedMessageSent {
+            chat: chat.chat,
+            text: "two".to_owned(),
+        }
+    );
+    assert_eq!(
+        chat.turn().await?,
+        vec![message("two"), AgentEvent::TurnEnded]
+    );
+
+    let Response::Chat {
+        status, transcript, ..
+    } = chat
+        .service
+        .execute(Command::ReadChat { chat: chat.chat })
+        .await?
+    else {
+        return Err("expected Chat".into());
+    };
+    assert_eq!(status, ChatStatus::WaitingForYou);
+    assert!(transcript.contains(&TranscriptEntry::Agent {
+        agent_cli: AgentCli::ClaudeCode,
+        event: failed,
+    }));
     Ok(())
 }
 
