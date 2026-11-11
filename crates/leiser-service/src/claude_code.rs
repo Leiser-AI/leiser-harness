@@ -19,7 +19,7 @@
 //! how Claude Code ends turns when a message arrives mid-turn.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -28,7 +28,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, ChildStdout, Command};
 use tokio::sync::{mpsc, oneshot};
 
-use crate::installed::{self, Program};
+use crate::installed::{self, Found, Program};
 use crate::{
     AgentEvent, AgentSession, AgentSessionId, Driver, DriverError, Environment, HARNESS_MCP_SERVER,
     SessionInput, SessionSpec, Version,
@@ -102,7 +102,7 @@ impl ClaudeCodeDriver {
     ///
     /// Returns [`DriverError::NotInstalled`] when the driver finds none.
     pub fn program(&self) -> Result<PathBuf, DriverError> {
-        self.program.resolve()
+        Ok(self.program.resolve()?.program)
     }
 
     /// Asks the program for its version.
@@ -113,10 +113,10 @@ impl ClaudeCodeDriver {
     /// [`DriverError::Spawn`] when it cannot run and
     /// [`DriverError::UnreadableVersion`] when its answer is not a version.
     pub fn version(&self) -> Result<Version, DriverError> {
-        version_of(&self.program()?)
+        version_of(&self.program.resolve()?)
     }
 
-    fn check_version(program: &Path) -> Result<(), DriverError> {
+    fn check_version(program: &Found) -> Result<(), DriverError> {
         let found = version_of(program)?;
         if found < Self::MINIMUM_VERSION {
             return Err(DriverError::UnsupportedVersion {
@@ -131,12 +131,9 @@ impl ClaudeCodeDriver {
 }
 
 /// Asks `program` for its version.
-fn version_of(program: &Path) -> Result<Version, DriverError> {
-    let mut command = std::process::Command::new(program);
-    if let Some(path) = installed::path_for(program) {
-        command.env("PATH", path);
-    }
-    let output = command
+fn version_of(program: &Found) -> Result<Version, DriverError> {
+    let output = program
+        .command()
         .arg("--version")
         .stdin(Stdio::null())
         .stderr(Stdio::null())
@@ -177,12 +174,9 @@ impl ClaudeCodeDriver {
         spec: &SessionSpec,
         resume: Option<&AgentSessionId>,
     ) -> Result<AgentSession, DriverError> {
-        let program = self.program()?;
+        let program = self.program.resolve()?;
         Self::check_version(&program)?;
-        let mut command = Command::new(&program);
-        if let Some(path) = installed::path_for(&program) {
-            command.env("PATH", path);
-        }
+        let mut command = Command::from(program.command());
         command.args(ARGUMENTS);
         // Both options take several values; each is followed by another
         // option or ends the arguments.
