@@ -6,9 +6,9 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use super::wire::{
     self, ApprovalDecision, ApprovalResponse, ClientInfo, ClientNotification, ClientRequest,
     ErrorResponse, Incoming, InitializeParams, Item, Notification, RateLimits, Request, RequestId,
-    RpcError, ThreadResumeParams, ThreadStartParams, ThreadStarted, Turn, TurnInterruptParams,
-    TurnStartParams, TurnStarted, TurnStatus, TurnSteerParams, UserInput, UserInputAnswer,
-    UserInputResponse, WireError,
+    RpcError, ThreadResumeParams, ThreadStartParams, ThreadStarted, Turn, TurnError,
+    TurnInterruptParams, TurnStartParams, TurnStarted, TurnStatus, TurnSteerParams, UserInput,
+    UserInputAnswer, UserInputResponse, WireError,
 };
 use crate::{AgentEvent, Answer, PermissionMode, Question, QuestionOption};
 
@@ -481,14 +481,7 @@ impl Conversation {
                 output: aggregated_output.unwrap_or_default(),
             }),
             Notification::TurnCompleted(turn) => {
-                output.events.extend(self.usage_limit(&turn, now));
-                output
-                    .events
-                    .push(if turn.status == TurnStatus::Interrupted {
-                        AgentEvent::TurnInterrupted
-                    } else {
-                        AgentEvent::TurnEnded
-                    });
+                output.events.extend(self.turn_end(&turn, now));
                 if let Phase::Ready { turn, .. } = &mut self.phase {
                     // Steers that never reached the turn become the next turns.
                     if let TurnState::Starting { early } = turn {
@@ -519,11 +512,25 @@ impl Conversation {
         Ok(())
     }
 
-    fn usage_limit(&self, turn: &Turn, now: i64) -> Option<AgentEvent> {
-        let error = turn.error.as_ref()?;
-        if turn.status != TurnStatus::Failed || !error.is_usage_limit() {
-            return None;
+    /// The events that end `turn`. Codex reports a turn's error once more
+    /// as an `error` notification before it; only this one is used.
+    fn turn_end(&self, turn: &Turn, now: i64) -> Vec<AgentEvent> {
+        match (turn.status, &turn.error) {
+            (TurnStatus::Interrupted, _) => vec![AgentEvent::TurnInterrupted],
+            (TurnStatus::Failed, Some(error)) if error.is_usage_limit() => {
+                vec![self.usage_limit(error, now), AgentEvent::TurnEnded]
+            }
+            (TurnStatus::Failed, error) => vec![AgentEvent::TurnFailed {
+                reason: error.as_ref().map_or_else(
+                    || "Codex gave no reason".to_owned(),
+                    |error| redact_api_keys(&error.message),
+                ),
+            }],
+            _ => vec![AgentEvent::TurnEnded],
         }
+    }
+
+    fn usage_limit(&self, error: &TurnError, now: i64) -> AgentEvent {
         // Usage is blocked until every exhausted window has reset.
         let resets_at = [&self.rate_limits.primary, &self.rate_limits.secondary]
             .into_iter()
@@ -531,15 +538,15 @@ impl Conversation {
             .filter(|window| window.used_percent >= 100.0)
             .filter_map(|window| window.resets_at)
             .max();
-        Some(AgentEvent::UsageLimitReached {
+        AgentEvent::UsageLimitReached {
             limit: self
                 .rate_limits
                 .limit_name
                 .clone()
-                .unwrap_or_else(|| error.message.clone()),
+                .unwrap_or_else(|| redact_api_keys(&error.message)),
             resets_in_seconds: resets_at
                 .map(|resets_at| u64::try_from(resets_at.saturating_sub(now)).unwrap_or(0)),
-        })
+        }
     }
 }
 
@@ -615,6 +622,40 @@ fn question(question: wire::UserInputQuestion) -> Question {
         // Codex's questions take one answer each.
         multi_select: false,
     }
+}
+
+/// Replaces API keys in an error message from Codex: the error for a
+/// rejected key quotes it. Keys are the words that start with `sk-`, the
+/// prefix of every key the provider issues.
+fn redact_api_keys(message: &str) -> String {
+    const PREFIX: &str = "sk-";
+    let mut redacted = String::with_capacity(message.len());
+    let mut rest = message;
+    while let Some(start) = rest.find(PREFIX) {
+        let starts_word = rest[..start]
+            .chars()
+            .next_back()
+            .is_none_or(|before| !is_key_char(before));
+        redacted.push_str(&rest[..start]);
+        let key = &rest[start..];
+        let end = key[PREFIX.len()..]
+            .find(|c: char| !is_key_char(c))
+            .map_or(key.len(), |end| PREFIX.len() + end);
+        if starts_word {
+            redacted.push_str("[redacted]");
+        } else {
+            redacted.push_str(&key[..end]);
+        }
+        rest = &key[end..];
+    }
+    redacted.push_str(rest);
+    redacted
+}
+
+/// A character that can be part of an API key, including the `*` that
+/// masks part of a quoted key.
+fn is_key_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '*')
 }
 
 fn text_input(text: String) -> UserInput {
@@ -887,7 +928,33 @@ mod tests {
     }
 
     #[test]
-    fn other_failures_only_end_the_turn() -> TestResult {
+    fn a_failed_turn_ends_with_the_reason_codex_gives() -> TestResult {
+        let mut conversation = ready()?;
+        conversation.user_message("hi".to_owned())?;
+
+        let output = receive(
+            &mut conversation,
+            &turn_completed(
+                "failed",
+                &json!({
+                    "message": "unexpected status 401 Unauthorized: Incorrect API key provided",
+                    "codexErrorInfo": "unauthorized",
+                    "additionalDetails": null,
+                }),
+            ),
+        )?;
+
+        assert_eq!(
+            output.events,
+            vec![AgentEvent::TurnFailed {
+                reason: "unexpected status 401 Unauthorized: Incorrect API key provided".to_owned(),
+            }]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_failure_with_error_details_still_reports_its_message() -> TestResult {
         let mut conversation = ready()?;
         conversation.user_message("hi".to_owned())?;
 
@@ -899,7 +966,121 @@ mod tests {
             ),
         )?;
 
-        assert_eq!(output.events, vec![AgentEvent::TurnEnded]);
+        assert_eq!(
+            output.events,
+            vec![AgentEvent::TurnFailed {
+                reason: "boom".to_owned()
+            }]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_failed_turn_without_an_error_says_codex_gave_no_reason() -> TestResult {
+        let mut conversation = ready()?;
+        conversation.user_message("hi".to_owned())?;
+
+        let output = receive(&mut conversation, &turn_completed("failed", &Value::Null))?;
+
+        assert_eq!(
+            output.events,
+            vec![AgentEvent::TurnFailed {
+                reason: "Codex gave no reason".to_owned()
+            }]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn api_keys_in_a_failure_reason_are_redacted() -> TestResult {
+        let mut conversation = ready()?;
+        conversation.user_message("hi".to_owned())?;
+
+        let output = receive(
+            &mut conversation,
+            &turn_completed(
+                "failed",
+                &json!({
+                    "message": "Incorrect API key provided: sk-proj-abc123XYZ. You can find your API key at https://platform.openai.com/account/api-keys.",
+                    "codexErrorInfo": "unauthorized",
+                    "additionalDetails": null,
+                }),
+            ),
+        )?;
+
+        assert_eq!(
+            output.events,
+            vec![AgentEvent::TurnFailed {
+                reason: "Incorrect API key provided: [redacted]. You can find your API key at https://platform.openai.com/account/api-keys.".to_owned(),
+            }]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn words_that_merely_contain_sk_are_not_redacted() -> TestResult {
+        let mut conversation = ready()?;
+        conversation.user_message("hi".to_owned())?;
+        let message =
+            "a risk-free task-runner failed; masked key sk-ab**********cd at the end: sk-x";
+
+        let output = receive(
+            &mut conversation,
+            &turn_completed(
+                "failed",
+                &json!({"message": message, "codexErrorInfo": null, "additionalDetails": null}),
+            ),
+        )?;
+
+        assert_eq!(
+            output.events,
+            vec![AgentEvent::TurnFailed {
+                reason:
+                    "a risk-free task-runner failed; masked key [redacted] at the end: [redacted]"
+                        .to_owned(),
+            }]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn the_error_notification_before_a_failed_turn_adds_no_event() -> TestResult {
+        let mut conversation = ready()?;
+        conversation.user_message("hi".to_owned())?;
+
+        // Codex sends `error` first, then `turn/completed` with the same
+        // error; retried errors come as `error` with `willRetry` only.
+        for will_retry in [true, false] {
+            let output = receive(
+                &mut conversation,
+                &json!({"method": "error", "params": {
+                    "error": {"message": "boom", "codexErrorInfo": null, "additionalDetails": null},
+                    "willRetry": will_retry, "threadId": "t1", "turnId": "u1",
+                }}),
+            )?;
+            assert_eq!(output.events, vec![]);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_message_during_a_failed_turn_starts_the_next_turn() -> TestResult {
+        let mut conversation = ready()?;
+        conversation.user_message("one".to_owned())?;
+        conversation.user_message("two".to_owned())?;
+
+        let output = receive(
+            &mut conversation,
+            &turn_completed(
+                "failed",
+                &json!({"message": "boom", "codexErrorInfo": null, "additionalDetails": null}),
+            ),
+        )?;
+
+        let next = lines(&output)?;
+        assert_eq!(next.len(), 1);
+        assert_eq!(next[0]["method"], "turn/start");
+        assert_eq!(next[0]["params"]["input"][0]["text"], "two");
         Ok(())
     }
 

@@ -11,7 +11,11 @@ import type {
   ChatOverview,
   PermissionMode,
   Question,
+  ChatStatus,
+  Checkout,
+  RepositoryId,
   RepositoryOverview,
+  RepositoryScript,
   TranscriptEntry,
 } from "./protocol";
 import * as service from "./service";
@@ -88,8 +92,30 @@ async function refresh(): Promise<void> {
   ]);
   if (read !== readCount) return;
   renderSidebar(repositories, chats);
-  const repository = chats.find((overview) => overview.chat === chat)?.repository;
-  renderChat(view, repositories.find((overview) => overview.repository === repository) ?? null);
+  const overview = chats.find((candidate) => candidate.chat === chat) ?? null;
+  renderChat(
+    view,
+    overview,
+    repositories.find((candidate) => candidate.repository === overview?.repository) ?? null,
+  );
+}
+
+const STATUS_LABELS: Record<ChatStatus, string> = {
+  working: "working",
+  waiting_for_you: "waiting for you",
+  done: "done",
+};
+
+const SCRIPT_NAMES: Record<RepositoryScript, string> = {
+  setup: "Setup script",
+  done: "Done script",
+};
+
+/** Starts a chat, selects it and puts the cursor in the composer. */
+async function startAndSelect(repository: RepositoryId, checkout?: Checkout): Promise<void> {
+  selectedChat = await service.startChat(repository, checkout);
+  await refresh();
+  messageInput.focus();
 }
 
 function renderSidebar(repositories: RepositoryOverview[], chats: ChatOverview[]): void {
@@ -104,27 +130,29 @@ function renderSidebar(repositories: RepositoryOverview[], chats: ChatOverview[]
     name.title = repository.path;
     const newChat = el("button", "new-chat", "New chat");
     newChat.type = "button";
-    newChat.title = `Start a chat in ${repository.name}`;
-    newChat.addEventListener("click", () =>
-      act(async () => {
-        selectedChat = await service.startChat(repository.repository);
-        await refresh();
-        messageInput.focus();
-      }),
+    newChat.title = `Start a chat in a new worktree of ${repository.name}`;
+    newChat.addEventListener("click", () => act(() => startAndSelect(repository.repository)));
+    const inMain = el("button", "new-chat secondary", "Main");
+    inMain.type = "button";
+    inMain.title = `Start a chat in the main checkout of ${repository.name}`;
+    inMain.addEventListener("click", () =>
+      act(() => startAndSelect(repository.repository, { type: "main" })),
     );
-    header.append(name, newChat);
+    const actions = el("span", "repository-actions");
+    actions.append(newChat, inMain);
+    header.append(name, actions);
 
     const chatList = el("ul", "chat-list");
+    // The service lists waiting chats first, then working, then done ones.
     for (const chat of chats.filter((overview) => overview.repository === repository.repository)) {
       const chatItem = el("li");
-      const button = el("button", "chat-link");
+      const button = el("button", `chat-link ${chat.status}`);
       button.type = "button";
-      button.append(el("span", "chat-title", chat.title ?? "New chat"));
-      if (chat.status === "working") {
-        button.append(el("span", "chat-status", "working"));
-      } else if (chat.status === "waiting") {
-        button.append(el("span", "chat-status waiting", "waiting for you"));
-      }
+      button.title = chat.worktree === null ? "Main checkout" : `Worktree: ${chat.worktree}`;
+      button.append(
+        el("span", "chat-title", chat.title ?? "New chat"),
+        el("span", `chat-status ${chat.status}`, STATUS_LABELS[chat.status]),
+      );
       if (chat.chat === selectedChat) {
         button.classList.add("selected");
         button.setAttribute("aria-current", "true");
@@ -144,8 +172,12 @@ function renderSidebar(repositories: RepositoryOverview[], chats: ChatOverview[]
   repositoriesNav.replaceChildren(list);
 }
 
-function renderChat(view: ChatView | null, repository: RepositoryOverview | null): void {
-  if (view === null || selectedChat === null) {
+function renderChat(
+  view: ChatView | null,
+  overview: ChatOverview | null,
+  repository: RepositoryOverview | null,
+): void {
+  if (view === null || overview === null) {
     selectedWorking = false;
     selectedOpenRequests = [];
     topBar.replaceChildren(el("span", "muted", "No chat selected"));
@@ -153,11 +185,13 @@ function renderChat(view: ChatView | null, repository: RepositoryOverview | null
     composer.hidden = true;
     return;
   }
-  const chat = selectedChat;
+  const chat = overview.chat;
   topBar.replaceChildren(
     labelled("Repository", repository?.name ?? "unknown"),
     labelled("Branch", branchName(view.branch)),
-    permissionModePicker(chat, view),
+    labelled("Checkout", overview.worktree === null ? "main checkout" : "worktree"),
+    permissionModePicker(overview.chat, view),
+    ...chatActions(overview),
   );
   const context: ChatContext = { chat, open: new Set(view.openRequests), answers: new Map() };
   for (const entry of view.transcript) {
@@ -170,8 +204,9 @@ function renderChat(view: ChatView | null, repository: RepositoryOverview | null
   const atBottom = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 40;
   transcript.replaceChildren(...entries);
   if (atBottom) transcript.scrollTop = transcript.scrollHeight;
-  selectedWorking = view.status !== "idle";
   selectedOpenRequests = view.openRequests;
+  // A turn that waits for an answer still runs and can be interrupted.
+  selectedWorking = view.status === "working" || selectedOpenRequests.length > 0;
   // A text reply to a waiting chat declines its oldest request with feedback.
   sendButton.textContent =
     selectedOpenRequests.length > 0 ? "Reply" : selectedWorking ? "Queue" : "Send";
@@ -209,6 +244,32 @@ function permissionModePicker(chat: ChatId, view: ChatView): HTMLElement {
   return item;
 }
 
+/** The top bar's buttons for the selected chat. */
+function chatActions(overview: ChatOverview): HTMLElement[] {
+  const actions: HTMLElement[] = [];
+  if (overview.worktree !== null) {
+    const sameWorktree = el("button", "top-bar-action", "New chat in this worktree");
+    sameWorktree.type = "button";
+    sameWorktree.title = overview.worktree;
+    sameWorktree.addEventListener("click", () =>
+      act(() => startAndSelect(overview.repository, { type: "worktree", chat: overview.chat })),
+    );
+    actions.push(sameWorktree);
+  }
+  if (overview.status === "waiting_for_you") {
+    const done = el("button", "top-bar-action", "Mark done");
+    done.type = "button";
+    done.addEventListener("click", () =>
+      act(async () => {
+        await service.markChatDone(overview.chat);
+        await refresh();
+      }),
+    );
+    actions.push(done);
+  }
+  return actions;
+}
+
 function labelled(label: string, value: string): HTMLElement {
   const item = el("span", "top-bar-item");
   item.append(el("span", "top-bar-label", label), el("span", "top-bar-value", value));
@@ -238,6 +299,13 @@ function renderEntry(entry: TranscriptEntry, context: ChatContext): HTMLElement 
       return null;
     case "agent":
       return renderAgentEvent(entry.event, AGENT_CLI_NAMES[entry.agent_cli], context);
+    case "script_finished": {
+      const exit = entry.exit_code === null ? "did not finish" : `exit ${entry.exit_code}`;
+      const item = el("li", "entry tool-result script");
+      if (entry.exit_code !== 0) item.classList.add("failed");
+      item.append(output(`${SCRIPT_NAMES[entry.script]} · ${exit}`, entry.output));
+      return item;
+    }
   }
 }
 
@@ -390,6 +458,11 @@ function renderAgentEvent(event: AgentEvent, agentCli: string, context: ChatCont
       return el("li", "turn-ended", "Turn ended");
     case "turn_interrupted":
       return el("li", "turn-ended", "Turn interrupted");
+    case "turn_failed": {
+      const item = el("li", "entry notice failed");
+      item.append(el("div", "entry-label", "Turn failed"), el("div", "entry-text", event.reason));
+      return item;
+    }
     case "session_ended":
       return el("li", "entry notice", "The agent session ended.");
   }
@@ -411,13 +484,13 @@ async function send(): Promise<void> {
     await act(async () => {
       const waitingFor = selectedOpenRequests[0];
       // A reply to a waiting chat declines its oldest request with the
-      // text as feedback; while a turn runs, a message waits for it to end.
+      // text as feedback. Otherwise the message is sent at once when no
+      // turn runs, or waits for the turn, or the worktree's setup script,
+      // to end.
       if (waitingFor !== undefined) {
         await service.answerRequest(chat, waitingFor, { type: "decline", feedback: text });
-      } else if (selectedWorking) {
-        await service.queueMessage(chat, text);
       } else {
-        await service.sendMessage(chat, text);
+        await service.queueMessage(chat, text);
       }
       messageInput.value = "";
       await refresh();

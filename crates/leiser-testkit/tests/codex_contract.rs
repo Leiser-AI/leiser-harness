@@ -9,7 +9,8 @@
 //! cargo test -p leiser-testkit --test codex_contract -- --ignored
 //! ```
 //!
-//! `LEISER_CODEX` names the Codex program (default: `codex` on `PATH`).
+//! They run Codex as the desktop app finds it: the program `LEISER_CODEX`
+//! names, `codex` on `PATH`, or in common install directories.
 //! Approve covers approving a command and declining it with feedback.
 
 use std::error::Error;
@@ -46,7 +47,7 @@ const LONG_TURN: &str = "Write a 1500-word story about a lighthouse keeper. \
      Do not run commands, read files or use any tool.";
 
 fn codex() -> Arc<dyn Driver> {
-    Arc::new(std::env::var_os("LEISER_CODEX").map_or_else(CodexDriver::installed, CodexDriver::new))
+    Arc::new(CodexDriver::installed())
 }
 
 fn fake(script: &Script) -> TestResult<Arc<dyn Driver>> {

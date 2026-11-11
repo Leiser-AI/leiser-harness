@@ -28,7 +28,7 @@
 //! <https://code.claude.com/docs/en/agent-sdk/user-input>.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -37,9 +37,11 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, ChildStdout, Command};
 use tokio::sync::{mpsc, oneshot};
 
+use crate::installed::{self, Program};
 use crate::{
-    AgentEvent, AgentSession, AgentSessionId, Answer, Driver, DriverError, HARNESS_MCP_SERVER,
-    PermissionMode, Question, QuestionOption, SessionInput, SessionSpec, Version,
+    AgentEvent, AgentSession, AgentSessionId, Answer, Driver, DriverError, Environment,
+    HARNESS_MCP_SERVER, PermissionMode, Question, QuestionOption, SessionInput, SessionSpec,
+    Version,
 };
 
 const AGENT_CLI: &str = "Claude Code";
@@ -92,7 +94,7 @@ fn sandbox_settings() -> String {
 /// Starts agent sessions on the developer's installed Claude Code.
 #[derive(Debug, Clone)]
 pub struct ClaudeCodeDriver {
-    program: PathBuf,
+    program: Program,
 }
 
 impl ClaudeCodeDriver {
@@ -100,47 +102,60 @@ impl ClaudeCodeDriver {
     pub const MINIMUM_VERSION: Version = Version::new(2, 1, 259);
     const MINIMUM_VERSION_REASON: &str = "older versions have no `--permission-prompts` option";
 
+    /// The variable that names the Claude Code program to run.
+    pub const PROGRAM_VARIABLE: &str = installed::CLAUDE_CODE.variable;
+
     /// A driver that runs `program`, a path or a name looked up on `PATH`.
     #[must_use]
     pub fn new(program: impl Into<PathBuf>) -> Self {
         Self {
-            program: program.into(),
+            program: Program::Given(program.into()),
         }
     }
 
-    /// A driver that runs `claude` from `PATH`.
+    /// A driver that runs the developer's installed Claude Code, looked up
+    /// in the harness service's environment whenever an agent session
+    /// starts: the program [`Self::PROGRAM_VARIABLE`] names, `claude` on
+    /// `PATH`, in common install directories, or the newest copy the Claude
+    /// desktop app bundles.
     #[must_use]
     pub fn installed() -> Self {
-        Self::new("claude")
+        Self::installed_in(Environment::current())
+    }
+
+    /// Like [`Self::installed`], looked up in `environment`.
+    #[must_use]
+    pub fn installed_in(environment: Environment) -> Self {
+        Self {
+            program: Program::Installed {
+                install: &installed::CLAUDE_CODE,
+                environment,
+            },
+        }
+    }
+
+    /// The Claude Code program an agent session would start now.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DriverError::NotInstalled`] when the driver finds none.
+    pub fn program(&self) -> Result<PathBuf, DriverError> {
+        self.program.resolve()
     }
 
     /// Asks the program for its version.
     ///
     /// # Errors
     ///
-    /// Returns [`DriverError::Spawn`] when the program cannot run and
+    /// Returns [`DriverError::NotInstalled`] when there is no program,
+    /// [`DriverError::Spawn`] when it cannot run and
     /// [`DriverError::UnreadableVersion`] when its answer is not a version.
     pub fn version(&self) -> Result<Version, DriverError> {
-        let output = std::process::Command::new(&self.program)
-            .arg("--version")
-            .stdin(Stdio::null())
-            .stderr(Stdio::null())
-            .output()
-            .map_err(DriverError::Spawn)?;
-        let text = String::from_utf8_lossy(&output.stdout);
-        // Claude Code answers `2.1.321 (Claude Code)`.
-        text.split_whitespace()
-            .next()
-            .and_then(Version::parse)
-            .filter(|_| output.status.success())
-            .ok_or_else(|| DriverError::UnreadableVersion {
-                agent_cli: AGENT_CLI,
-                output: text.trim().to_owned(),
-            })
+        version_of(&self.program()?)
     }
 
-    fn check_version(&self) -> Result<(), DriverError> {
-        let found = self.version()?;
+    fn check_version(program: &Path) -> Result<(), DriverError> {
+        let found = version_of(program)?;
         if found < Self::MINIMUM_VERSION {
             return Err(DriverError::UnsupportedVersion {
                 agent_cli: AGENT_CLI,
@@ -151,6 +166,30 @@ impl ClaudeCodeDriver {
         }
         Ok(())
     }
+}
+
+/// Asks `program` for its version.
+fn version_of(program: &Path) -> Result<Version, DriverError> {
+    let mut command = std::process::Command::new(program);
+    if let Some(path) = installed::path_for(program) {
+        command.env("PATH", path);
+    }
+    let output = command
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .map_err(DriverError::Spawn)?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    // Claude Code answers `2.1.321 (Claude Code)`.
+    text.split_whitespace()
+        .next()
+        .and_then(Version::parse)
+        .filter(|_| output.status.success())
+        .ok_or_else(|| DriverError::UnreadableVersion {
+            agent_cli: AGENT_CLI,
+            output: text.trim().to_owned(),
+        })
 }
 
 impl Driver for ClaudeCodeDriver {
@@ -181,9 +220,14 @@ impl ClaudeCodeDriver {
         spec: &SessionSpec,
         resume: Option<&AgentSessionId>,
     ) -> Result<AgentSession, DriverError> {
-        self.check_version()?;
-        let mut child = Command::new(&self.program)
-            .args(arguments(spec, resume))
+        let program = self.program()?;
+        Self::check_version(&program)?;
+        let mut command = Command::new(&program);
+        if let Some(path) = installed::path_for(&program) {
+            command.env("PATH", path);
+        }
+        command.args(arguments(spec, resume));
+        let mut child = command
             .current_dir(&spec.working_directory)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

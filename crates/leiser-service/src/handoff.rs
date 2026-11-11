@@ -80,10 +80,14 @@ fn quoted(transcript: &[TranscriptEntry]) -> Vec<Quoted<'_>> {
                     | AgentEvent::UsageLimitReached { .. }
                     | AgentEvent::TurnEnded
                     | AgentEvent::TurnInterrupted
+                    | AgentEvent::TurnFailed { .. }
                     | AgentEvent::SessionEnded => return None,
                 },
-                // The agent session that asked has its answer already.
-                TranscriptEntry::Answer { .. } => return None,
+                // The agent session that asked has its answer already, and
+                // the harness's own scripts were not the agent's doing.
+                TranscriptEntry::Answer { .. } | TranscriptEntry::ScriptFinished { .. } => {
+                    return None;
+                }
             };
             Some((index, entry))
         })

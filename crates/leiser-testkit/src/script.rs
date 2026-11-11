@@ -6,8 +6,9 @@ use leiser_service::{AgentEvent, Answer, PermissionMode, Question};
 use serde::{Deserialize, Serialize};
 
 /// The turns the fake agent CLI plays back, one per message it receives.
-/// Every turn ends with [`AgentEvent::TurnEnded`], or with
-/// [`AgentEvent::TurnInterrupted`] when it is interrupted; a message after
+/// Every turn ends with [`AgentEvent::TurnEnded`], with
+/// [`AgentEvent::TurnInterrupted`] when it is interrupted, or with
+/// [`AgentEvent::TurnFailed`] at [`Step::FailTurn`]; a message after
 /// the last turn gets an empty turn. A resumed agent session continues
 /// with the turn after the last one it played.
 ///
@@ -64,6 +65,12 @@ pub enum Step {
     EchoUserMessage,
     /// Answers with the directory the fake agent CLI runs in.
     ReportWorkingDirectory,
+    /// Writes the text of the message it received to `path`, relative to
+    /// the directory it runs in, as an agent editing a file would.
+    WriteUserMessageToFile { path: PathBuf },
+    /// Answers with the contents of the file at `path`, relative to the
+    /// directory it runs in, or with `missing` when there is none.
+    ReportFile { path: PathBuf },
     /// Waits for a steered message, unless one already came this turn;
     /// [`Step::EchoSteer`] can answer it.
     WaitForSteer,
@@ -81,6 +88,10 @@ pub enum Step {
         name: String,
         arguments: serde_json::Value,
     },
+    /// Ends the turn with [`AgentEvent::TurnFailed`], as an agent CLI
+    /// whose model request failed would. Later steps of the turn are not
+    /// played.
+    FailTurn { reason: String },
     /// Ends the agent session once this turn has ended and forgets it, as
     /// an agent CLI whose session expired would: resuming it fails.
     ForgetSession,

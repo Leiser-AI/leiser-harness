@@ -423,9 +423,9 @@ async fn an_approval_request_makes_the_chat_wait() -> TestResult {
     let request = setup.approval_request(chat, "Run `cargo test`").await?;
 
     let permissions = setup.permissions(chat).await?;
-    assert_eq!(permissions.status, ChatStatus::Waiting);
+    assert_eq!(permissions.status, ChatStatus::WaitingForYou);
     assert_eq!(permissions.open_requests, [request]);
-    assert_eq!(setup.status_in_list(chat).await?, ChatStatus::Waiting);
+    assert_eq!(setup.status_in_list(chat).await?, ChatStatus::WaitingForYou);
     Ok(())
 }
 
@@ -441,7 +441,7 @@ async fn approving_reaches_the_agent() -> TestResult {
     assert_eq!(response, Response::RequestAnswered);
     assert_eq!(messages(&setup.turn(chat).await?), ["approved"]);
     let permissions = setup.permissions(chat).await?;
-    assert_eq!(permissions.status, ChatStatus::Idle);
+    assert_eq!(permissions.status, ChatStatus::WaitingForYou);
     assert_eq!(permissions.open_requests, Vec::<String>::new());
     assert!(
         setup
@@ -529,7 +529,10 @@ async fn agent_questions_wait_for_the_developers_answers() -> TestResult {
         return Err("expected a question".into());
     };
     assert_eq!(questions, [question()]);
-    assert_eq!(setup.permissions(chat).await?.status, ChatStatus::Waiting);
+    assert_eq!(
+        setup.permissions(chat).await?.status,
+        ChatStatus::WaitingForYou
+    );
 
     let answers = BTreeMap::from([("runner".to_owned(), vec!["cargo nextest".to_owned()])]);
     setup
@@ -648,7 +651,7 @@ async fn an_interrupted_turn_no_longer_waits() -> TestResult {
         Some(&AgentEvent::TurnInterrupted)
     );
     let permissions = setup.permissions(chat).await?;
-    assert_eq!(permissions.status, ChatStatus::Idle);
+    assert_eq!(permissions.status, ChatStatus::WaitingForYou);
     assert_eq!(permissions.open_requests, Vec::<String>::new());
     let late = setup.answer(chat, &request, Answer::Approve).await;
     assert_eq!(late, Err(CommandError::UnknownRequest { chat, request }));

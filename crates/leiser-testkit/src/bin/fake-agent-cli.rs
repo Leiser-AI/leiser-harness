@@ -218,6 +218,9 @@ fn run() -> Result<(), FakeError> {
                 match outcome {
                     Outcome::Ended => emit(&mut out, &AgentEvent::TurnEnded)?,
                     Outcome::Interrupted => emit(&mut out, &AgentEvent::TurnInterrupted)?,
+                    Outcome::Failed { reason } => {
+                        emit(&mut out, &AgentEvent::TurnFailed { reason })?;
+                    }
                     Outcome::InputClosed => return Ok(()),
                 }
                 if forget_session {
@@ -255,6 +258,7 @@ fn read_inputs() -> Receiver<Result<FakeInput, FakeError>> {
 enum Outcome {
     Ended,
     Interrupted,
+    Failed { reason: String },
     InputClosed,
 }
 
@@ -305,6 +309,17 @@ impl<W: Write> Turn<'_, W> {
             Step::ReportWorkingDirectory => AgentEvent::Message {
                 text: std::env::current_dir()?.display().to_string(),
             },
+            Step::WriteUserMessageToFile { path } => {
+                std::fs::write(path, &self.message)?;
+                return Ok(None);
+            }
+            Step::ReportFile { path } => AgentEvent::Message {
+                text: match std::fs::read_to_string(path) {
+                    Ok(contents) => contents,
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => "missing".to_owned(),
+                    Err(error) => return Err(error.into()),
+                },
+            },
             Step::EchoSteer => AgentEvent::Message {
                 text: self.steer.clone().ok_or(FakeError::NoSteer)?,
             },
@@ -320,6 +335,7 @@ impl<W: Write> Turn<'_, W> {
                     text: format!("{prefix}{}", output.text),
                 }
             }
+            Step::FailTurn { reason } => return Ok(Some(Outcome::Failed { reason })),
             Step::ForgetSession => {
                 self.forget_session = true;
                 return Ok(None);

@@ -17,11 +17,14 @@ mod driver;
 mod git;
 mod handoff;
 mod harness_mcp;
+mod installed;
 mod protocol;
-mod repository_config;
+mod repo_config;
+mod script;
 mod service;
 mod store;
 mod version;
+mod worktree;
 
 pub use claude_code::ClaudeCodeDriver;
 pub use codex::CodexDriver;
@@ -30,10 +33,11 @@ pub use driver::{
     SessionSpec,
 };
 pub use harness_mcp::HarnessMcpError;
+pub use installed::Environment;
 pub use protocol::{
     AgentCli, AgentEvent, Answer, Branch, ChatId, ChatOverview, ChatStatus, Checkout, Command,
     CommandError, Event, PermissionMode, Question, QuestionOption, QueueReason, RepositoryId,
-    RepositoryOverview, Response, TranscriptEntry,
+    RepositoryOverview, RepositoryScript, Response, TranscriptEntry,
 };
 pub use service::{Service, ServiceConfig, ServiceHandle, StartError, start};
 pub use store::StorageError;
