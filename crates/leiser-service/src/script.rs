@@ -1,6 +1,6 @@
 //! Running a repository's setup and done scripts.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 use tokio::process::Command;
@@ -17,19 +17,23 @@ pub(crate) struct Finished {
     pub output: String,
 }
 
-/// Runs `script` with the platform's shell in `worktree`. It finds the
-/// worktree in `LEISER_WORKTREE` and the main checkout in
-/// `LEISER_REPOSITORY`, for example to copy files that git ignores.
+/// Runs `script` with `sh -c` in `worktree`, on Windows with the `sh` of
+/// Git for Windows, so one script in `.leiser/config.toml` serves every
+/// platform. It finds the worktree in `LEISER_WORKTREE` and the main
+/// checkout in `LEISER_REPOSITORY`, for example to copy files that git
+/// ignores.
 pub(crate) async fn run(script: &str, worktree: &Path, repository: &Path) -> Finished {
-    let mut command = if cfg!(windows) {
-        let mut command = Command::new("cmd");
-        command.arg("/C").arg(script);
-        command
-    } else {
-        let mut command = Command::new("sh");
-        command.arg("-c").arg(script);
-        command
+    let shell = match shell(worktree).await {
+        Ok(shell) => shell,
+        Err(reason) => {
+            return Finished {
+                exit_code: None,
+                output: reason,
+            };
+        }
     };
+    let mut command = Command::new(shell);
+    command.arg("-c").arg(script);
     let output = command
         .current_dir(worktree)
         .env("LEISER_WORKTREE", worktree)
@@ -52,6 +56,34 @@ pub(crate) async fn run(script: &str, worktree: &Path, repository: &Path) -> Fin
             output: format!("could not start the script: {error}"),
         },
     }
+}
+
+/// The `sh` that runs scripts. On Windows it comes with Git for Windows,
+/// which the harness needs anyway: `bin/sh.exe` (which sets up the `PATH`
+/// for the shell's tools) or `usr/bin/sh.exe` in an ancestor of git's
+/// exec path, such as `C:/Program Files/Git/mingw64/libexec/git-core`.
+async fn shell(worktree: &Path) -> Result<PathBuf, String> {
+    if !cfg!(windows) {
+        return Ok(PathBuf::from("sh"));
+    }
+    let exec_path = crate::git::run(worktree, &["--exec-path"])
+        .await
+        .map_err(|error| format!("could not find the sh of Git for Windows: {error}"))?;
+    Path::new(&exec_path)
+        .ancestors()
+        .flat_map(|dir| {
+            [
+                dir.join("bin").join("sh.exe"),
+                dir.join("usr").join("bin").join("sh.exe"),
+            ]
+        })
+        .find(|candidate| candidate.is_file())
+        .ok_or_else(|| {
+            format!(
+                "found no sh.exe of Git for Windows near {exec_path}; \
+                 the repository's scripts run with it"
+            )
+        })
 }
 
 /// The last [`MAX_OUTPUT_BYTES`] of `text`, at a character boundary.

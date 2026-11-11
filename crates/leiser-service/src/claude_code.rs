@@ -23,7 +23,7 @@
 //! how Claude Code ends turns when a message arrives mid-turn.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -32,7 +32,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, ChildStdout, Command};
 use tokio::sync::{mpsc, oneshot};
 
-use crate::installed::{self, Program};
+use crate::installed::{self, Found, Program};
 use crate::{
     AgentCli, AgentEvent, AgentSession, AgentSessionId, Driver, DriverError, Environment,
     HARNESS_MCP_SERVER, LoginProcess, SessionInput, SessionSpec, SubscriptionAccess, Version,
@@ -106,7 +106,7 @@ impl ClaudeCodeDriver {
     ///
     /// Returns [`DriverError::NotInstalled`] when the driver finds none.
     pub fn program(&self) -> Result<PathBuf, DriverError> {
-        self.program.resolve()
+        Ok(self.program.resolve()?.program)
     }
 
     /// Asks the program for its version.
@@ -117,10 +117,10 @@ impl ClaudeCodeDriver {
     /// [`DriverError::Spawn`] when it cannot run and
     /// [`DriverError::UnreadableVersion`] when its answer is not a version.
     pub fn version(&self) -> Result<Version, DriverError> {
-        version_of(&self.program()?)
+        version_of(&self.program.resolve()?)
     }
 
-    fn check_version(program: &Path) -> Result<(), DriverError> {
+    fn check_version(program: &Found) -> Result<(), DriverError> {
         let found = version_of(program)?;
         if found < Self::MINIMUM_VERSION {
             return Err(DriverError::UnsupportedVersion {
@@ -135,12 +135,9 @@ impl ClaudeCodeDriver {
 }
 
 /// Asks `program` for its version.
-fn version_of(program: &Path) -> Result<Version, DriverError> {
-    let mut command = std::process::Command::new(program);
-    if let Some(path) = installed::path_for(program) {
-        command.env("PATH", path);
-    }
-    let output = command
+fn version_of(program: &Found) -> Result<Version, DriverError> {
+    let output = program
+        .command()
         .arg("--version")
         .stdin(Stdio::null())
         .stderr(Stdio::null())
@@ -176,12 +173,9 @@ impl Driver for ClaudeCodeDriver {
 
     /// Runs `claude auth login` with the subscription's config directory.
     fn login(&self, access: &SubscriptionAccess) -> Result<LoginProcess, DriverError> {
-        let program = self.program()?;
+        let program = self.program.resolve()?;
         Self::check_version(&program)?;
-        let mut command = Command::new(&program);
-        if let Some(path) = installed::path_for(&program) {
-            command.env("PATH", path);
-        }
+        let mut command = Command::from(program.command());
         command.args(["auth", "login"]);
         access.environment(AgentCli::ClaudeCode).apply(&mut command);
         LoginProcess::spawn(command)
@@ -194,9 +188,9 @@ impl ClaudeCodeDriver {
         spec: &SessionSpec,
         resume: Option<&AgentSessionId>,
     ) -> Result<AgentSession, DriverError> {
-        let program = self.program()?;
+        let program = self.program.resolve()?;
         Self::check_version(&program)?;
-        let mut command = session_command(&program, spec, resume);
+        let mut command = session_command(Command::from(program.command()), spec, resume);
         let mut child = command
             .current_dir(&spec.working_directory)
             .stdin(Stdio::piped())
@@ -226,11 +220,12 @@ impl ClaudeCodeDriver {
 
 /// The command that runs an agent session on `program`, without its
 /// streams.
-fn session_command(program: &Path, spec: &SessionSpec, resume: Option<&AgentSessionId>) -> Command {
-    let mut command = Command::new(program);
-    if let Some(path) = installed::path_for(program) {
-        command.env("PATH", path);
-    }
+/// `command`, which runs the program, set up for an agent session.
+fn session_command(
+    mut command: Command,
+    spec: &SessionSpec,
+    resume: Option<&AgentSessionId>,
+) -> Command {
     command.args(ARGUMENTS);
     // Both options take several values; each is followed by another
     // option or ends the arguments.
@@ -680,7 +675,9 @@ impl RateLimitInfo {
 #[cfg(test)]
 mod tests {
     use std::ffi::OsStr;
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
+
+    use tokio::process::Command;
 
     use super::{ControlRequest, InputLine, OutputLine, Parser, session_command, session_id};
     use crate::{AgentEvent, AgentSessionId, ApiKey, SessionSpec, SubscriptionAccess};
@@ -695,7 +692,7 @@ mod tests {
 
     /// The variables the command sets (`Some`) or removes (`None`).
     fn environment(spec: &SessionSpec) -> Vec<(String, Option<String>)> {
-        let command = session_command(Path::new("claude"), spec, None);
+        let command = session_command(Command::new("claude"), spec, None);
         let mut environment: Vec<_> = command
             .as_std()
             .get_envs()
@@ -737,7 +734,7 @@ mod tests {
             home: PathBuf::from("/data/subscriptions/2/claude"),
             api_key: Some(ApiKey::new("sk-ant-test")),
         }));
-        let command = session_command(Path::new("claude"), &spec, None);
+        let command = session_command(Command::new("claude"), &spec, None);
 
         let key = command
             .as_std()

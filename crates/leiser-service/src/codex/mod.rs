@@ -16,7 +16,7 @@
 mod conversation;
 mod wire;
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -25,7 +25,7 @@ use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::{mpsc, oneshot};
 
 use self::conversation::{Conversation, Output, ProtocolError};
-use crate::installed::{self, Program};
+use crate::installed::{self, Found, Program};
 use crate::{
     AgentCli, AgentEvent, AgentSession, AgentSessionId, Driver, DriverError, Environment,
     HARNESS_MCP_SERVER, LoginProcess, OPENAI_API_KEY, SessionInput, SessionSpec,
@@ -95,7 +95,7 @@ impl CodexDriver {
     ///
     /// Returns [`DriverError::NotInstalled`] when the driver finds none.
     pub fn program(&self) -> Result<PathBuf, DriverError> {
-        self.program.resolve()
+        Ok(self.program.resolve()?.program)
     }
 
     /// Asks the program for its version.
@@ -106,10 +106,10 @@ impl CodexDriver {
     /// [`DriverError::Spawn`] when it cannot run and
     /// [`DriverError::UnreadableVersion`] when its answer is not a version.
     pub fn version(&self) -> Result<Version, DriverError> {
-        version_of(&self.program()?)
+        version_of(&self.program.resolve()?)
     }
 
-    fn check_version(program: &Path) -> Result<(), DriverError> {
+    fn check_version(program: &Found) -> Result<(), DriverError> {
         let found = version_of(program)?;
         if found < Self::MINIMUM_VERSION {
             return Err(DriverError::UnsupportedVersion {
@@ -124,12 +124,9 @@ impl CodexDriver {
 }
 
 /// Asks `program` for its version.
-fn version_of(program: &Path) -> Result<Version, DriverError> {
-    let mut command = std::process::Command::new(program);
-    if let Some(path) = installed::path_for(program) {
-        command.env("PATH", path);
-    }
-    let output = command
+fn version_of(program: &Found) -> Result<Version, DriverError> {
+    let output = program
+        .command()
         .arg("--version")
         .stdin(Stdio::null())
         .stderr(Stdio::null())
@@ -174,12 +171,9 @@ impl Driver for CodexDriver {
 
     /// Runs `codex login` in the subscription's shadow home.
     fn login(&self, access: &SubscriptionAccess) -> Result<LoginProcess, DriverError> {
-        let program = self.program()?;
+        let program = self.program.resolve()?;
         Self::check_version(&program)?;
-        let mut command = Command::new(&program);
-        if let Some(path) = installed::path_for(&program) {
-            command.env("PATH", path);
-        }
+        let mut command = Command::from(program.command());
         command.arg("-c").arg(FILE_CREDENTIAL_STORE).arg("login");
         access.environment(AgentCli::Codex).apply(&mut command);
         LoginProcess::spawn(command)
@@ -208,7 +202,7 @@ impl CodexDriver {
         spec: &SessionSpec,
         resume: Option<String>,
     ) -> Result<AgentSession, DriverError> {
-        let program = self.program()?;
+        let program = self.program.resolve()?;
         Self::check_version(&program)?;
         let working_directory = spec
             .working_directory
@@ -220,7 +214,7 @@ impl CodexDriver {
                 ))
             })?
             .to_owned();
-        let mut child = session_command(&program, spec)
+        let mut child = session_command(Command::from(program.command()), spec)
             .current_dir(&spec.working_directory)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -259,11 +253,8 @@ impl CodexDriver {
 
 /// The command that runs `codex app-server` for an agent session, without
 /// its streams.
-fn session_command(program: &Path, spec: &SessionSpec) -> Command {
-    let mut command = Command::new(program);
-    if let Some(path) = installed::path_for(program) {
-        command.env("PATH", path);
-    }
+/// `command`, which runs the program, set up for an agent session.
+fn session_command(mut command: Command, spec: &SessionSpec) -> Command {
     command.arg("-c").arg(format!(
         "mcp_servers.{HARNESS_MCP_SERVER}.url={}",
         toml_string(&spec.harness_mcp_url)
@@ -379,7 +370,9 @@ fn unix_now() -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
+
+    use tokio::process::Command;
 
     use super::session_command;
     use crate::{ApiKey, SessionSpec, SubscriptionAccess};
@@ -393,7 +386,7 @@ mod tests {
                 api_key,
             }),
         };
-        session_command(Path::new("codex"), &spec)
+        session_command(Command::new("codex"), &spec)
             .as_std()
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
