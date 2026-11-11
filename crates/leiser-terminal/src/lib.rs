@@ -22,6 +22,10 @@ use std::time::Duration;
 
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize};
 
+use crate::startup::StartupQuery;
+
+mod startup;
+
 /// How often a terminal checks whether its shell has exited.
 const EXIT_POLL: Duration = Duration::from_millis(50);
 /// How long a terminal waits for the output of an exited shell before it
@@ -77,11 +81,14 @@ pub enum TerminalError {
 /// threads and should not block.
 pub type EventHandler = dyn Fn(TerminalEvent) + Send + Sync;
 
+/// The pseudo terminal's input; `None` once the terminal is closed.
+type Input = Arc<Mutex<Option<Box<dyn Write + Send>>>>;
+
 /// A shell running in a pseudo terminal. Dropping it ends the shell and
 /// the programs it runs.
 pub struct Terminal {
     master: Option<Box<dyn MasterPty + Send>>,
-    writer: Mutex<Option<Box<dyn Write + Send>>>,
+    writer: Input,
     child: Arc<Mutex<Box<dyn Child + Send + Sync>>>,
     process_id: Option<u32>,
 }
@@ -134,15 +141,19 @@ impl Terminal {
         let writer = pair.master.take_writer().map_err(open_error)?;
         let terminal = Self {
             master: Some(pair.master),
-            writer: Mutex::new(Some(writer)),
+            writer: Arc::new(Mutex::new(Some(writer))),
             child: Arc::new(Mutex::new(child)),
             process_id,
         };
         let on_event: Arc<EventHandler> = Arc::new(on_event);
         let (output_ended, output_end) = mpsc::channel();
+        // Only `ConPTY` waits for an answer before it starts the shell; on
+        // Unix a shell's own cursor queries are for the receiver to answer.
+        let startup =
+            cfg!(windows).then(|| (StartupQuery::default(), Arc::clone(&terminal.writer)));
         spawn("terminal-output", {
             let on_event = Arc::clone(&on_event);
-            move || forward_output(reader, &*on_event, &output_ended)
+            move || forward_output(reader, startup, &*on_event, &output_ended)
         });
         spawn("terminal-exit", {
             let child = Arc::clone(&terminal.child);
@@ -158,17 +169,7 @@ impl Terminal {
     ///
     /// When the pseudo terminal no longer takes input.
     pub fn write(&self, input: &[u8]) -> Result<(), TerminalError> {
-        let mut writer = self.writer.lock().unwrap_or_else(PoisonError::into_inner);
-        let writer = writer.as_mut().ok_or_else(|| {
-            TerminalError::Write(io::Error::new(
-                io::ErrorKind::BrokenPipe,
-                "the terminal is closed",
-            ))
-        })?;
-        writer
-            .write_all(input)
-            .and_then(|()| writer.flush())
-            .map_err(TerminalError::Write)
+        write_input(&self.writer, input).map_err(TerminalError::Write)
     }
 
     /// Changes the terminal's size; programs in it are told to redraw.
@@ -188,6 +189,7 @@ impl Terminal {
     }
 
     /// The shell's process id, where the operating system reports one.
+    #[must_use]
     pub fn process_id(&self) -> Option<u32> {
         self.process_id
     }
@@ -213,6 +215,14 @@ impl Drop for Terminal {
         self.master.take();
         tracing::debug!(process_id = ?self.process_id, "terminal closed");
     }
+}
+
+fn write_input(writer: &Input, input: &[u8]) -> io::Result<()> {
+    let mut writer = writer.lock().unwrap_or_else(PoisonError::into_inner);
+    let writer = writer
+        .as_mut()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "the terminal is closed"))?;
+    writer.write_all(input).and_then(|()| writer.flush())
 }
 
 fn open_error(error: impl std::fmt::Display) -> TerminalError {
@@ -255,20 +265,43 @@ fn spawn(name: &str, work: impl FnOnce() + Send + 'static) {
     }
 }
 
-/// Passes output on until the pseudo terminal closes.
+/// Passes output on until the pseudo terminal closes. With `startup`, it
+/// first answers `ConPTY`'s cursor query (see [`startup`]).
 fn forward_output(
     mut reader: Box<dyn Read + Send>,
+    mut startup: Option<(StartupQuery, Input)>,
     on_event: &EventHandler,
     output_ended: &mpsc::Sender<()>,
 ) {
     let mut buffer = vec![0; READ_BUFFER];
     loop {
-        match reader.read(&mut buffer) {
+        let read = match reader.read(&mut buffer) {
             Ok(0) => break,
-            Ok(read) => on_event(TerminalEvent::Output(buffer[..read].to_vec())),
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Ok(read) => &buffer[..read],
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
             // On Linux reading a closed PTY fails instead of ending.
             Err(_) => break,
+        };
+        let output = match &mut startup {
+            Some((query, input)) => {
+                let filtered = query.filter(read);
+                if filtered.answer
+                    && let Err(error) = write_input(input, startup::REPLY)
+                {
+                    tracing::warn!(%error, "could not answer the terminal's cursor query");
+                }
+                filtered.output
+            }
+            None => read.to_vec(),
+        };
+        if !output.is_empty() {
+            on_event(TerminalEvent::Output(output));
+        }
+    }
+    if let Some((query, _)) = startup {
+        let held = query.finish();
+        if !held.is_empty() {
+            on_event(TerminalEvent::Output(held));
         }
     }
     let _ = output_ended.send(());
