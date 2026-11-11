@@ -9,10 +9,12 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 use crate::cli_extensions::{self, CliExtensionError};
+use crate::git_host::{GhGitHost, GitHost};
 use crate::handoff::{self, Handoff, ReadError};
 use crate::harness_mcp::{
     BranchNaming, ChatRead, HarnessCall, HarnessMcp, HarnessMcpError, TodoAnswer, TodoCall, Tools,
 };
+use crate::host_accounts::{self, Binding, HostAccountError, HostAccounts};
 use crate::keychain::KeychainError;
 use crate::repo_check::{self, Outcome};
 use crate::repo_config::RepositoryConfig;
@@ -25,10 +27,11 @@ use crate::todos::{TodoChange, TodoError, TodoList};
 use crate::worktree::{self, WorktreeError};
 use crate::{
     Access, AgentCli, AgentEvent, AgentSessionId, Answer, Branch, ChatId, ChatOverview, ChatStatus,
-    Checkout, Command, CommandError, Driver, Event, Keychain, LoginAnswer, LoginOutcome,
-    LoginProcess, OptOuts, OsKeychain, PermissionMode, Provider, QueueReason, RepoCheck,
-    RepositoryId, RepositoryOverview, RepositoryScript, Response, SessionInput, SessionSpec,
-    SignIn, SubscriptionAccess, SubscriptionId, SubscriptionKind, TodoId, TranscriptEntry, script,
+    Checkout, Command, CommandError, CommitAuthor, Driver, Event, HostAccountBinding,
+    HostAccountId, Keychain, LoginAnswer, LoginOutcome, LoginProcess, OptOuts, OsKeychain,
+    PermissionMode, Provider, QueueReason, RepoCheck, RepositoryId, RepositoryOverview,
+    RepositoryScript, Response, SessionInput, SessionSpec, SignIn, SubscriptionAccess,
+    SubscriptionId, SubscriptionKind, TodoId, TranscriptEntry, script,
 };
 
 /// Commands waiting for the command loop. Small, so callers feel back
@@ -58,6 +61,8 @@ pub struct ServiceConfig {
     keychain: Arc<dyn Keychain>,
     codex_home: Option<PathBuf>,
     repo_check: Option<Arc<dyn Driver>>,
+    /// `None` is the developer's installed `gh`.
+    git_host: Option<Arc<dyn GitHost>>,
 }
 
 impl ServiceConfig {
@@ -80,7 +85,16 @@ impl ServiceConfig {
             keychain: Arc::new(OsKeychain),
             codex_home: default_codex_home(),
             repo_check: None,
+            git_host: None,
         }
+    }
+
+    /// Signs host accounts in and checks pushes on `git_host` instead of
+    /// the developer's installed GitHub CLI `gh`.
+    #[must_use]
+    pub fn with_git_host(mut self, git_host: Arc<dyn GitHost>) -> Self {
+        self.git_host = Some(git_host);
+        self
     }
 
     /// Runs `repo-check` on `driver`, read-only: when a repository is
@@ -442,6 +456,10 @@ enum Background {
         repository: RepositoryId,
         outcome: Outcome,
     },
+    Pushed {
+        result: Result<Response, CommandError>,
+        reply: Reply,
+    },
 }
 
 /// A repository's `repo-check`, once it has run or runs.
@@ -508,6 +526,38 @@ struct Login {
 }
 
 impl Login {
+    /// Reports the login's output and end as events.
+    fn run(
+        process: LoginProcess,
+        events: broadcast::Sender<Event>,
+        output_event: impl Fn(String) -> Event + Send + 'static,
+        finished_event: impl FnOnce(LoginOutcome) -> Event + Send + 'static,
+    ) -> Self {
+        let LoginProcess {
+            mut output,
+            input,
+            outcome,
+        } = process;
+        let finished = Arc::new(AtomicBool::new(false));
+        let finished_flag = finished.clone();
+        let task = tokio::spawn(async move {
+            // No subscriber is not an error: the desktop app may be closed.
+            while let Some(text) = output.recv().await {
+                let _ = events.send(output_event(text));
+            }
+            let outcome = outcome.await.unwrap_or_else(|_| LoginOutcome::Failed {
+                reason: "the login stopped".to_owned(),
+            });
+            finished_flag.store(true, Ordering::SeqCst);
+            let _ = events.send(finished_event(outcome));
+        });
+        Self {
+            task,
+            input,
+            finished,
+        }
+    }
+
     fn running(&self) -> bool {
         !self.finished.load(Ordering::SeqCst)
     }
@@ -535,6 +585,9 @@ struct State {
     chats: BTreeMap<ChatId, Chat>,
     subscriptions: Subscriptions,
     logins: BTreeMap<SubscriptionId, Login>,
+    git_host: Arc<dyn GitHost>,
+    host_accounts: HostAccounts,
+    host_account_logins: BTreeMap<HostAccountId, Login>,
     next_id: u64,
     generation: u64,
     /// Counts status changes, so the sidebar can put the latest first.
@@ -563,69 +616,7 @@ impl State {
         let chats: BTreeMap<ChatId, Chat> = stored
             .chats
             .into_iter()
-            .map(|chat| {
-                // A todo list that cannot be read stops the start: an empty
-                // one would overwrite it on the next change.
-                let todos = TodoList::from_stored(store.todos(chat.id)?);
-                Ok((
-                    ChatId(chat.id),
-                    Chat {
-                        repository: RepositoryId(chat.repository),
-                        working_directory: chat.working_directory,
-                        place: if chat.worktree {
-                            Place::Worktree
-                        } else {
-                            Place::MainCheckout
-                        },
-                        done: chat.done,
-                        // A setup cut short by a restart is not run again.
-                        setup: Setup::Done,
-                        // No turn runs after a restart.
-                        shown: (
-                            if chat.done {
-                                ChatStatus::Done
-                            } else {
-                                ChatStatus::WaitingForYou
-                            },
-                            // Older data: newer chats first.
-                            if chat.status_changed == 0 {
-                                chat.id
-                            } else {
-                                chat.status_changed
-                            },
-                        ),
-                        title: stored_title(&store, chat.id),
-                        agent_cli: chat.agent_cli,
-                        agent_sessions: chat
-                            .agent_sessions
-                            .into_iter()
-                            .map(|session| {
-                                (
-                                    session.agent_cli,
-                                    Resumable {
-                                        id: AgentSessionId::new(session.id),
-                                        known: session.known,
-                                    },
-                                )
-                            })
-                            .collect(),
-                        handoff: chat.handoff.map(|handoff| match handoff {
-                            HandoffV2::NewSession => Handoff::NewSession,
-                            HandoffV2::Resume { known } => Handoff::Resume { known },
-                        }),
-                        permission_mode: chat.permission_mode,
-                        subscriptions: chat
-                            .subscriptions
-                            .into_iter()
-                            .map(|chosen| (chosen.provider, SubscriptionId(chosen.subscription)))
-                            .collect(),
-                        // Agent sessions did not survive the restart, so no
-                        // turn runs; resumed ones wait for the next message.
-                        session: None,
-                        todos,
-                    },
-                ))
-            })
+            .map(|chat| stored_chat(&store, chat))
             .collect::<Result<_, StorageError>>()?;
         let subscriptions = Subscriptions::load(
             stored.subscriptions,
@@ -633,6 +624,7 @@ impl State {
             config.codex_home,
             config.keychain,
         );
+        let host_accounts = HostAccounts::load(stored.host_accounts, store.host_accounts_dir());
         let status_changes = chats
             .values()
             .map(|chat| chat.shown.1)
@@ -652,6 +644,11 @@ impl State {
             chats,
             subscriptions,
             logins: BTreeMap::new(),
+            git_host: config
+                .git_host
+                .unwrap_or_else(|| Arc::new(GhGitHost::installed())),
+            host_accounts,
+            host_account_logins: BTreeMap::new(),
             next_id: stored.next_id,
             generation: 0,
             status_changes,
@@ -728,18 +725,10 @@ impl State {
             Command::StartChat {
                 repository,
                 checkout,
-            } => match self.start_chat(repository, checkout) {
-                Ok(Started::Now(chat)) => Ok(Response::ChatStarted { chat }),
-                Ok(Started::AfterWorktree {
-                    pending,
-                    repository_path,
-                    base_branch,
-                }) => {
-                    self.create_worktree(pending, repository_path, base_branch, reply);
-                    return;
-                }
-                Err(error) => Err(error),
-            },
+            } => {
+                self.start_chat_command(repository, checkout, reply).await;
+                return;
+            }
             Command::AddRepository { path } => self.add_repository(path),
             Command::SendMessage { chat, text } => self.send_message(chat, text).await,
             Command::QueueMessage { chat, text } => {
@@ -781,6 +770,16 @@ impl State {
                 provider,
                 subscription,
             } => self.change_subscription(chat, provider, subscription),
+            command @ (Command::AddHostAccount { .. }
+            | Command::RemoveHostAccount { .. }
+            | Command::LogInHostAccount { .. }
+            | Command::ListHostAccounts) => self.execute_host_account(command),
+            Command::Push { chat } => {
+                if let Err(error) = self.push(chat, reply).await {
+                    tracing::debug!(?chat, %error, "push refused");
+                }
+                return;
+            }
             Command::RunRepoCheck { repository } => self
                 .start_repo_check(repository)
                 .map(|()| Response::RepoCheckStarted),
@@ -818,6 +817,35 @@ impl State {
                 self.save_cli_extension_file(repository, file, text, previous)
                     .await
             }
+        };
+        // The caller may have stopped waiting; nothing to do then.
+        let _ = reply.send(result);
+    }
+
+    /// Starts a chat; `reply` gets the answer, for a new worktree once it
+    /// exists. The repository's host account is bound first, so the
+    /// chat's commits carry its commit author.
+    async fn start_chat_command(
+        &mut self,
+        repository: RepositoryId,
+        checkout: Checkout,
+        reply: Reply,
+    ) {
+        let started = match self.bind_host_account(repository).await {
+            Ok(_) => self.start_chat(repository, checkout),
+            Err(error) => Err(error),
+        };
+        let result = match started {
+            Ok(Started::Now(chat)) => Ok(Response::ChatStarted { chat }),
+            Ok(Started::AfterWorktree {
+                pending,
+                repository_path,
+                base_branch,
+            }) => {
+                self.create_worktree(pending, repository_path, base_branch, reply);
+                return;
+            }
+            Err(error) => Err(error),
         };
         // The caller may have stopped waiting; nothing to do then.
         let _ = reply.send(result);
@@ -1138,6 +1166,9 @@ impl State {
                 repository,
                 outcome,
             } => self.finish_repo_check(repository, outcome),
+            Background::Pushed { result, reply } => {
+                let _ = reply.send(result);
+            }
         }
     }
 
@@ -1631,6 +1662,10 @@ impl State {
             .get(&id)
             .ok_or(CommandError::UnknownChat { chat: id })?;
         let transcript = self.store.transcript(id.0)?;
+        let host_account = match self.repositories.get(&chat.repository) {
+            Some(repository) => self.host_account_binding(repository),
+            None => HostAccountBinding::Unbound,
+        };
         Ok(Response::Chat {
             status: chat.status(),
             branch: crate::git::current_branch(&chat.working_directory).await,
@@ -1644,6 +1679,8 @@ impl State {
                 .flat_map(|session| &session.open)
                 .map(|request| request.id.clone())
                 .collect(),
+            host_account,
+            commit_author: crate::git::commit_author(&chat.working_directory).await,
             transcript,
         })
     }
@@ -1882,40 +1919,21 @@ impl State {
         self.logins.remove(&subscription);
         let driver = self.login_driver(provider)?;
         let access = self.subscriptions.access(subscription)?;
-        let LoginProcess {
-            mut output,
-            input,
-            outcome,
-        } = driver
+        let process = driver
             .login(&access)
             .map_err(|error| CommandError::AgentCli {
                 reason: error.to_string(),
             })?;
-        let events = self.events.clone();
-        let finished = Arc::new(AtomicBool::new(false));
-        let finished_flag = finished.clone();
-        let task = tokio::spawn(async move {
-            // No subscriber is not an error: the desktop app may be closed.
-            while let Some(text) = output.recv().await {
-                let _ = events.send(Event::LoginOutput { subscription, text });
-            }
-            let outcome = outcome.await.unwrap_or_else(|_| LoginOutcome::Failed {
-                reason: "the login stopped".to_owned(),
-            });
-            finished_flag.store(true, Ordering::SeqCst);
-            let _ = events.send(Event::LoginFinished {
+        let login = Login::run(
+            process,
+            self.events.clone(),
+            move |text| Event::LoginOutput { subscription, text },
+            move |outcome| Event::LoginFinished {
                 subscription,
                 outcome,
-            });
-        });
-        self.logins.insert(
-            subscription,
-            Login {
-                task,
-                input,
-                finished,
             },
         );
+        self.logins.insert(subscription, login);
         Ok(())
     }
 
@@ -1935,6 +1953,234 @@ impl State {
             .await
             .map_err(|_| CommandError::NoLoginRunning { subscription })?;
         Ok(Response::LoginAnswered)
+    }
+
+    fn execute_host_account(&mut self, command: Command) -> Result<Response, CommandError> {
+        match command {
+            Command::AddHostAccount {
+                name,
+                git_host,
+                login,
+                author,
+            } => self.add_host_account(&name, &git_host, &login, &author),
+            Command::RemoveHostAccount { host_account } => self.remove_host_account(host_account),
+            Command::LogInHostAccount { host_account } => self
+                .log_in_host_account(host_account)
+                .map(|()| Response::HostAccountLoginStarted),
+            Command::ListHostAccounts => Ok(self.list_host_accounts()),
+            // The command loop sends only the commands above.
+            _ => Err(CommandError::ServiceStopped),
+        }
+    }
+
+    fn add_host_account(
+        &mut self,
+        name: &str,
+        git_host: &str,
+        login: &str,
+        author: &CommitAuthor,
+    ) -> Result<Response, CommandError> {
+        let field = |field: &str, value: &str| {
+            let value = value.trim();
+            if value.is_empty() {
+                Err(CommandError::EmptyHostAccountField {
+                    field: field.to_owned(),
+                })
+            } else {
+                Ok(value.to_owned())
+            }
+        };
+        let name = field("name", name)?;
+        let git_host = field("git host", git_host)?.to_ascii_lowercase();
+        let login = field("login", login)?;
+        let author = CommitAuthor {
+            name: field("commit author name", &author.name)?,
+            email: field("commit author email", &author.email)?,
+        };
+        if self.host_accounts.named(&name).is_some() {
+            return Err(CommandError::HostAccountNameTaken { name });
+        }
+        let host_account = HostAccountId(self.next_id());
+        self.host_accounts
+            .add(host_account, name, git_host, login, author)?;
+        if let Err(error) = self.save() {
+            self.host_accounts.remove(host_account);
+            return Err(error);
+        }
+        Ok(Response::HostAccountAdded { host_account })
+    }
+
+    fn remove_host_account(
+        &mut self,
+        host_account: HostAccountId,
+    ) -> Result<Response, CommandError> {
+        if !self.host_accounts.contains(host_account) {
+            return Err(CommandError::UnknownHostAccount { host_account });
+        }
+        self.host_account_logins.remove(&host_account);
+        self.host_accounts.remove(host_account);
+        self.save()?;
+        Ok(Response::HostAccountRemoved)
+    }
+
+    /// Runs the git host's login in the host account's config directory
+    /// and reports its output and end as events. Stops a login of the host
+    /// account that still runs.
+    fn log_in_host_account(&mut self, host_account: HostAccountId) -> Result<(), CommandError> {
+        let access = self
+            .host_accounts
+            .access(host_account)
+            .ok_or(CommandError::UnknownHostAccount { host_account })?;
+        self.host_account_logins.remove(&host_account);
+        let process =
+            self.git_host
+                .login(&access)
+                .map_err(|error| CommandError::HostAccountSetup {
+                    reason: error.to_string(),
+                })?;
+        let login = Login::run(
+            process,
+            self.events.clone(),
+            move |text| Event::HostAccountLoginOutput { host_account, text },
+            move |outcome| Event::HostAccountLoginFinished {
+                host_account,
+                outcome,
+            },
+        );
+        self.host_account_logins.insert(host_account, login);
+        Ok(())
+    }
+
+    fn list_host_accounts(&self) -> Response {
+        let logging_in = |host_account| {
+            self.host_account_logins
+                .get(&host_account)
+                .is_some_and(Login::running)
+        };
+        Response::HostAccounts {
+            host_accounts: self.host_accounts.overview(logging_in),
+        }
+    }
+
+    /// The host account the repository's `.leiser/config.toml` binds it to.
+    fn host_account_binding(&self, repository: &Path) -> HostAccountBinding {
+        let config = match RepositoryConfig::load(repository) {
+            Ok(config) => config,
+            Err(error) => {
+                return HostAccountBinding::Unreadable {
+                    reason: error.to_string(),
+                };
+            }
+        };
+        let Some(name) = config.host_account else {
+            return HostAccountBinding::Unbound;
+        };
+        let Some(host_account) = self.host_accounts.named(&name) else {
+            return HostAccountBinding::Unknown { name };
+        };
+        HostAccountBinding::Bound {
+            host_account,
+            git_host: self
+                .host_accounts
+                .git_host(host_account)
+                .unwrap_or_default()
+                .to_owned(),
+            login: self
+                .host_accounts
+                .login(host_account)
+                .unwrap_or_default()
+                .to_owned(),
+            name,
+        }
+    }
+
+    /// Sets the repository's local git config to its host account's
+    /// commit author and credentials, if its config names one. Returns the
+    /// host account, `None` for a repository bound to none.
+    async fn bind_host_account(
+        &self,
+        repository: RepositoryId,
+    ) -> Result<Option<(HostAccountId, Binding)>, CommandError> {
+        let path = self.repository_path(repository)?;
+        let host_account = match self.host_account_binding(&path) {
+            HostAccountBinding::Unbound => return Ok(None),
+            HostAccountBinding::Bound { host_account, .. } => host_account,
+            HostAccountBinding::Unknown { name } => {
+                return Err(CommandError::UnknownHostAccountName { name });
+            }
+            HostAccountBinding::Unreadable { reason } => {
+                return Err(CommandError::RepositoryConfig { reason });
+            }
+        };
+        let (Some(author), Some(access)) = (
+            self.host_accounts.author(host_account),
+            self.host_accounts.access(host_account),
+        ) else {
+            return Err(CommandError::UnknownHostAccount { host_account });
+        };
+        let binding = Binding::new(author.clone(), access, self.git_host.as_ref())?;
+        host_accounts::bind(&path, &binding).await?;
+        Ok(Some((host_account, binding)))
+    }
+
+    /// Pushes the chat's branch to `origin` in the background, once the
+    /// repository's binding is in place and the git host has confirmed
+    /// that the push signs in as its host account; `reply` gets the
+    /// answer. Returns the error it replied with.
+    async fn push(&mut self, id: ChatId, reply: Reply) -> Result<(), CommandError> {
+        let prepared = self.prepare_push(id).await;
+        let (working_directory, branch, name, access) = match prepared {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                let _ = reply.send(Err(error.clone()));
+                return Err(error);
+            }
+        };
+        let git_host = self.git_host.clone();
+        let background = self.background.clone();
+        self.background_running += 1;
+        tokio::spawn(async move {
+            let result = verify_and_push(
+                git_host.as_ref(),
+                &working_directory,
+                &branch,
+                &name,
+                &access,
+            )
+            .await;
+            // The service has stopped; the caller learns that from `reply`.
+            let _ = background.send(Background::Pushed { result, reply }).await;
+        });
+        Ok(())
+    }
+
+    async fn prepare_push(
+        &self,
+        id: ChatId,
+    ) -> Result<(PathBuf, String, String, crate::git_host::HostAccountAccess), CommandError> {
+        let chat = self
+            .chats
+            .get(&id)
+            .ok_or(CommandError::UnknownChat { chat: id })?;
+        if let Setup::Running { .. } = chat.setup {
+            return Err(CommandError::SettingUp { chat: id });
+        }
+        let repository = chat.repository;
+        let working_directory = chat.working_directory.clone();
+        let Branch::Named { name: branch } = crate::git::current_branch(&working_directory).await
+        else {
+            return Err(CommandError::NoBranch { chat: id });
+        };
+        let (host_account, binding) = self
+            .bind_host_account(repository)
+            .await?
+            .ok_or(CommandError::NoHostAccount { repository })?;
+        let name = self
+            .host_accounts
+            .name(host_account)
+            .unwrap_or_default()
+            .to_owned();
+        Ok((working_directory, branch, name, binding.access))
     }
 
     fn list_subscriptions(&self) -> Response {
@@ -2449,6 +2695,7 @@ impl State {
         StateV3 {
             next_id: self.next_id,
             subscriptions: self.subscriptions.snapshot(),
+            host_accounts: self.host_accounts.snapshot(),
             repositories: self
                 .repositories
                 .iter()
@@ -2613,6 +2860,71 @@ fn title(text: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// A chat as the harness service stored it, with its todo list.
+fn stored_chat(store: &Store, chat: ChatV3) -> Result<(ChatId, Chat), StorageError> {
+    // A todo list that cannot be read stops the start: an empty
+    // one would overwrite it on the next change.
+    let todos = TodoList::from_stored(store.todos(chat.id)?);
+    Ok((
+        ChatId(chat.id),
+        Chat {
+            repository: RepositoryId(chat.repository),
+            working_directory: chat.working_directory,
+            place: if chat.worktree {
+                Place::Worktree
+            } else {
+                Place::MainCheckout
+            },
+            done: chat.done,
+            // A setup cut short by a restart is not run again.
+            setup: Setup::Done,
+            // No turn runs after a restart.
+            shown: (
+                if chat.done {
+                    ChatStatus::Done
+                } else {
+                    ChatStatus::WaitingForYou
+                },
+                // Older data: newer chats first.
+                if chat.status_changed == 0 {
+                    chat.id
+                } else {
+                    chat.status_changed
+                },
+            ),
+            title: stored_title(store, chat.id),
+            agent_cli: chat.agent_cli,
+            agent_sessions: chat
+                .agent_sessions
+                .into_iter()
+                .map(|session| {
+                    (
+                        session.agent_cli,
+                        Resumable {
+                            id: AgentSessionId::new(session.id),
+                            known: session.known,
+                        },
+                    )
+                })
+                .collect(),
+            handoff: chat.handoff.map(|handoff| match handoff {
+                HandoffV2::NewSession => Handoff::NewSession,
+                HandoffV2::Resume { known } => Handoff::Resume { known },
+            }),
+            permission_mode: chat.permission_mode,
+            subscriptions: chat
+                .subscriptions
+                .into_iter()
+                .map(|chosen| (chosen.provider, SubscriptionId(chosen.subscription)))
+                .collect(),
+            // Agent sessions did not survive the restart, so no
+            // turn runs; resumed ones wait for the next message.
+            session: None,
+            todos,
+        },
+    ))
+}
+
 /// The title of a stored chat, from its transcript.
 /// The last `repo-check` result of every repository that has one.
 fn stored_repo_checks(
@@ -2650,6 +2962,57 @@ fn stored_title(store: &Store, chat: u64) -> Option<String> {
         | TranscriptEntry::ScriptFinished { .. }
         | TranscriptEntry::Answer { .. } => None,
     })
+}
+
+/// Asks the git host who a push from `working_directory` to `origin` signs
+/// in as, and pushes `branch` only when that is the host account's login.
+async fn verify_and_push(
+    git_host: &dyn GitHost,
+    working_directory: &Path,
+    branch: &str,
+    name: &str,
+    access: &crate::git_host::HostAccountAccess,
+) -> Result<Response, CommandError> {
+    let remote = crate::git::origin_url(working_directory)
+        .await
+        .ok_or_else(|| CommandError::PushFailed {
+            reason: "the repository has no remote `origin`".to_owned(),
+        })?;
+    let actual = git_host
+        .account_for_push(access, &remote)
+        .await
+        .map_err(|error| CommandError::HostAccountUnverified {
+            name: name.to_owned(),
+            reason: error.to_string(),
+        })?;
+    if actual != access.login {
+        return Err(CommandError::HostAccountMismatch {
+            name: name.to_owned(),
+            git_host: access.git_host.clone(),
+            expected: access.login.clone(),
+            actual,
+        });
+    }
+    let refspec = format!("refs/heads/{branch}:refs/heads/{branch}");
+    crate::git::run(
+        working_directory,
+        &["push", "--set-upstream", "origin", &refspec],
+    )
+    .await
+    .map_err(|error| CommandError::PushFailed {
+        reason: error.to_string(),
+    })?;
+    Ok(Response::Pushed {
+        branch: branch.to_owned(),
+    })
+}
+
+impl From<HostAccountError> for CommandError {
+    fn from(error: HostAccountError) -> Self {
+        Self::HostAccountSetup {
+            reason: error.to_string(),
+        }
+    }
 }
 
 /// Renames the branch of a chat's worktree to `name`, if it follows the

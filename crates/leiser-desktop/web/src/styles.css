@@ -167,6 +167,18 @@ button:disabled {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 
+.top-bar-value.truncated {
+  max-width: 28ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.top-bar-value.warning {
+  background: var(--warn);
+  border-radius: 4px;
+  padding: 0 4px;
+}
+
 .chat {
   grid-area: chat;
   display: flex;

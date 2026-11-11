@@ -118,6 +118,29 @@ impl TestRepo {
         Ok(())
     }
 
+    /// The commit the remote's `branch` points to, `None` when the remote
+    /// has no such branch.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the repository has no remote or git fails.
+    pub fn remote_branch(&self, branch: &str) -> io::Result<Option<String>> {
+        let remote = self
+            .remote
+            .as_deref()
+            .ok_or_else(|| io::Error::other("the test repository has no remote"))?;
+        let output = Command::new("git")
+            .arg("--git-dir")
+            .arg(remote)
+            .args(["rev-parse", "--verify", "--quiet"])
+            .arg(format!("refs/heads/{branch}"))
+            .output()?;
+        Ok(output
+            .status
+            .success()
+            .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned()))
+    }
+
     /// Runs git in the main checkout and returns its trimmed output.
     ///
     /// # Errors

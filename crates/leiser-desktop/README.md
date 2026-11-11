@@ -28,6 +28,14 @@ program, set `LEISER_CLAUDE_CODE` or `LEISER_CODEX` to its path.
 `repo-check` runs on Claude Code, read-only, when a repository is added and
 on demand; it needs the `repo-check` skill in `~/.claude/skills/`.
 
+Host accounts sign in with the GitHub CLI `gh` (found like the agent CLIs,
+or set `LEISER_GH`), each in a `gh` config directory of its own. A
+repository names its host account in `.leiser/config.toml`
+(`host_account = "Work GitHub"`); the harness sets the commit author and
+credentials in the repository's local git config only and checks the
+account before every push. On the fake agent CLI, host accounts sign in
+to a fake git host instead.
+
 ## Run it
 
 Needs Node.js (LTS) and, on Linux, WebKitGTK (see `.github/workflows/ci.yml`).

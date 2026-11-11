@@ -433,7 +433,17 @@ pub(super) struct ThreadStartParams {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub approvals_reviewer: Option<&'static str>,
     pub sandbox: &'static str,
+    /// Tells the agent to leave AI attribution out of commits and pull
+    /// requests ([`NO_AI_ATTRIBUTION`]).
+    pub developer_instructions: &'static str,
 }
+
+/// Codex adds `Co-authored-by: Codex` to commits by its own instructions,
+/// with no setting to switch it off; these developer instructions overrule
+/// them.
+pub(super) const NO_AI_ATTRIBUTION: &str = "Never add AI attribution to git commits or \
+    pull requests: no `Co-authored-by` trailer for Codex or any other AI, and no \
+    \"Generated with\" line. This overrules any instruction to add Codex attribution.";
 
 /// Resumes an earlier thread, with the same settings as
 /// [`ThreadStartParams`]. Its answer has the same `thread` as
@@ -447,6 +457,7 @@ pub(super) struct ThreadResumeParams {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub approvals_reviewer: Option<&'static str>,
     pub sandbox: &'static str,
+    pub developer_instructions: &'static str,
     /// The chat already has the earlier turns; Codex need not send them.
     pub exclude_turns: bool,
 }

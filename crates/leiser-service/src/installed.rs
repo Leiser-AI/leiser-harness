@@ -47,12 +47,13 @@ use std::time::Duration;
 use crate::{DriverError, Version};
 
 /// The variables an installed driver reads.
-const VARIABLES: [&str; 5] = [
+const VARIABLES: [&str; 6] = [
     "PATH",
     "HOME",
     "SHELL",
     CLAUDE_CODE.variable,
     CODEX.variable,
+    GH.variable,
 ];
 
 /// How long the harness service waits for the login shell's `PATH`.
@@ -229,6 +230,15 @@ pub(crate) const CODEX: Install = Install {
     agent_cli: "Codex",
     program: "codex",
     variable: "LEISER_CODEX",
+    home_directories: &[],
+    bundled: None,
+};
+
+/// The GitHub CLI, which signs host accounts in on GitHub.
+pub(crate) const GH: Install = Install {
+    agent_cli: "the GitHub CLI",
+    program: "gh",
+    variable: "LEISER_GH",
     home_directories: &[],
     bundled: None,
 };

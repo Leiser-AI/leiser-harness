@@ -18,6 +18,23 @@ pub struct ChatId(pub(crate) u64);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct SubscriptionId(pub(crate) u64);
 
+/// A host account registered in the harness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct HostAccountId(pub(crate) u64);
+
+/// The name and email address commits are made with.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommitAuthor {
+    pub name: String,
+    pub email: String,
+}
+
+impl std::fmt::Display for CommitAuthor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} <{}>", self.name, self.email)
+    }
+}
+
 /// A company that offers models. Each agent CLI runs on one provider's
 /// subscriptions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -324,6 +341,35 @@ pub enum Command {
         provider: Provider,
         subscription: Option<SubscriptionId>,
     },
+    /// Registers a host account: one user account `login` on the git host
+    /// `git_host` (such as `github.com`), and the commit author its
+    /// repositories commit with. It gets a `gh` config directory of its
+    /// own, in which [`Command::LogInHostAccount`] signs it in. Names are
+    /// unique. A repository is bound to it by name, as
+    /// `host_account = "<name>"` in its `.leiser/config.toml`.
+    AddHostAccount {
+        name: String,
+        git_host: String,
+        login: String,
+        author: CommitAuthor,
+    },
+    /// Removes a host account with its `gh` config directory. Repositories
+    /// bound to it cannot start chats or push until they are bound again.
+    RemoveHostAccount { host_account: HostAccountId },
+    /// Runs the git host's login (`gh auth login`) in the host account's
+    /// config directory; see [`Event::HostAccountLoginOutput`] and
+    /// [`Event::HostAccountLoginFinished`]. A login still running is
+    /// stopped first.
+    LogInHostAccount { host_account: HostAccountId },
+    /// Lists every registered host account.
+    ListHostAccounts,
+    /// Pushes the chat's branch to the repository's `origin`, after the
+    /// harness has checked that the push signs in as the repository's host
+    /// account. Refuses a repository without a host account, and a push
+    /// that would sign in as another account
+    /// ([`CommandError::HostAccountMismatch`]). Answers once the push is
+    /// done.
+    Push { chat: ChatId },
     /// Runs `repo-check` on the repository again, read-only, on the
     /// repository's default Anthropic subscription (or Claude Code's own
     /// default login without one). It also runs by itself when the
@@ -420,6 +466,11 @@ pub enum Response {
         /// The approval requests and questions the running turn waits for,
         /// oldest first.
         open_requests: Vec<String>,
+        /// The host account the chat's repository is bound to.
+        host_account: HostAccountBinding,
+        /// Who commits where the chat works are made by, as git reports it
+        /// there now; `None` when git has no author.
+        commit_author: Option<CommitAuthor>,
         transcript: Vec<TranscriptEntry>,
     },
     SubscriptionAdded {
@@ -436,6 +487,19 @@ pub enum Response {
     },
     /// The chat's next turns on the provider use the new subscription.
     SubscriptionChanged,
+    HostAccountAdded {
+        host_account: HostAccountId,
+    },
+    HostAccountRemoved,
+    /// The git host's login runs; its output and end arrive as events.
+    HostAccountLoginStarted,
+    HostAccounts {
+        host_accounts: Vec<HostAccountOverview>,
+    },
+    /// The chat's branch is on `origin` now.
+    Pushed {
+        branch: String,
+    },
     /// `repo-check` runs; [`Event::RepoCheckFinished`] follows.
     RepoCheckStarted,
     RepoCheck {
@@ -479,6 +543,39 @@ pub struct SubscriptionOverview {
     pub home: PathBuf,
     /// Whether the agent CLI's login runs right now.
     pub logging_in: bool,
+}
+
+/// A registered host account.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostAccountOverview {
+    pub host_account: HostAccountId,
+    pub name: String,
+    pub git_host: String,
+    pub login: String,
+    pub author: CommitAuthor,
+    /// The `gh` config directory the host account is signed in in.
+    pub config_dir: PathBuf,
+    /// Whether the git host's login runs right now.
+    pub logging_in: bool,
+}
+
+/// The host account a repository is bound to, as its `.leiser/config.toml`
+/// names it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum HostAccountBinding {
+    /// The config names no host account.
+    Unbound,
+    Bound {
+        host_account: HostAccountId,
+        name: String,
+        git_host: String,
+        login: String,
+    },
+    /// The config names a host account that is not registered.
+    Unknown { name: String },
+    /// The config could not be read.
+    Unreadable { reason: String },
 }
 
 /// How a login ended.
@@ -874,6 +971,38 @@ pub enum CommandError {
     InvalidCliExtensionFile { file: PathBuf, reason: String },
     #[error("could not access {}: {reason}", file.display())]
     CliExtensionFileAccess { file: PathBuf, reason: String },
+    #[error("unknown host account {host_account:?}")]
+    UnknownHostAccount { host_account: HostAccountId },
+    #[error("no host account is named {name:?}")]
+    UnknownHostAccountName { name: String },
+    #[error("a host account is already named {name:?}")]
+    HostAccountNameTaken { name: String },
+    #[error("a host account needs a {field}")]
+    EmptyHostAccountField { field: String },
+    #[error("could not set up the host account: {reason}")]
+    HostAccountSetup { reason: String },
+    #[error(
+        "the repository is bound to no host account; name one as \
+         `host_account = \"<name>\"` in its .leiser/config.toml"
+    )]
+    NoHostAccount { repository: RepositoryId },
+    #[error(
+        "push blocked: it would sign in to {git_host} as {actual:?}, but the \
+         repository is bound to host account {name:?} ({expected:?}); log in \
+         to {name:?} again as {expected:?}"
+    )]
+    HostAccountMismatch {
+        name: String,
+        git_host: String,
+        expected: String,
+        actual: String,
+    },
+    #[error("push blocked: could not check the host account {name:?}: {reason}")]
+    HostAccountUnverified { name: String, reason: String },
+    #[error("chat {chat:?} has no branch checked out to push")]
+    NoBranch { chat: ChatId },
+    #[error("the push failed: {reason}")]
+    PushFailed { reason: String },
     #[error("the harness service has stopped")]
     ServiceStopped,
 }
@@ -927,6 +1056,17 @@ pub enum Event {
         subscription: SubscriptionId,
         outcome: LoginOutcome,
     },
+    /// A line the git host's login printed, such as the one-time code to
+    /// enter in the browser.
+    HostAccountLoginOutput {
+        host_account: HostAccountId,
+        text: String,
+    },
+    /// The git host's login of a host account has ended.
+    HostAccountLoginFinished {
+        host_account: HostAccountId,
+        outcome: LoginOutcome,
+    },
     /// `repo-check` started in the repository.
     RepoCheckStarted { repository: RepositoryId },
     /// `repo-check` finished in the repository; read the result with
@@ -957,6 +1097,8 @@ impl Event {
             | Self::TodosChanged { chat, .. } => Some(*chat),
             Self::LoginOutput { .. }
             | Self::LoginFinished { .. }
+            | Self::HostAccountLoginOutput { .. }
+            | Self::HostAccountLoginFinished { .. }
             | Self::RepoCheckStarted { .. }
             | Self::RepoCheckFinished { .. }
             | Self::ServiceUpdateWaiting => None,

@@ -113,14 +113,18 @@ fn permission_mode_argument(mode: PermissionMode) -> &'static str {
 
 /// Claude Code's settings that switch its sandbox on: shell commands run in
 /// it and may not leave it. Native Windows has no Claude Code sandbox, so
-/// there it is asked for but not required.
+/// there it is asked for but not required. They also switch off Claude
+/// Code's AI attribution in commits and pull requests: `attribution`, and
+/// the older `includeCoAuthoredBy` it replaces.
 fn sandbox_settings() -> String {
     serde_json::json!({
         "sandbox": {
             "enabled": true,
             "failIfUnavailable": !cfg!(windows),
             "allowUnsandboxedCommands": false,
-        }
+        },
+        "attribution": { "commit": "", "pr": "" },
+        "includeCoAuthoredBy": false,
     })
     .to_string()
 }
@@ -1123,6 +1127,18 @@ mod tests {
                 "{mode:?}"
             );
         }
+    }
+
+    #[test]
+    fn commits_and_pull_requests_get_no_ai_attribution() -> serde_json::Result<()> {
+        for mode in [PermissionMode::Supervised, PermissionMode::FullAccess] {
+            let settings: Value =
+                serde_json::from_str(&option(mode, "--settings").unwrap_or_default())?;
+            assert_eq!(settings["attribution"]["commit"], "", "{mode:?}");
+            assert_eq!(settings["attribution"]["pr"], "", "{mode:?}");
+            assert_eq!(settings["includeCoAuthoredBy"], false, "{mode:?}");
+        }
+        Ok(())
     }
 
     #[test]

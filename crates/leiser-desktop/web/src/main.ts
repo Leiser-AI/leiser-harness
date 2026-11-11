@@ -14,6 +14,8 @@ import type {
   Question,
   ChatStatus,
   Checkout,
+  HostAccountBinding,
+  HostAccountOverview,
   Provider,
   Finding,
   OptOuts,
@@ -66,6 +68,16 @@ const loginSection = byId("login-section");
 const loginOutput = byId("login-output");
 const loginAnswer = byId<HTMLFormElement>("login-answer");
 const loginAnswerText = byId<HTMLInputElement>("login-answer-text");
+const hostAccountsDialog = byId<HTMLDialogElement>("host-accounts-dialog");
+const hostAccountsError = byId("host-accounts-error");
+const hostAccountList = byId("host-account-list");
+const addHostAccountForm = byId<HTMLFormElement>("add-host-account");
+const hostLoginSection = byId("host-login-section");
+const hostLoginOutput = byId("host-login-output");
+// The lines of host account logins run since the app started.
+const hostLoginLines: string[] = [];
+// The last push of the selected chat, shown in the top bar until another chat is selected.
+let lastPush: { chat: ChatId; branch: string } | null = null;
 
 // The lines of logins run since the app started; the service does not
 // keep them.
@@ -140,10 +152,11 @@ async function refresh(): Promise<void> {
   }
   const read = ++readCount;
   const chat = selectedChat;
-  const [repositories, chats, subscriptions, view, todos, updateWaiting] = await Promise.all([
+  const [repositories, chats, subscriptions, hostAccounts, view, todos, updateWaiting] = await Promise.all([
     service.listRepositories(),
     service.listChats(),
     service.listSubscriptions(),
+    service.listHostAccounts(),
     chat === null ? Promise.resolve(null) : service.readChat(chat),
     chat === null ? Promise.resolve(null) : service.listTodos(chat),
     service.serviceUpdateWaiting(),
@@ -164,6 +177,7 @@ async function refresh(): Promise<void> {
   renderSidebar(repositories, chats, checks);
   // The subscriptions dialog can open over any view.
   renderSubscriptions(subscriptions);
+  renderHostAccounts(hostAccounts);
   if (selectedExtensions !== null) {
     const shown = repositories.find((overview) => overview.repository === selectedExtensions);
     repoCheckView.hidden = true;
@@ -408,6 +422,8 @@ function renderChat(
   topBar.replaceChildren(
     labelled("Repository", repository?.name ?? "unknown"),
     labelled("Branch", branchName(view.branch)),
+    hostAccountItem(view.hostAccount),
+    commitAuthorItem(view),
     labelled("Checkout", overview.worktree === null ? "main checkout" : "worktree"),
     labelled("Agent CLI", AGENT_CLI_NAMES[view.agentCli]),
     subscriptionPicker(view, subscriptions),
@@ -465,9 +481,63 @@ function permissionModePicker(chat: ChatId, view: ChatView): HTMLElement {
   return item;
 }
 
+/** Who the chat's commits are by, cut short in the top bar. */
+function commitAuthorItem(view: ChatView): HTMLElement {
+  const author =
+    view.commitAuthor === null ? "none" : `${view.commitAuthor.name} <${view.commitAuthor.email}>`;
+  const value = el("span", "top-bar-value truncated", author);
+  value.title = author;
+  return labelled("Commit author", value);
+}
+
+/** The host account the chat's repository is bound to. */
+function hostAccountItem(binding: HostAccountBinding): HTMLElement {
+  switch (binding.type) {
+    case "bound": {
+      const item = labelled("Host account", `${binding.name} · ${binding.login}`);
+      item.title = `${binding.login} on ${binding.git_host}`;
+      return item;
+    }
+    case "unbound": {
+      const item = labelled("Host account", el("span", "top-bar-value warning", "not bound"));
+      item.title = 'Bind it in the repository\'s .leiser/config.toml: host_account = "<name>"';
+      return item;
+    }
+    case "unknown": {
+      const item = labelled("Host account", el("span", "top-bar-value warning", `${binding.name}?`));
+      item.title = `"${binding.name}" is not registered; add it under Host accounts.`;
+      return item;
+    }
+    case "unreadable": {
+      const item = labelled("Host account", el("span", "top-bar-value warning", "config unreadable"));
+      item.title = binding.reason;
+      return item;
+    }
+  }
+}
+
 /** The top bar's buttons for the selected chat. */
 function chatActions(overview: ChatOverview): HTMLElement[] {
   const actions: HTMLElement[] = [];
+  const push = el("button", "top-bar-action", "Push");
+  push.type = "button";
+  push.title = "Push the chat's branch to origin, after checking the host account";
+  push.addEventListener("click", () =>
+    act(async () => {
+      push.disabled = true;
+      lastPush = null;
+      try {
+        const branch = await service.push(overview.chat);
+        lastPush = { chat: overview.chat, branch };
+      } finally {
+        await refresh();
+      }
+    }),
+  );
+  actions.push(push);
+  if (lastPush !== null && lastPush.chat === overview.chat) {
+    actions.push(el("span", "top-bar-value muted", `pushed ${lastPush.branch}`));
+  }
   if (overview.worktree !== null) {
     const sameWorktree = el("button", "top-bar-action", "New chat in this worktree");
     sameWorktree.type = "button";
@@ -701,6 +771,77 @@ function subscriptionRow(subscription: SubscriptionOverview): HTMLElement {
   );
   row.append(remove);
   return row;
+}
+
+function renderHostAccounts(hostAccounts: HostAccountOverview[]): void {
+  if (hostAccounts.length === 0) {
+    hostAccountList.replaceChildren(
+      el("li", "muted", "None yet: repositories commit and push with your global git settings."),
+    );
+    return;
+  }
+  hostAccountList.replaceChildren(...hostAccounts.map(hostAccountRow));
+}
+
+function hostAccountRow(account: HostAccountOverview): HTMLElement {
+  const row = el("li", "subscription-row");
+  const name = el("strong", "", account.name);
+  const details = el(
+    "span",
+    "muted",
+    `${account.login} on ${account.git_host} · ${account.author.name} <${account.author.email}>` +
+      (account.logging_in ? " · logging in…" : ""),
+  );
+  details.title = account.config_dir;
+  const login = el("button", "", "Log in");
+  login.type = "button";
+  login.title = "Run the git host's login (gh auth login) for this account";
+  login.addEventListener("click", () =>
+    actInHostDialog(async () => {
+      await service.logInHostAccount(account.host_account);
+      await refresh();
+    }),
+  );
+  const remove = el("button", "danger", "Remove");
+  remove.type = "button";
+  remove.addEventListener("click", () =>
+    actInHostDialog(async () => {
+      // A second click confirms: removing deletes the account's login.
+      if (remove.dataset.confirm !== "yes") {
+        remove.dataset.confirm = "yes";
+        remove.textContent = "Remove for good";
+        return;
+      }
+      await service.removeHostAccount(account.host_account);
+      await refresh();
+    }),
+  );
+  row.append(name, details, login, remove);
+  return row;
+}
+
+async function actInHostDialog(action: () => Promise<void>): Promise<void> {
+  hostAccountsError.hidden = true;
+  try {
+    await action();
+  } catch (error) {
+    hostAccountsError.textContent = error instanceof Error ? error.message : String(error);
+    hostAccountsError.hidden = false;
+  }
+}
+
+function showHostLogin(event: ServiceEvent): void {
+  if (event.type === "host_account_login_output") {
+    hostLoginLines.push(event.text);
+  } else if (event.type === "host_account_login_finished") {
+    hostLoginLines.push(
+      event.outcome.type === "signed_in" ? "Signed in." : `Login failed: ${event.outcome.reason}`,
+    );
+  } else {
+    return;
+  }
+  hostLoginOutput.textContent = hostLoginLines.join("\n");
+  hostLoginSection.hidden = false;
 }
 
 /** Like `act`, for actions in the subscriptions dialog. */
@@ -1010,6 +1151,30 @@ byId("open-subscriptions").addEventListener("click", () =>
 
 byId("close-subscriptions").addEventListener("click", () => subscriptionsDialog.close());
 
+byId("open-host-accounts").addEventListener("click", () =>
+  act(async () => {
+    await refresh();
+    hostAccountsDialog.showModal();
+  }),
+);
+
+byId("close-host-accounts").addEventListener("click", () => hostAccountsDialog.close());
+
+addHostAccountForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  void actInHostDialog(async () => {
+    const value = (id: string) => byId<HTMLInputElement>(id).value;
+    await service.addHostAccount(value("new-host-name"), value("new-host-git-host"), value("new-host-login"), {
+      name: value("new-host-author-name"),
+      email: value("new-host-author-email"),
+    });
+    for (const id of ["new-host-name", "new-host-login", "new-host-author-name", "new-host-author-email"]) {
+      byId<HTMLInputElement>(id).value = "";
+    }
+    await refresh();
+  });
+});
+
 loginAnswer.addEventListener("submit", (event) => {
   event.preventDefault();
   void actInDialog(async () => {
@@ -1042,6 +1207,7 @@ void act(async () => {
   await service.subscribe(
     (event) => {
       showLogin(event);
+      showHostLogin(event);
       void refresh().catch(showError);
     },
     () => void refresh().catch(showError),

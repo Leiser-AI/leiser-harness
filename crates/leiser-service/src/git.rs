@@ -4,7 +4,7 @@ use std::path::Path;
 
 use tokio::process::Command;
 
-use crate::Branch;
+use crate::{Branch, CommitAuthor};
 
 /// What is checked out in `working_directory`.
 pub(crate) async fn current_branch(working_directory: &Path) -> Branch {
@@ -21,6 +21,24 @@ pub(crate) async fn current_branch(working_directory: &Path) -> Branch {
         Some(commit) => Branch::Detached { commit },
         None => Branch::Unknown,
     }
+}
+
+/// Who commits in `working_directory` are made by, as git would make them
+/// now: its config there, local before global, or the environment.
+pub(crate) async fn commit_author(working_directory: &Path) -> Option<CommitAuthor> {
+    // `Name <email> <time> <zone>`.
+    let ident = git(working_directory, &["var", "GIT_AUTHOR_IDENT"]).await?;
+    let (name, rest) = ident.split_once(" <")?;
+    let (email, _) = rest.split_once('>')?;
+    Some(CommitAuthor {
+        name: name.trim().to_owned(),
+        email: email.to_owned(),
+    })
+}
+
+/// The URL of the remote `origin`.
+pub(crate) async fn origin_url(working_directory: &Path) -> Option<String> {
+    git(working_directory, &["remote", "get-url", "origin"]).await
 }
 
 /// Runs git and returns its trimmed output, or `None` when it fails.

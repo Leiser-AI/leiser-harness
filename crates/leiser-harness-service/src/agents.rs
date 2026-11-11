@@ -10,7 +10,7 @@ use leiser_service::{
     AgentCli, AgentEvent, ClaudeCodeDriver, CodexDriver, Question, QuestionOption, ServiceConfig,
     ServiceProgram,
 };
-use leiser_testkit::{FakeDriver, SAMPLE_REPO_CHECK_REPORT, Script, Step};
+use leiser_testkit::{FakeDriver, FakeGitHost, SAMPLE_REPO_CHECK_REPORT, Script, Step};
 
 /// Turns the fake agent CLI plays back before it only ends turns.
 const FAKE_TURNS: usize = 1000;
@@ -43,6 +43,7 @@ pub fn service_config(program: &ServiceProgram) -> Result<ServiceConfig, FakeAge
         ServiceConfig::new(AgentCli::ClaudeCode, Arc::new(driver), data_dir)
             .with_codex_home(codex_home)
             .with_repo_check(Arc::new(fake_repo_check(fake)?))
+            .with_git_host(Arc::new(FakeGitHost::new()))
     } else {
         let claude_code = Arc::new(ClaudeCodeDriver::installed());
         ServiceConfig::new(AgentCli::ClaudeCode, claude_code.clone(), data_dir)

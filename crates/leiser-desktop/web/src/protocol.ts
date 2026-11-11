@@ -4,6 +4,7 @@
 export type RepositoryId = number;
 export type ChatId = number;
 export type SubscriptionId = number;
+export type HostAccountId = number;
 
 export type Provider = "anthropic" | "openai";
 export type SubscriptionKind = "login" | "api_key";
@@ -47,6 +48,17 @@ export type Command =
       provider: Provider;
       subscription: SubscriptionId | null;
     }
+  | {
+      type: "add_host_account";
+      name: string;
+      git_host: string;
+      login: string;
+      author: CommitAuthor;
+    }
+  | { type: "remove_host_account"; host_account: HostAccountId }
+  | { type: "log_in_host_account"; host_account: HostAccountId }
+  | { type: "list_host_accounts" }
+  | { type: "push"; chat: ChatId }
   | { type: "run_repo_check"; repository: RepositoryId }
   | { type: "read_repo_check"; repository: RepositoryId }
   | { type: "read_service_status" }
@@ -86,6 +98,8 @@ export type Response =
       open_requests: string[];
       agent_cli: AgentCli;
       subscription: SubscriptionId | null;
+      host_account: HostAccountBinding;
+      commit_author: CommitAuthor | null;
       transcript: TranscriptEntry[];
     }
   | { type: "subscription_added"; subscription: SubscriptionId }
@@ -95,6 +109,11 @@ export type Response =
   | { type: "login_answered" }
   | { type: "subscriptions"; subscriptions: SubscriptionOverview[] }
   | { type: "subscription_changed" }
+  | { type: "host_account_added"; host_account: HostAccountId }
+  | { type: "host_account_removed" }
+  | { type: "host_account_login_started" }
+  | { type: "host_accounts"; host_accounts: HostAccountOverview[] }
+  | { type: "pushed"; branch: string }
   | { type: "repo_check_started" }
   | { type: "repo_check"; check: RepoCheck }
   | { type: "service_status"; version: string; update_waiting: boolean }
@@ -135,6 +154,16 @@ export type CommandError =
   | { type: "no_login_running"; subscription: SubscriptionId }
   | { type: "keychain"; reason: string }
   | { type: "repository_config"; reason: string }
+  | { type: "unknown_host_account"; host_account: HostAccountId }
+  | { type: "unknown_host_account_name"; name: string }
+  | { type: "host_account_name_taken"; name: string }
+  | { type: "empty_host_account_field"; field: string }
+  | { type: "host_account_setup"; reason: string }
+  | { type: "no_host_account"; repository: RepositoryId }
+  | { type: "host_account_mismatch"; name: string; git_host: string; expected: string; actual: string }
+  | { type: "host_account_unverified"; name: string; reason: string }
+  | { type: "no_branch"; chat: ChatId }
+  | { type: "push_failed"; reason: string }
   | { type: "repo_check_not_configured" }
   | { type: "repo_check_running"; repository: RepositoryId }
   | { type: "not_a_cli_extension_file"; file: string }
@@ -180,6 +209,28 @@ export interface RepositoryOverview {
   name: string;
   path: string;
 }
+
+export interface CommitAuthor {
+  name: string;
+  email: string;
+}
+
+export interface HostAccountOverview {
+  host_account: HostAccountId;
+  name: string;
+  git_host: string;
+  login: string;
+  author: CommitAuthor;
+  config_dir: string;
+  logging_in: boolean;
+}
+
+/** The host account a repository's `.leiser/config.toml` binds it to. */
+export type HostAccountBinding =
+  | { type: "unbound" }
+  | { type: "bound"; host_account: HostAccountId; name: string; git_host: string; login: string }
+  | { type: "unknown"; name: string }
+  | { type: "unreadable"; reason: string };
 
 export interface SubscriptionOverview {
   subscription: SubscriptionId;
@@ -288,6 +339,8 @@ export type ServiceEvent =
   | { type: "request_answered"; chat: ChatId; request: string; answer: Answer }
   | { type: "login_output"; subscription: SubscriptionId; text: string }
   | { type: "login_finished"; subscription: SubscriptionId; outcome: LoginOutcome }
+  | { type: "host_account_login_output"; host_account: HostAccountId; text: string }
+  | { type: "host_account_login_finished"; host_account: HostAccountId; outcome: LoginOutcome }
   | { type: "repo_check_started"; repository: RepositoryId }
   | { type: "repo_check_finished"; repository: RepositoryId }
   | { type: "todos_changed"; chat: ChatId; todos: Todo[] }
