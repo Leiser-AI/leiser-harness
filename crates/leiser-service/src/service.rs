@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -28,6 +28,7 @@ use crate::subscriptions::{SubscriptionError, Subscriptions};
 use crate::todos::{TodoChange, TodoError, TodoList};
 use crate::worktree::{self, WorktreeError};
 
+mod auto_fix;
 mod pull_requests;
 
 use crate::{
@@ -38,6 +39,7 @@ use crate::{
     RepositoryScript, Response, SessionInput, SessionSpec, SignIn, SubscriptionAccess,
     SubscriptionId, SubscriptionKind, TodoId, TranscriptEntry, TurnCheckpoints, UsageLimit, script,
 };
+use auto_fix::{AutoFixWatch, AutoFixWork};
 use pull_requests::{ChatPullRequest, PullRequestWork};
 
 /// Commands waiting for the command loop. Small, so callers feel back
@@ -73,6 +75,8 @@ pub struct ServiceConfig {
     repo_check: Option<Arc<dyn Driver>>,
     /// `None` is the developer's installed `gh`.
     git_host: Option<Arc<dyn GitHost>>,
+    /// How often auto-fix polls an open pull request.
+    poll_interval: Duration,
 }
 
 impl ServiceConfig {
@@ -96,7 +100,16 @@ impl ServiceConfig {
             codex_home: default_codex_home(),
             repo_check: None,
             git_host: None,
+            poll_interval: auto_fix::POLL_INTERVAL,
         }
+    }
+
+    /// Polls open pull requests for auto-fix every `interval` instead of
+    /// every 30 seconds.
+    #[must_use]
+    pub fn with_pull_request_poll_interval(mut self, interval: Duration) -> Self {
+        self.poll_interval = interval;
+        self
     }
 
     /// Signs host accounts in and checks pushes on `git_host` instead of
@@ -322,6 +335,7 @@ struct Chat {
     held: VecDeque<String>,
     /// The chat's pull request, once the developer has asked for one.
     pull_request: Option<ChatPullRequest>,
+    auto_fix: AutoFixWatch,
 }
 
 /// A usage limit an agent session reported.
@@ -351,6 +365,8 @@ enum Opening {
     /// After a usage limit, on another subscription, with
     /// [`CONTINUE_NOTE`].
     Continue,
+    /// Auto-fix woke the agent to fix the chat's pull request.
+    AutoFix { pull_request: u64, message: String },
 }
 
 /// A chat's checkpoints.
@@ -527,6 +543,7 @@ enum Background {
         reply: Reply,
     },
     PullRequest(PullRequestWork),
+    AutoFix(AutoFixWork),
 }
 
 /// A repository's `repo-check`, once it has run or runs.
@@ -657,6 +674,8 @@ struct State {
     limited: BTreeMap<SubscriptionId, Option<u64>>,
     logins: BTreeMap<SubscriptionId, Login>,
     git_host: Arc<dyn GitHost>,
+    /// How often auto-fix polls an open pull request.
+    poll_interval: Duration,
     host_accounts: HostAccounts,
     host_account_logins: BTreeMap<HostAccountId, Login>,
     next_id: u64,
@@ -721,6 +740,7 @@ impl State {
             git_host: config
                 .git_host
                 .unwrap_or_else(|| Arc::new(GhGitHost::installed())),
+            poll_interval: config.poll_interval,
             host_accounts,
             host_account_logins: BTreeMap::new(),
             next_id: stored.next_id,
@@ -756,6 +776,8 @@ impl State {
         mut updates: mpsc::Receiver<()>,
         mut stopped: oneshot::Receiver<()>,
     ) {
+        let mut polls = tokio::time::interval(self.poll_interval);
+        polls.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tokio::select! {
                 biased;
@@ -764,6 +786,7 @@ impl State {
                 Some(message) = sessions.recv() => self.on_session(message).await,
                 // Never closes: `self` holds a sender.
                 Some(finished) = background.recv() => self.on_background(finished).await,
+                _ = polls.tick() => self.poll_pull_requests(),
                 // Never closes: the harness MCP server holds a sender.
                 Some(call) = calls.recv() => self.on_call(call),
                 Some(()) = updates.recv(), if !self.update_waiting => {
@@ -861,6 +884,7 @@ impl State {
             | Command::RemoveWorktree { .. }) => {
                 return self.execute_pull_request(command, reply).await;
             }
+            Command::SetAutoFix { chat, on } => self.set_auto_fix(chat, on),
             Command::RunRepoCheck { repository } => self
                 .start_repo_check(repository)
                 .map(|()| Response::RepoCheckStarted),
@@ -1197,6 +1221,7 @@ impl State {
             usage_limit: None,
             held: VecDeque::new(),
             pull_request: None,
+            auto_fix: AutoFixWatch::new(),
         };
         self.chats.insert(chat, new);
         if let Err(error) = self.save() {
@@ -1265,6 +1290,7 @@ impl State {
                 let _ = reply.send(result);
             }
             Background::PullRequest(work) => self.pull_request_finished(work),
+            Background::AutoFix(work) => self.auto_fix_finished(work).await,
         }
     }
 
@@ -1516,6 +1542,9 @@ impl State {
         let title = match &opening {
             Opening::Message(text) => text.clone(),
             Opening::Continue => "Continue after a usage limit".to_owned(),
+            Opening::AutoFix { pull_request, .. } => {
+                format!("Auto-fix of pull request #{pull_request}")
+            }
         };
         self.checkpoint_before(id, &title).await;
         let started = self.open_turn(id, opening).await;
@@ -1560,7 +1589,7 @@ impl State {
             .any(|entry| matches!(entry, TranscriptEntry::UserMessage { .. }));
         let branch_note = match &opening {
             Opening::Message(_) if in_worktree && first_message => self.branch_note(id).await,
-            Opening::Message(_) | Opening::Continue => None,
+            Opening::Message(_) | Opening::Continue | Opening::AutoFix { .. } => None,
         };
         // Quotes the chat up to, not including, this message.
         let handoff = pending.and_then(|pending| handoff::render(&transcript, pending));
@@ -1571,6 +1600,8 @@ impl State {
                 text
             }
             Opening::Continue => CONTINUE_NOTE.to_owned(),
+            // Recorded as the trigger that woke the agent.
+            Opening::AutoFix { message, .. } => message,
         };
         let restore_note = self
             .checkpoints
@@ -1848,6 +1879,7 @@ impl State {
                 .and_then(ChatPullRequest::opened)
                 .cloned()
                 .map(Box::new),
+            auto_fix: chat.auto_fix.setting.clone(),
             transcript,
         })
     }
@@ -2748,6 +2780,7 @@ impl State {
     fn end_session(&mut self, id: ChatId) {
         if let Some(chat) = self.chats.get_mut(&id) {
             chat.session = None;
+            chat.auto_fix.session_ended();
         }
     }
 
@@ -2866,6 +2899,7 @@ impl State {
     /// back and moves the chat to an interchangeable subscription, if it
     /// has one, or waits for the developer.
     async fn turn_ended(&mut self, id: ChatId, completed: bool) {
+        self.fix_turn_ended(id, completed).await;
         let Some(chat) = self.chats.get_mut(&id) else {
             return;
         };
@@ -3330,6 +3364,7 @@ impl State {
                         .as_ref()
                         .and_then(ChatPullRequest::opened)
                         .map(pull_requests::stored),
+                    auto_fix: chat.auto_fix.stored(),
                     done: chat.done,
                     status_changed: chat.shown.1,
                     usage_limit: chat.usage_limit.as_ref().map(|limit| UsageLimitV3 {
@@ -3546,6 +3581,7 @@ fn stored_chat(store: &Store, chat: ChatV3) -> Result<(ChatId, Chat), StorageErr
                 (false, _) => Place::MainCheckout,
             },
             pull_request: chat.pull_request.map(pull_requests::restored),
+            auto_fix: AutoFixWatch::restored(chat.auto_fix),
             done: chat.done,
             // A setup cut short by a restart is not run again.
             setup: Setup::Done,
@@ -3615,7 +3651,9 @@ fn stored_title(store: &Store, chat: u64) -> Option<String> {
         TranscriptEntry::Agent { .. }
         | TranscriptEntry::ScriptFinished { .. }
         | TranscriptEntry::Answer { .. }
-        | TranscriptEntry::ContinuedOnSubscription { .. } => None,
+        | TranscriptEntry::ContinuedOnSubscription { .. }
+        | TranscriptEntry::AutoFixTriggered { .. }
+        | TranscriptEntry::AutoFixStopped { .. } => None,
     })
 }
 

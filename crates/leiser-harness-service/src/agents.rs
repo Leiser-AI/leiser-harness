@@ -5,6 +5,7 @@
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use leiser_service::{
     AgentCli, AgentEvent, ClaudeCodeDriver, CodexDriver, Question, QuestionOption, ServiceConfig,
@@ -12,6 +13,9 @@ use leiser_service::{
 };
 use leiser_testkit::{FakeDriver, FakeGitHost, SAMPLE_REPO_CHECK_REPORT, Script, Step};
 
+/// How often auto-fix polls open pull requests on the fake git host, so
+/// trying it in the app takes seconds, not half a minute.
+const FAKE_POLL_INTERVAL: Duration = Duration::from_secs(5);
 /// Turns the fake agent CLI plays back before it only ends turns.
 const FAKE_TURNS: usize = 1000;
 /// Where the fake agent CLI keeps its agent sessions, in the data directory.
@@ -44,6 +48,7 @@ pub fn service_config(program: &ServiceProgram) -> Result<ServiceConfig, FakeAge
             .with_codex_home(codex_home)
             .with_repo_check(Arc::new(fake_repo_check(fake)?))
             .with_git_host(Arc::new(FakeGitHost::new()))
+            .with_pull_request_poll_interval(FAKE_POLL_INTERVAL)
     } else {
         let claude_code = Arc::new(ClaudeCodeDriver::installed());
         ServiceConfig::new(AgentCli::ClaudeCode, claude_code.clone(), data_dir)

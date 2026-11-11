@@ -9,6 +9,9 @@ use tempfile::TempDir;
 
 use crate::{FakeDriver, FakeGitHost, MemoryKeychain, Script};
 
+/// How often the test service polls open pull requests for auto-fix.
+const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+
 /// Why [`TestService`] could not start.
 #[derive(Debug, thiserror::Error)]
 pub enum TestServiceError {
@@ -29,8 +32,8 @@ struct Drivers {
 
 /// A harness service on drivers, usually [`FakeDriver`]s, a temporary data
 /// directory, a [`MemoryKeychain`], a temporary shared Codex home and a
-/// [`FakeGitHost`], all
-/// kept across [`TestService::restart`].
+/// [`FakeGitHost`], all kept across [`TestService::restart`]. It polls open
+/// pull requests for auto-fix every 100 milliseconds.
 #[derive(Debug)]
 pub struct TestService {
     service: Service,
@@ -226,7 +229,8 @@ fn start(
         ServiceConfig::new(*agent_cli, driver.clone(), data.path().to_path_buf())
             .with_keychain(Arc::new(keychain.clone()))
             .with_codex_home(codex_home.path().to_path_buf())
-            .with_git_host(Arc::new(git_host.clone())),
+            .with_git_host(Arc::new(git_host.clone()))
+            .with_pull_request_poll_interval(POLL_INTERVAL),
         |config, (agent_cli, driver)| config.with_driver(*agent_cli, driver.clone()),
     );
     if let Some(driver) = &drivers.repo_check {

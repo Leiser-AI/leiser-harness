@@ -49,6 +49,21 @@ rules. On the fake git host, write the pull request's number to
 `fake-git-host-merged` in the host account's `gh` config directory
 (`host-accounts/<id>/gh` in the data directory) to have it reported merged.
 
+Auto-fix is on for every pull request a chat opens; the top bar's Auto-fix
+button switches it per chat. While the pull request is open, the harness
+service polls the git host every 30 seconds (5 on the fake git host) with
+the entity tags of its last answer. A failing check, a conflict with the
+base branch or a new review comment wakes the chat's agent in its own
+agent session; once its turn has ended, the harness pushes the fix through
+the host account check and the hard blocks. Auto-fix stops and says why in
+the chat after three attempts without a new commit, when a check fails or
+the branch conflicts again after a fix, or when a fix cannot be pushed. On
+the fake git host, write `fake-git-host-activity.json` into the same
+directory to fail checks, make the branch conflict or post comments, for
+example `{"1": {"failed_checks": {"test": "assertion failed"}, "conflicting":
+false, "comments": [{"author": "reviewer", "body": "Rename it", "location":
+"src/lib.rs:3"}]}}`.
+
 The top bar's Terminal button opens a terminal panel on the right with a
 shell in the chat's checkout (its worktree, or the main checkout): the login
 shell on macOS, PowerShell on Windows. Each chat keeps its own shell while

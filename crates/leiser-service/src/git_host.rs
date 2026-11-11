@@ -9,8 +9,14 @@
 //! Before it pushes, the harness service asks the git host who the push
 //! signs in as ([`GitHost::account_for_push`]) and blocks a mismatch.
 //!
+//! While auto-fix watches a chat's open pull request, the harness service
+//! polls it ([`GitHost::poll_pull_request`]) with the entity tags of the
+//! last answer, so an unchanged pull request costs only `304 Not
+//! Modified` answers, which do not count against the git host's rate limit.
+//!
 //! [`GhGitHost`] is the GitHub CLI. Tests use the testkit's fake git host.
 
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -19,6 +25,8 @@ use tokio::process::Command;
 
 use crate::installed::{self, Environment, Program};
 use crate::{LoginProcess, PullRequestState};
+
+mod github_poll;
 
 /// The variable that names the `gh` config directory.
 pub const GH_CONFIG_DIR: &str = "GH_CONFIG_DIR";
@@ -53,6 +61,96 @@ pub struct NewPullRequest {
 pub struct OpenedPullRequest {
     pub number: u64,
     pub url: String,
+}
+
+/// An open pull request as one poll of the git host found it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PullRequestActivity {
+    pub state: PullRequestState,
+    /// The commit the pull request's head branch points to.
+    pub head_commit: String,
+    /// The commit its base branch points to.
+    pub base_commit: String,
+    pub mergeable: Mergeable,
+    /// The checks on `head_commit`.
+    pub checks: Vec<Check>,
+    /// Review comments, reviews with text and comments on the pull
+    /// request, by people, not bots.
+    pub comments: Vec<ReviewComment>,
+}
+
+/// Whether a pull request can be merged into its base branch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mergeable {
+    /// The git host has not worked it out yet.
+    Unknown,
+    Clean,
+    /// The branch conflicts with the base branch.
+    Conflicting,
+}
+
+/// A check, such as a CI job, on a pull request's head commit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Check {
+    /// The git host's id of the check, unique in the repository.
+    pub id: String,
+    pub name: String,
+    pub outcome: CheckOutcome,
+}
+
+/// Where a check stands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CheckOutcome {
+    /// Queued or running.
+    Pending,
+    /// Succeeded, or ended in a way that is not a failure (skipped,
+    /// neutral, cancelled).
+    Passed,
+    Failed {
+        /// Where the git host shows the check.
+        url: String,
+        /// The end of the check's log, or the git host's summary of it.
+        log: String,
+    },
+}
+
+/// A comment on a pull request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewComment {
+    /// The git host's id of the comment, unique in the repository.
+    pub id: String,
+    pub author: String,
+    pub body: String,
+    /// The file and line it is on, such as `src/lib.rs:12`; `None` for a
+    /// comment on the whole pull request.
+    pub location: Option<String>,
+}
+
+/// The entity tags (`ETag`) of the git host's answers to one poll, by
+/// request. Only the git host reads them; the harness service passes them
+/// back on the next poll.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EntityTags(BTreeMap<String, String>);
+
+impl EntityTags {
+    /// The tag of the answer to `request`, if it had one.
+    #[must_use]
+    pub fn get(&self, request: &str) -> Option<&str> {
+        self.0.get(request).map(String::as_str)
+    }
+
+    /// Keeps `tag` as the tag of the answer to `request`.
+    pub fn insert(&mut self, request: &str, tag: &str) {
+        self.0.insert(request.to_owned(), tag.to_owned());
+    }
+}
+
+/// A pull request as one poll found it, with the tags its next poll
+/// sends back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PolledPullRequest {
+    pub activity: PullRequestActivity,
+    pub tags: EntityTags,
 }
 
 /// Why the git host could not do what the harness service asked.
@@ -124,6 +222,19 @@ pub trait GitHost: Send + Sync + std::fmt::Debug {
         remote: &'a str,
         number: u64,
     ) -> GitHostFuture<'a, Result<PullRequestState, GitHostError>>;
+
+    /// Polls pull request `number` in the repository at `remote`: its
+    /// state, head and base commits, whether it conflicts, its checks and
+    /// its comments. `last` is the previous poll's answer; what has not
+    /// changed since is taken from it, after a conditional request with its
+    /// entity tags.
+    fn poll_pull_request<'a>(
+        &'a self,
+        access: &'a HostAccountAccess,
+        remote: &'a str,
+        number: u64,
+        last: Option<&'a PolledPullRequest>,
+    ) -> GitHostFuture<'a, Result<PolledPullRequest, GitHostError>>;
 }
 
 /// The GitHub CLI `gh`, found as an installed agent CLI is (see
@@ -327,6 +438,16 @@ impl GitHost for GhGitHost {
                 _ => Err(GitHostError::UnexpectedAnswer { answer }),
             }
         })
+    }
+
+    fn poll_pull_request<'a>(
+        &'a self,
+        access: &'a HostAccountAccess,
+        remote: &'a str,
+        number: u64,
+        last: Option<&'a PolledPullRequest>,
+    ) -> GitHostFuture<'a, Result<PolledPullRequest, GitHostError>> {
+        Box::pin(self.poll(access, remote, number, last))
     }
 }
 

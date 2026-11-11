@@ -29,6 +29,7 @@
 //! [`TranscriptEntry`] and the `repo-check` report. A change that old data no longer parses with bumps
 //! [`VERSION`] and migrates the older version in [`Store::open`].
 
+use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -37,7 +38,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::repo_check::Outcome;
 use crate::{
-    AgentCli, AgentEvent, PermissionMode, Provider, PullRequestState, SubscriptionKind,
+    AgentCli, AgentEvent, AutoFix, PermissionMode, Provider, PullRequestState, SubscriptionKind,
     TranscriptEntry, TurnCheckpoints,
 };
 
@@ -182,6 +183,52 @@ pub(crate) struct ChatV3 {
     /// The chat's pull request, once it is open.
     #[serde(default)]
     pub pull_request: Option<PullRequestV3>,
+    /// The chat's auto-fix; on for chats stored before it existed.
+    #[serde(default)]
+    pub auto_fix: AutoFixV3,
+}
+
+/// A chat's auto-fix: its setting and what it remembers between polls.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct AutoFixV3 {
+    pub setting: AutoFix,
+    /// The ids of the comments it has handled; `None` takes the next
+    /// poll's comments as handled.
+    pub seen_comments: Option<Vec<String>>,
+    /// Per check an attempt tried to fix, the head commit then.
+    pub attempted_checks: BTreeMap<String, String>,
+    pub attempted_conflict: Option<ConflictV3>,
+    pub attempts: Option<AttemptsV3>,
+    /// The head commit before the last pushed fix.
+    pub pushed_over: Option<String>,
+}
+
+impl Default for AutoFixV3 {
+    fn default() -> Self {
+        Self {
+            setting: AutoFix::On,
+            seen_comments: None,
+            attempted_checks: BTreeMap::new(),
+            attempted_conflict: None,
+            attempts: None,
+            pushed_over: None,
+        }
+    }
+}
+
+/// A conflict an attempt tried to resolve: the base and head commits then.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ConflictV3 {
+    pub base: String,
+    pub head: String,
+}
+
+/// How many attempts auto-fix made on one head commit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct AttemptsV3 {
+    pub head: String,
+    pub count: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -453,6 +500,7 @@ impl Store {
                     held: Vec::new(),
                     worktree_removed: false,
                     pull_request: None,
+                    auto_fix: AutoFixV3::default(),
                 })
                 .collect(),
         };

@@ -8,6 +8,9 @@
 import type {
   AgentEvent,
   Answer,
+  AutoFix,
+  AutoFixStop,
+  AutoFixTrigger,
   Branch,
   ChatId,
   ChatOverview,
@@ -721,6 +724,9 @@ function chatActions(
       }),
     );
     actions.push(check);
+    if (pullRequest.state === "open" && view.place !== "removed_worktree") {
+      actions.push(autoFixAction(overview.chat, pullRequest.number, view.autoFix));
+    }
   }
   // A removed worktree has nothing left to push, open or run a shell in.
   if (view.place === "removed_worktree") return actions;
@@ -790,6 +796,54 @@ function chatActions(
     actions.push(done);
   }
   return actions;
+}
+
+/** The switch for auto-fix of the chat's open pull request. */
+function autoFixAction(chat: ChatId, number: number, autoFix: AutoFix): HTMLButtonElement {
+  const label = { on: "Auto-fix on", off: "Auto-fix off", stopped: "Auto-fix stopped" }[autoFix.type];
+  const button = topBarAction("wrench", label, autoFix.type === "stopped" ? "ghost warning" : "ghost");
+  button.setAttribute("aria-pressed", String(autoFix.type === "on"));
+  button.title =
+    autoFix.type === "on"
+      ? `The harness watches pull request #${number} and wakes the agent when a check fails, the branch conflicts or a review comment comes in, then pushes the fix. Click to switch it off.`
+      : autoFix.type === "stopped"
+        ? `${autoFixStopText(autoFix.reason)} Click to switch it on again.`
+        : `Click to let the harness fix pull request #${number} by itself.`;
+  button.addEventListener("click", () =>
+    act(async () => {
+      button.disabled = true;
+      try {
+        await service.setAutoFix(chat, autoFix.type !== "on");
+      } finally {
+        await refresh();
+      }
+    }),
+  );
+  return button;
+}
+
+function autoFixStopText(reason: AutoFixStop): string {
+  switch (reason.type) {
+    case "no_progress":
+      return `${reason.attempts} attempts in a row changed nothing on the branch.`;
+    case "check_failed_again":
+      return `The check ${reason.name} failed again after a fix.`;
+    case "conflict_again":
+      return "The branch conflicts with the base branch again after the agent merged it.";
+    case "push_failed":
+      return `The fix could not be pushed: ${reason.reason}`;
+  }
+}
+
+function autoFixTriggerText(trigger: AutoFixTrigger): string {
+  switch (trigger.type) {
+    case "check_failed":
+      return `The check ${trigger.name} failed.`;
+    case "conflict":
+      return `The branch conflicts with ${trigger.base}.`;
+    case "comment":
+      return `${trigger.author}${trigger.location === null ? "" : ` on ${trigger.location}`}: ${trigger.body}`;
+  }
 }
 
 /** A short status for the sidebar. */
@@ -1212,6 +1266,20 @@ function renderEntry(entry: TranscriptEntry, context: ChatContext): HTMLElement 
       const how = entry.automatic ? " by itself: both subscriptions are interchangeable" : "";
       return notice("", "key", `Continued on ${context.subscriptionName(entry.subscription)}${how}.`);
     }
+    case "auto_fix_triggered": {
+      const item = notice("auto-fix", "wrench", "", `Auto-fix · pull request #${entry.pull_request}`);
+      const list = el("ul", "auto-fix-triggers");
+      list.append(...entry.triggers.map((trigger) => el("li", "", autoFixTriggerText(trigger))));
+      item.querySelector(".entry-text")?.replaceWith(list);
+      return item;
+    }
+    case "auto_fix_stopped":
+      return notice(
+        "failed",
+        "alert",
+        `${autoFixStopText(entry.reason)} Look at the pull request, then switch auto-fix on again in the top bar.`,
+        "Auto-fix stopped",
+      );
     case "script_finished": {
       const failed = entry.exit_code !== 0;
       const exit = entry.exit_code === null ? "did not finish" : `exit ${entry.exit_code}`;
