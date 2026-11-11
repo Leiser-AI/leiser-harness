@@ -1,13 +1,15 @@
 //! The driver interface: one driver per agent CLI (ADR 0002).
 //!
-//! This tracer bullet covers start, send and read events. Approve,
-//! interrupt, queue, steer and resume follow in later tickets.
+//! Covers start, send, read events, steer and interrupt. Queue needs
+//! nothing from the driver: the harness service holds queued messages and
+//! sends each when the running turn ends. Approve and resume follow in
+//! later tickets.
 
 use std::path::PathBuf;
 
 use tokio::sync::mpsc;
 
-use crate::AgentEvent;
+use crate::{AgentEvent, Version};
 
 /// What an agent session needs to start.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -19,8 +21,15 @@ pub struct SessionSpec {
 /// Input for a running agent session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionInput {
-    /// A message from the developer.
+    /// A message from the developer that starts a turn. Sent only while no
+    /// turn runs.
     UserMessage { text: String },
+    /// A message from the developer for the running turn. Sent only while
+    /// a turn runs, and only when [`Driver::supports_steer`] is true.
+    Steer { text: String },
+    /// Stops the running turn, which then ends with
+    /// [`AgentEvent::TurnInterrupted`]. Ignored when no turn runs.
+    Interrupt,
 }
 
 /// A running agent session: send it input, read its events.
@@ -41,6 +50,13 @@ pub trait Driver: Send + Sync + std::fmt::Debug {
     ///
     /// Returns a [`DriverError`] when the agent CLI cannot be started.
     fn start(&self, spec: SessionSpec) -> Result<AgentSession, DriverError>;
+
+    /// Whether the agent CLI can take a message mid-turn
+    /// ([`SessionInput::Steer`]). When it cannot, the harness service
+    /// queues steered messages instead.
+    fn supports_steer(&self) -> bool {
+        false
+    }
 }
 
 /// Why a driver could not start an agent session.
@@ -50,17 +66,19 @@ pub enum DriverError {
     Spawn(#[source] std::io::Error),
     #[error("the agent CLI did not provide its standard streams")]
     MissingStreams,
-    #[error("could not read the version of {agent_cli} from {output:?}")]
-    VersionUnreadable {
+    #[error("could not read the version of {agent_cli} from `--version`: {output:?}")]
+    UnreadableVersion {
         agent_cli: &'static str,
         output: String,
     },
     #[error(
-        "{agent_cli} {found} is older than {minimum}, the oldest version the harness supports; update {agent_cli}"
+        "{agent_cli} {found} is too old: the harness needs at least {minimum} because {reason}. \
+         Update {agent_cli} and try again."
     )]
-    VersionTooOld {
+    UnsupportedVersion {
         agent_cli: &'static str,
-        found: String,
-        minimum: String,
+        found: Version,
+        minimum: Version,
+        reason: &'static str,
     },
 }

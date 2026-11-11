@@ -19,6 +19,7 @@ const CHANNEL_BUFFER: usize = 64;
 #[derive(Debug)]
 pub struct FakeDriver {
     program: PathBuf,
+    supports_steer: bool,
     script_file: PathBuf,
     /// Holds the script file; removed when the driver is dropped.
     _dir: TempDir,
@@ -37,6 +38,7 @@ impl FakeDriver {
         std::fs::write(&script_file, serde_json::to_vec(script)?)?;
         Ok(Self {
             program: program.to_path_buf(),
+            supports_steer: script.supports_steer,
             script_file,
             _dir: dir,
         })
@@ -67,11 +69,20 @@ impl Driver for FakeDriver {
         });
         Ok(AgentSession { input, events })
     }
+
+    fn supports_steer(&self) -> bool {
+        self.supports_steer
+    }
 }
 
 async fn write_input(mut stdin: ChildStdin, mut input: mpsc::Receiver<SessionInput>) {
-    while let Some(SessionInput::UserMessage { text }) = input.recv().await {
-        let Ok(mut line) = serde_json::to_vec(&FakeInput::UserMessage { text }) else {
+    while let Some(message) = input.recv().await {
+        let message = match message {
+            SessionInput::UserMessage { text } => FakeInput::UserMessage { text },
+            SessionInput::Steer { text } => FakeInput::Steer { text },
+            SessionInput::Interrupt => FakeInput::Interrupt,
+        };
+        let Ok(mut line) = serde_json::to_vec(&message) else {
             return;
         };
         line.push(b'\n');

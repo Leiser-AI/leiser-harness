@@ -4,14 +4,18 @@
 //! [`Command`]s in, [`Event`]s out (see [`ServiceHandle`]). Agent CLIs sit
 //! behind the [`Driver`] interface (ADR 0002).
 
+mod claude_code;
 mod codex;
 mod driver;
 mod protocol;
 mod service;
+mod version;
 
+pub use claude_code::ClaudeCodeDriver;
 pub use codex::CodexDriver;
 pub use driver::{AgentSession, Driver, DriverError, SessionInput, SessionSpec};
 pub use protocol::{
-    AgentEvent, ChatId, Checkout, Command, CommandError, Event, RepositoryId, Response,
+    AgentEvent, ChatId, Checkout, Command, CommandError, Event, QueueReason, RepositoryId, Response,
 };
 pub use service::{ServiceConfig, ServiceHandle, start};
+pub use version::Version;

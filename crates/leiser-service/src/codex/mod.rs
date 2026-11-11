@@ -1,9 +1,9 @@
 //! The Codex driver: runs the developer's installed Codex as
 //! `codex app-server` and talks to it over its JSON-RPC protocol on
-//! standard input and output.
+//! standard input and output. Steer uses `turn/steer`, interrupt
+//! `turn/interrupt`; both wait for the turn's id when they come before it.
 
 mod conversation;
-mod version;
 mod wire;
 
 use std::path::{Path, PathBuf};
@@ -15,14 +15,9 @@ use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::mpsc;
 
 use self::conversation::{Conversation, Output, ProtocolError};
-use self::version::Version;
-use crate::{AgentEvent, AgentSession, Driver, DriverError, SessionInput, SessionSpec};
+use crate::{AgentEvent, AgentSession, Driver, DriverError, SessionInput, SessionSpec, Version};
 
 const AGENT_CLI: &str = "Codex";
-
-/// The oldest Codex whose app-server protocol has every method and field
-/// this driver uses, including `turn/steer` and `turn/interrupt`.
-const MINIMUM_VERSION: Version = Version::new(0, 100, 0);
 
 const CHANNEL_BUFFER: usize = 64;
 
@@ -36,47 +31,23 @@ pub struct CodexDriver {
 }
 
 impl CodexDriver {
-    /// Checks that `program` is a Codex at or above the minimum version.
-    /// Pass `codex` to use the one on `PATH`.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`DriverError::Spawn`] when `program` cannot run,
-    /// [`DriverError::VersionUnreadable`] when it prints no Codex version,
-    /// and [`DriverError::VersionTooOld`] when the version is below the
-    /// minimum.
-    pub async fn new(program: impl Into<PathBuf>) -> Result<Self, DriverError> {
-        let program = program.into();
-        let output = Command::new(&program)
-            .arg("--version")
-            .stdin(Stdio::null())
-            .stderr(Stdio::null())
-            .kill_on_drop(true)
-            .output()
-            .await
-            .map_err(DriverError::Spawn)?;
-        let text = String::from_utf8_lossy(&output.stdout);
-        let version = output
-            .status
-            .success()
-            .then(|| Version::from_version_output(&text))
-            .flatten()
-            .ok_or_else(|| DriverError::VersionUnreadable {
-                agent_cli: AGENT_CLI,
-                output: text.trim().chars().take(200).collect(),
-            })?;
-        if version < MINIMUM_VERSION {
-            return Err(DriverError::VersionTooOld {
-                agent_cli: AGENT_CLI,
-                found: text
-                    .split_whitespace()
-                    .nth(1)
-                    .unwrap_or_default()
-                    .to_owned(),
-                minimum: MINIMUM_VERSION.to_string(),
-            });
+    /// The oldest Codex the driver supports.
+    pub const MINIMUM_VERSION: Version = Version::new(0, 100, 0);
+    const MINIMUM_VERSION_REASON: &str = "older versions lack app-server protocol methods \
+         and fields the driver uses, such as `turn/steer`";
+
+    /// A driver that runs `program` as Codex.
+    #[must_use]
+    pub fn new(program: impl Into<PathBuf>) -> Self {
+        Self {
+            program: program.into(),
         }
-        Ok(Self { program })
+    }
+
+    /// A driver that runs `codex` from `PATH`.
+    #[must_use]
+    pub fn installed() -> Self {
+        Self::new("codex")
     }
 
     /// The Codex program this driver runs.
@@ -84,10 +55,54 @@ impl CodexDriver {
     pub fn program(&self) -> &Path {
         &self.program
     }
+
+    /// Asks the program for its version.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DriverError::Spawn`] when the program cannot run and
+    /// [`DriverError::UnreadableVersion`] when its answer is not a version.
+    pub fn version(&self) -> Result<Version, DriverError> {
+        let output = std::process::Command::new(&self.program)
+            .arg("--version")
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .map_err(DriverError::Spawn)?;
+        let text = String::from_utf8_lossy(&output.stdout);
+        // Codex answers `codex-cli 0.167.1`.
+        let mut words = text.split_whitespace();
+        words
+            .next()
+            .filter(|program| program.starts_with("codex"))
+            .and(words.next())
+            .and_then(Version::parse)
+            .filter(|_| output.status.success())
+            .ok_or_else(|| DriverError::UnreadableVersion {
+                agent_cli: AGENT_CLI,
+                output: text.trim().chars().take(200).collect(),
+            })
+    }
+
+    fn check_version(&self) -> Result<(), DriverError> {
+        let found = self.version()?;
+        if found < Self::MINIMUM_VERSION {
+            return Err(DriverError::UnsupportedVersion {
+                agent_cli: AGENT_CLI,
+                found,
+                minimum: Self::MINIMUM_VERSION,
+                reason: Self::MINIMUM_VERSION_REASON,
+            });
+        }
+        Ok(())
+    }
 }
 
 impl Driver for CodexDriver {
+    /// Checks the installed version, then starts `codex app-server` in the
+    /// working directory.
     fn start(&self, spec: SessionSpec) -> Result<AgentSession, DriverError> {
+        self.check_version()?;
         let working_directory = spec
             .working_directory
             .to_str()
@@ -131,6 +146,11 @@ impl Driver for CodexDriver {
         });
         Ok(AgentSession { input, events })
     }
+
+    /// Codex takes messages mid-turn with `turn/steer`.
+    fn supports_steer(&self) -> bool {
+        true
+    }
 }
 
 /// Why [`run`] returned.
@@ -160,6 +180,8 @@ async fn run(
         let output = tokio::select! {
             message = input.recv() => match message {
                 Some(SessionInput::UserMessage { text }) => conversation.user_message(text)?,
+                Some(SessionInput::Steer { text }) => conversation.steer(text)?,
+                Some(SessionInput::Interrupt) => conversation.interrupt()?,
                 None => return Err(SessionStop::InputClosed),
             },
             line = lines.next_line() => match line? {

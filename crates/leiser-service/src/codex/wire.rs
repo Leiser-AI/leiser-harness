@@ -237,6 +237,17 @@ pub(super) struct Thread {
     pub id: String,
 }
 
+/// The parts of `turn/start`'s result the driver needs.
+#[derive(Debug, Deserialize)]
+pub(super) struct TurnStarted {
+    pub turn: TurnRef,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct TurnRef {
+    pub id: String,
+}
+
 #[derive(Deserialize)]
 struct Envelope {
     #[serde(default)]
@@ -362,6 +373,22 @@ pub(super) struct ThreadStartParams {
 pub(super) struct TurnStartParams {
     pub thread_id: String,
     pub input: Vec<UserInput>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct TurnSteerParams {
+    pub thread_id: String,
+    pub input: Vec<UserInput>,
+    /// Codex refuses the steer when this is no longer the running turn.
+    pub expected_turn_id: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct TurnInterruptParams {
+    pub thread_id: String,
+    pub turn_id: String,
 }
 
 #[derive(Debug, Serialize)]

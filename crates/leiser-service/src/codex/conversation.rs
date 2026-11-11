@@ -6,7 +6,8 @@ use std::collections::{HashMap, VecDeque};
 use super::wire::{
     self, ClientInfo, ClientNotification, ClientRequest, ErrorResponse, Incoming, InitializeParams,
     Item, Notification, RateLimits, Request, RequestId, RpcError, ThreadStartParams, ThreadStarted,
-    Turn, TurnStartParams, TurnStatus, UserInput, WireError,
+    Turn, TurnInterruptParams, TurnStartParams, TurnStarted, TurnStatus, TurnSteerParams,
+    UserInput, WireError,
 };
 use crate::AgentEvent;
 
@@ -40,19 +41,23 @@ pub(super) struct Output {
     pub events: Vec<AgentEvent>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Pending {
     Initialize,
     ThreadStart,
     TurnStart,
+    TurnSteer { text: String },
+    TurnInterrupt,
 }
 
 impl Pending {
-    const fn method(self) -> &'static str {
+    const fn method(&self) -> &'static str {
         match self {
             Self::Initialize => "initialize",
             Self::ThreadStart => "thread/start",
             Self::TurnStart => "turn/start",
+            Self::TurnSteer { .. } => "turn/steer",
+            Self::TurnInterrupt => "turn/interrupt",
         }
     }
 }
@@ -65,8 +70,27 @@ enum Phase {
     StartingThread,
     Ready {
         thread_id: String,
-        turn_running: bool,
+        turn: TurnState,
     },
+}
+
+#[derive(Debug)]
+enum TurnState {
+    Idle,
+    /// `turn/start` is sent; steer and interrupt need the turn's id, which
+    /// comes with the answer, so they wait here until then.
+    Starting {
+        early: Vec<MidTurn>,
+    },
+    Running {
+        turn_id: String,
+    },
+}
+
+#[derive(Debug)]
+enum MidTurn {
+    Steer(String),
+    Interrupt,
 }
 
 /// The protocol state of one agent session.
@@ -74,8 +98,10 @@ enum Phase {
 pub(super) struct Conversation {
     working_directory: String,
     phase: Phase,
-    /// Messages waiting for the thread to start or the running turn to end.
-    waiting: VecDeque<String>,
+    /// Turns waiting for the thread to start or the running turn to end,
+    /// each with its messages: the first one, then any steered into it
+    /// before it started.
+    waiting: VecDeque<Vec<String>>,
     pending: HashMap<i64, Pending>,
     next_id: i64,
     rate_limits: RateLimits,
@@ -107,9 +133,57 @@ impl Conversation {
     /// A message from the developer. It starts a turn at once, or when the
     /// thread has started and no turn runs.
     pub fn user_message(&mut self, text: String) -> Result<Output, ProtocolError> {
-        self.waiting.push_back(text);
+        self.waiting.push_back(vec![text]);
         let mut output = Output::default();
         self.start_waiting_turn(&mut output)?;
+        Ok(output)
+    }
+
+    /// A message for the running turn. A turn that waits for the thread to
+    /// start takes it as a second message. Without a turn, or when Codex
+    /// refuses it because the turn has just ended, it becomes the next turn.
+    pub fn steer(&mut self, text: String) -> Result<Output, ProtocolError> {
+        let mut output = Output::default();
+        match &mut self.phase {
+            Phase::Ready {
+                turn: TurnState::Running { .. },
+                ..
+            } => self.send_mid_turn(&mut output, MidTurn::Steer(text))?,
+            Phase::Ready {
+                turn: TurnState::Starting { early },
+                ..
+            } => early.push(MidTurn::Steer(text)),
+            _ => {
+                if let Some(turn) = self.waiting.front_mut() {
+                    turn.push(text);
+                } else {
+                    self.waiting.push_back(vec![text]);
+                    self.start_waiting_turn(&mut output)?;
+                }
+            }
+        }
+        Ok(output)
+    }
+
+    /// Stops the running turn. A turn that waits for the thread to start
+    /// ends at once, without reaching Codex. Ignored when no turn runs.
+    pub fn interrupt(&mut self) -> Result<Output, ProtocolError> {
+        let mut output = Output::default();
+        match &mut self.phase {
+            Phase::Ready {
+                turn: TurnState::Running { .. },
+                ..
+            } => self.send_mid_turn(&mut output, MidTurn::Interrupt)?,
+            Phase::Ready {
+                turn: TurnState::Starting { early },
+                ..
+            } => early.push(MidTurn::Interrupt),
+            _ => {
+                if self.waiting.pop_front().is_some() {
+                    output.events.push(AgentEvent::TurnInterrupted);
+                }
+            }
+        }
         Ok(output)
     }
 
@@ -146,26 +220,46 @@ impl Conversation {
     fn start_waiting_turn(&mut self, output: &mut Output) -> Result<(), ProtocolError> {
         let Phase::Ready {
             thread_id,
-            turn_running,
+            turn: turn @ TurnState::Idle,
         } = &mut self.phase
         else {
             return Ok(());
         };
-        if *turn_running {
-            return Ok(());
-        }
-        let Some(text) = self.waiting.pop_front() else {
+        let Some(texts) = self.waiting.pop_front() else {
             return Ok(());
         };
-        *turn_running = true;
+        *turn = TurnState::Starting { early: Vec::new() };
         let params = TurnStartParams {
             thread_id: thread_id.clone(),
-            input: vec![UserInput::Text {
-                text,
-                text_elements: [],
-            }],
+            input: texts.into_iter().map(text_input).collect(),
         };
         self.request(output, Pending::TurnStart, params)
+    }
+
+    /// Sends a steer or an interrupt for the running turn.
+    fn send_mid_turn(&mut self, output: &mut Output, action: MidTurn) -> Result<(), ProtocolError> {
+        let Phase::Ready {
+            thread_id,
+            turn: TurnState::Running { turn_id },
+        } = &self.phase
+        else {
+            return Ok(());
+        };
+        let (thread_id, turn_id) = (thread_id.clone(), turn_id.clone());
+        match action {
+            MidTurn::Steer(text) => {
+                let params = TurnSteerParams {
+                    thread_id,
+                    input: vec![text_input(text.clone())],
+                    expected_turn_id: turn_id,
+                };
+                self.request(output, Pending::TurnSteer { text }, params)
+            }
+            MidTurn::Interrupt => {
+                let params = TurnInterruptParams { thread_id, turn_id };
+                self.request(output, Pending::TurnInterrupt, params)
+            }
+        }
     }
 
     fn on_response(
@@ -179,12 +273,25 @@ impl Conversation {
             RequestId::Text(_) => None,
         }
         .ok_or(ProtocolError::UnknownResponse(id))?;
-        let result = outcome.map_err(|error| ProtocolError::Rejected {
-            method: pending.method(),
-            error,
-        })?;
-        match pending {
-            Pending::Initialize => {
+        let result = match (outcome, pending) {
+            (Ok(result), pending) => (result, pending),
+            // The turn ended before the steer reached it: the message
+            // becomes the next turn instead of getting lost.
+            (Err(_), Pending::TurnSteer { text }) => {
+                self.waiting.push_back(vec![text]);
+                return self.start_waiting_turn(output);
+            }
+            // The turn ended before the interrupt reached it.
+            (Err(_), Pending::TurnInterrupt) => return Ok(()),
+            (Err(error), pending) => {
+                return Err(ProtocolError::Rejected {
+                    method: pending.method(),
+                    error,
+                });
+            }
+        };
+        match result {
+            (_, Pending::Initialize) => {
                 output
                     .lines
                     .push(serde_json::to_string(&ClientNotification {
@@ -198,16 +305,32 @@ impl Conversation {
                 };
                 self.request(output, Pending::ThreadStart, params)?;
             }
-            Pending::ThreadStart => {
+            (result, pending @ Pending::ThreadStart) => {
                 let started: ThreadStarted = result.parse(pending.method())?;
                 self.phase = Phase::Ready {
                     thread_id: started.thread.id,
-                    turn_running: false,
+                    turn: TurnState::Idle,
                 };
                 self.start_waiting_turn(output)?;
             }
-            // The turn's events arrive as notifications.
-            Pending::TurnStart => {}
+            (result, pending @ Pending::TurnStart) => {
+                let started: TurnStarted = result.parse(pending.method())?;
+                let Phase::Ready { turn, .. } = &mut self.phase else {
+                    return Ok(());
+                };
+                // The turn may already have completed; then it stays idle.
+                if let TurnState::Starting { early } = turn {
+                    let early = std::mem::take(early);
+                    *turn = TurnState::Running {
+                        turn_id: started.turn.id,
+                    };
+                    for action in early {
+                        self.send_mid_turn(output, action)?;
+                    }
+                }
+            }
+            // Accepted; the turn's events arrive as notifications.
+            (_, Pending::TurnSteer { .. } | Pending::TurnInterrupt) => {}
         }
         Ok(())
     }
@@ -225,9 +348,23 @@ impl Conversation {
             }
             Notification::TurnCompleted(turn) => {
                 output.events.extend(self.usage_limit(&turn, now));
-                output.events.push(AgentEvent::TurnEnded);
-                if let Phase::Ready { turn_running, .. } = &mut self.phase {
-                    *turn_running = false;
+                output
+                    .events
+                    .push(if turn.status == TurnStatus::Interrupted {
+                        AgentEvent::TurnInterrupted
+                    } else {
+                        AgentEvent::TurnEnded
+                    });
+                if let Phase::Ready { turn, .. } = &mut self.phase {
+                    // Steers that never reached the turn become the next turns.
+                    if let TurnState::Starting { early } = turn {
+                        for action in std::mem::take(early) {
+                            if let MidTurn::Steer(text) = action {
+                                self.waiting.push_back(vec![text]);
+                            }
+                        }
+                    }
+                    *turn = TurnState::Idle;
                 }
                 self.start_waiting_turn(output)?;
             }
@@ -267,6 +404,13 @@ impl Conversation {
             resets_in_seconds: resets_at
                 .map(|resets_at| u64::try_from(resets_at.saturating_sub(now)).unwrap_or(0)),
         })
+    }
+}
+
+fn text_input(text: String) -> UserInput {
+    UserInput::Text {
+        text,
+        text_elements: [],
     }
 }
 
@@ -596,6 +740,147 @@ mod tests {
         ] {
             assert!(conversation.receive(line, NOW).is_err(), "{line}");
         }
+        Ok(())
+    }
+
+    /// A conversation with a running turn `u1`; the next request id is 3.
+    fn running() -> TestResult<Conversation> {
+        let mut conversation = ready()?;
+        conversation.user_message("one".to_owned())?;
+        receive(
+            &mut conversation,
+            &json!({"id": 2, "result": {"turn": {"id": "u1", "items": [], "status": "inProgress", "error": null}}}),
+        )?;
+        Ok(conversation)
+    }
+
+    #[test]
+    fn a_steer_goes_into_the_running_turn() -> TestResult {
+        let mut conversation = running()?;
+
+        let output = conversation.steer("also this".to_owned())?;
+
+        let steer = &lines(&output)?[0];
+        assert_eq!(steer["method"], "turn/steer");
+        assert_eq!(steer["params"]["threadId"], "t1");
+        assert_eq!(steer["params"]["expectedTurnId"], "u1");
+        assert_eq!(steer["params"]["input"][0]["text"], "also this");
+        Ok(())
+    }
+
+    #[test]
+    fn a_steer_before_the_turn_id_is_known_is_sent_once_it_is() -> TestResult {
+        let mut conversation = ready()?;
+        conversation.user_message("one".to_owned())?;
+
+        assert_eq!(
+            conversation.steer("early".to_owned())?.lines,
+            Vec::<String>::new()
+        );
+        let output = receive(
+            &mut conversation,
+            &json!({"id": 2, "result": {"turn": {"id": "u1", "items": [], "status": "inProgress", "error": null}}}),
+        )?;
+
+        let steer = &lines(&output)?[0];
+        assert_eq!(steer["method"], "turn/steer");
+        assert_eq!(steer["params"]["expectedTurnId"], "u1");
+        Ok(())
+    }
+
+    #[test]
+    fn a_steer_codex_refuses_becomes_the_next_turn() -> TestResult {
+        let mut conversation = running()?;
+        conversation.steer("late".to_owned())?;
+        receive(
+            &mut conversation,
+            &turn_completed("completed", &Value::Null),
+        )?;
+
+        let output = receive(
+            &mut conversation,
+            &json!({"id": 3, "error": {"code": -32600, "message": "no active turn"}}),
+        )?;
+
+        let next = &lines(&output)?[0];
+        assert_eq!(next["method"], "turn/start");
+        assert_eq!(next["params"]["input"][0]["text"], "late");
+        Ok(())
+    }
+
+    #[test]
+    fn an_interrupted_turn_ends_as_interrupted() -> TestResult {
+        let mut conversation = running()?;
+
+        let output = conversation.interrupt()?;
+        let interrupt = &lines(&output)?[0];
+        assert_eq!(interrupt["method"], "turn/interrupt");
+        assert_eq!(
+            interrupt["params"],
+            json!({"threadId": "t1", "turnId": "u1"})
+        );
+        receive(&mut conversation, &json!({"id": 3, "result": {}}))?;
+        let output = receive(
+            &mut conversation,
+            &turn_completed("interrupted", &Value::Null),
+        )?;
+
+        assert_eq!(output.events, vec![AgentEvent::TurnInterrupted]);
+        Ok(())
+    }
+
+    #[test]
+    fn an_interrupt_after_the_turn_ended_is_harmless() -> TestResult {
+        let mut conversation = running()?;
+        conversation.interrupt()?;
+        receive(
+            &mut conversation,
+            &turn_completed("completed", &Value::Null),
+        )?;
+
+        let output = receive(
+            &mut conversation,
+            &json!({"id": 3, "error": {"code": -32600, "message": "no active turn"}}),
+        )?;
+
+        assert_eq!(output, Output::default());
+        assert_eq!(conversation.interrupt()?, Output::default());
+        Ok(())
+    }
+
+    #[test]
+    fn a_steer_before_the_thread_started_joins_the_waiting_turn() -> TestResult {
+        let (mut conversation, _) = Conversation::start("/repo".to_owned())?;
+        conversation.user_message("one".to_owned())?;
+        conversation.steer("two".to_owned())?;
+        receive(&mut conversation, &json!({"id": 0, "result": {}}))?;
+
+        let output = receive(
+            &mut conversation,
+            &json!({"id": 1, "result": {"thread": {"id": "t1"}}}),
+        )?;
+
+        let turn = lines(&output)?;
+        assert_eq!(turn.len(), 1, "one turn, not two");
+        assert_eq!(turn[0]["params"]["input"][0]["text"], "one");
+        assert_eq!(turn[0]["params"]["input"][1]["text"], "two");
+        Ok(())
+    }
+
+    #[test]
+    fn an_interrupt_before_the_thread_started_ends_the_waiting_turn() -> TestResult {
+        let (mut conversation, _) = Conversation::start("/repo".to_owned())?;
+        conversation.user_message("one".to_owned())?;
+
+        let output = conversation.interrupt()?;
+
+        assert_eq!(output.events, vec![AgentEvent::TurnInterrupted]);
+        receive(&mut conversation, &json!({"id": 0, "result": {}}))?;
+        let output = receive(
+            &mut conversation,
+            &json!({"id": 1, "result": {"thread": {"id": "t1"}}}),
+        )?;
+        assert_eq!(output.lines, Vec::<String>::new(), "no turn starts");
         Ok(())
     }
 }

@@ -1,5 +1,5 @@
 //! Contract tests: the real Codex behaves like the fake agent CLI for
-//! start, send and read events.
+//! start, send, read events, queue, steer and interrupt.
 //!
 //! Each contract runs twice: against the fake agent CLI, in CI, and against
 //! the developer's installed Codex, only on demand, because it needs a
@@ -10,8 +10,7 @@
 //! ```
 //!
 //! `LEISER_CODEX` names the Codex program (default: `codex` on `PATH`).
-//! Approve, interrupt, queue, steer and resume join once the driver
-//! interface has them.
+//! Approve and resume join once the driver interface has them.
 
 use std::error::Error;
 use std::path::Path;
@@ -19,10 +18,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use leiser_service::{
-    AgentEvent, ChatId, Checkout, CodexDriver, Command, Driver, Response, ServiceConfig,
-    ServiceHandle,
+    AgentEvent, ChatId, Checkout, CodexDriver, Command, Driver, Event, QueueReason, Response,
+    ServiceConfig, ServiceHandle, SessionSpec,
 };
-use leiser_testkit::{FakeDriver, Script, Step, TestRepo, collect_turn_within};
+use leiser_testkit::{FakeDriver, Gate, Script, Step, TestRepo, collect_turn_within};
+use tokio::sync::broadcast;
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
@@ -35,9 +35,18 @@ const TURN_TIMEOUT: Duration = Duration::from_secs(180);
 /// session never waits for an approval.
 const NO_TOOLS: &str = "Do not run commands, read files or use any tool.";
 
-async fn codex() -> TestResult<Arc<dyn Driver>> {
-    let program = std::env::var_os("LEISER_CODEX").unwrap_or_else(|| "codex".into());
-    Ok(Arc::new(CodexDriver::new(program).await?))
+/// How long the contracts let Codex start its turn before they steer or
+/// interrupt it, so the message reaches the running turn in Codex rather
+/// than the driver's own wait for the thread to start.
+const CODEX_SETTLE: Duration = Duration::from_secs(8);
+
+/// A prompt whose turn runs long enough to be interrupted, steered or
+/// queued behind.
+const LONG_TURN: &str = "Write a 1500-word story about a lighthouse keeper. \
+     Do not run commands, read files or use any tool.";
+
+fn codex() -> Arc<dyn Driver> {
+    Arc::new(std::env::var_os("LEISER_CODEX").map_or_else(CodexDriver::installed, CodexDriver::new))
 }
 
 fn fake(script: &Script) -> TestResult<Arc<dyn Driver>> {
@@ -50,7 +59,7 @@ fn fake(script: &Script) -> TestResult<Arc<dyn Driver>> {
 struct Chat {
     service: ServiceHandle,
     id: ChatId,
-    events: tokio::sync::broadcast::Receiver<leiser_service::Event>,
+    events: broadcast::Receiver<Event>,
 }
 
 impl Chat {
@@ -81,9 +90,7 @@ impl Chat {
         })
     }
 
-    /// Sends a message and returns the agent's messages of the turn it
-    /// starts, after checking that the turn ended normally.
-    async fn turn(&mut self, text: &str) -> TestResult<Vec<String>> {
+    async fn send(&self, text: &str) -> TestResult {
         let response = self
             .service
             .execute(Command::SendMessage {
@@ -92,16 +99,35 @@ impl Chat {
             })
             .await?;
         assert_eq!(response, Response::MessageSent);
+        Ok(())
+    }
+
+    async fn execute(&self, command: Command) -> TestResult<Response> {
+        Ok(self.service.execute(command).await?)
+    }
+
+    /// The agent's messages of the next turn, after checking how it ended.
+    async fn next_turn(&mut self, end: &AgentEvent) -> TestResult<Vec<String>> {
         let turn = collect_turn_within(&mut self.events, self.id, TURN_TIMEOUT).await?;
-        assert_eq!(turn.last(), Some(&AgentEvent::TurnEnded), "{turn:?}");
+        assert_eq!(turn.last(), Some(end), "{turn:?}");
         let mut messages = Vec::new();
         for event in turn {
             match event {
                 AgentEvent::Message { text } => messages.push(text),
-                AgentEvent::ToolCall { .. } | AgentEvent::TurnEnded => {}
+                AgentEvent::ToolCall { .. }
+                | AgentEvent::TurnEnded
+                | AgentEvent::TurnInterrupted => {}
                 other => return Err(format!("unexpected event {other:?}").into()),
             }
         }
+        Ok(messages)
+    }
+
+    /// Sends a message and returns the agent's messages of its turn, after
+    /// checking that the turn ended normally with an answer.
+    async fn turn(&mut self, text: &str) -> TestResult<Vec<String>> {
+        self.send(text).await?;
+        let messages = self.next_turn(&AgentEvent::TurnEnded).await?;
         assert!(!messages.is_empty(), "the agent answered");
         Ok(messages)
     }
@@ -110,7 +136,7 @@ impl Chat {
 fn mentions(messages: &[String], word: &str) -> bool {
     messages
         .iter()
-        .any(|message| message.to_lowercase().contains(word))
+        .any(|message| message.to_lowercase().contains(&word.to_lowercase()))
 }
 
 // --- Contracts ---
@@ -168,6 +194,86 @@ async fn the_agent_works_in_the_chats_checkout(driver: Arc<dyn Driver>) -> TestR
     Ok(())
 }
 
+async fn an_interrupted_turn_ends_as_interrupted_and_the_chat_goes_on(
+    driver: Arc<dyn Driver>,
+    settle: Duration,
+) -> TestResult {
+    let repo = TestRepo::new()?;
+    let mut chat = Chat::start(driver, &repo).await?;
+    chat.send(LONG_TURN).await?;
+    tokio::time::sleep(settle).await;
+
+    let response = chat
+        .execute(Command::InterruptTurn { chat: chat.id })
+        .await?;
+
+    assert_eq!(response, Response::InterruptRequested);
+    chat.next_turn(&AgentEvent::TurnInterrupted).await?;
+    let answer = chat
+        .turn(&format!("Reply with the single word pong. {NO_TOOLS}"))
+        .await?;
+    assert!(mentions(&answer, "pong"), "{answer:?}");
+    Ok(())
+}
+
+async fn a_steered_message_reaches_the_running_turn_and_a_queued_one_waits(
+    driver: Arc<dyn Driver>,
+    settle: Duration,
+) -> TestResult {
+    let repo = TestRepo::new()?;
+    let mut chat = Chat::start(driver, &repo).await?;
+    chat.send(LONG_TURN).await?;
+    tokio::time::sleep(settle).await;
+
+    let queued = chat
+        .execute(Command::QueueMessage {
+            chat: chat.id,
+            text: format!("Reply with only: QUEUED-1. {NO_TOOLS}"),
+        })
+        .await?;
+    let steered = chat
+        .execute(Command::SteerMessage {
+            chat: chat.id,
+            text: format!("Stop the story now and reply with only: STEERED-2. {NO_TOOLS}"),
+        })
+        .await?;
+
+    assert_eq!(
+        queued,
+        Response::MessageQueued {
+            reason: QueueReason::Requested
+        }
+    );
+    assert_eq!(steered, Response::MessageSteered);
+    // The steered message is answered in the running turn, the queued one
+    // in a turn of its own after it.
+    let running = chat.next_turn(&AgentEvent::TurnEnded).await?;
+    assert!(mentions(&running, "STEERED-2"), "{running:?}");
+    let next = chat.next_turn(&AgentEvent::TurnEnded).await?;
+    assert!(mentions(&next, "QUEUED-1"), "{next:?}");
+    Ok(())
+}
+
+async fn an_agent_session_ends_when_its_input_is_dropped(driver: Arc<dyn Driver>) -> TestResult {
+    let repo = TestRepo::new()?;
+    let mut session = driver.start(SessionSpec {
+        working_directory: repo.path().to_path_buf(),
+    })?;
+
+    drop(session.input);
+
+    let last = tokio::time::timeout(TURN_TIMEOUT, async {
+        let mut last = None;
+        while let Some(event) = session.events.recv().await {
+            last = Some(event);
+        }
+        last
+    })
+    .await?;
+    assert_eq!(last, Some(AgentEvent::SessionEnded));
+    Ok(())
+}
+
 // --- The fake agent CLI, in CI ---
 
 #[tokio::test]
@@ -192,22 +298,73 @@ async fn fake_the_agent_works_in_the_chats_checkout() -> TestResult {
     .await
 }
 
+#[tokio::test]
+async fn fake_an_interrupted_turn_ends_as_interrupted_and_the_chat_goes_on() -> TestResult {
+    // Never opened: the turn runs until it is interrupted.
+    let gate = Gate::new()?;
+    let script = Script::new()
+        .turn([Step::message("Once upon a time"), gate.step()])
+        .turn([Step::message("pong")]);
+    an_interrupted_turn_ends_as_interrupted_and_the_chat_goes_on(fake(&script)?, Duration::ZERO)
+        .await
+}
+
+#[tokio::test]
+async fn fake_a_steered_message_reaches_the_running_turn_and_a_queued_one_waits() -> TestResult {
+    let script = Script::new()
+        .supports_steer()
+        .turn([
+            Step::message("Once upon a time"),
+            Step::WaitForSteer,
+            Step::EchoSteer,
+        ])
+        .turn([Step::EchoUserMessage]);
+    a_steered_message_reaches_the_running_turn_and_a_queued_one_waits(
+        fake(&script)?,
+        Duration::ZERO,
+    )
+    .await
+}
+
+#[tokio::test]
+async fn fake_an_agent_session_ends_when_its_input_is_dropped() -> TestResult {
+    an_agent_session_ends_when_its_input_is_dropped(fake(&Script::new())?).await
+}
+
 // --- The installed Codex, on demand ---
 
 #[tokio::test]
 #[ignore = "needs Codex and a subscription; see the module docs"]
 async fn codex_a_message_gets_an_answer_and_the_turn_ends() -> TestResult {
-    a_message_gets_an_answer_and_the_turn_ends(codex().await?).await
+    a_message_gets_an_answer_and_the_turn_ends(codex()).await
 }
 
 #[tokio::test]
 #[ignore = "needs Codex and a subscription; see the module docs"]
 async fn codex_the_next_message_continues_the_same_agent_session() -> TestResult {
-    the_next_message_continues_the_same_agent_session(codex().await?).await
+    the_next_message_continues_the_same_agent_session(codex()).await
 }
 
 #[tokio::test]
 #[ignore = "needs Codex and a subscription; see the module docs"]
 async fn codex_the_agent_works_in_the_chats_checkout() -> TestResult {
-    the_agent_works_in_the_chats_checkout(codex().await?).await
+    the_agent_works_in_the_chats_checkout(codex()).await
+}
+
+#[tokio::test]
+#[ignore = "needs Codex and a subscription; see the module docs"]
+async fn codex_an_interrupted_turn_ends_as_interrupted_and_the_chat_goes_on() -> TestResult {
+    an_interrupted_turn_ends_as_interrupted_and_the_chat_goes_on(codex(), CODEX_SETTLE).await
+}
+
+#[tokio::test]
+#[ignore = "needs Codex and a subscription; see the module docs"]
+async fn codex_a_steered_message_reaches_the_running_turn_and_a_queued_one_waits() -> TestResult {
+    a_steered_message_reaches_the_running_turn_and_a_queued_one_waits(codex(), CODEX_SETTLE).await
+}
+
+#[tokio::test]
+#[ignore = "needs Codex installed; see the module docs"]
+async fn codex_an_agent_session_ends_when_its_input_is_dropped() -> TestResult {
+    an_agent_session_ends_when_its_input_is_dropped(codex()).await
 }
