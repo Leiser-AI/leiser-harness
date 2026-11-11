@@ -7,6 +7,7 @@ use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::JoinHandle;
 
+use crate::cli_extensions::{self, CliExtensionError};
 use crate::handoff::{self, Handoff, ReadError};
 use crate::harness_mcp::{ChatRead, HarnessMcp, HarnessMcpError};
 use crate::store::{AgentSessionV2, ChatV2, HandoffV2, RepositoryV1, StateV2, StorageError, Store};
@@ -375,6 +376,29 @@ impl State {
             Command::ListChats => Ok(self.list_chats()),
             Command::ReadChat { chat } => self.read_chat(chat).await,
             Command::ChangeAgentCli { chat, agent_cli } => self.change_agent_cli(chat, agent_cli),
+            Command::ListCliExtensions { repository } => {
+                let root = self.repository_path(repository)?;
+                let listing = blocking(move || Ok(cli_extensions::list(&root))).await?;
+                Ok(Response::CliExtensions {
+                    extensions: listing.extensions,
+                    unreadable: listing.unreadable,
+                })
+            }
+            Command::ReadCliExtensionFile { repository, file } => {
+                let root = self.repository_path(repository)?;
+                let text = blocking(move || cli_extensions::read(&root, &file)).await?;
+                Ok(Response::CliExtensionFile { text })
+            }
+            Command::SaveCliExtensionFile {
+                repository,
+                file,
+                text,
+                previous,
+            } => {
+                let root = self.repository_path(repository)?;
+                blocking(move || cli_extensions::save(&root, &file, &text, &previous)).await?;
+                Ok(Response::CliExtensionFileSaved)
+            }
         }
     }
 
@@ -573,6 +597,13 @@ impl State {
             chat.title = chat.title.take().or_else(|| title(text));
         }
         Ok(())
+    }
+
+    fn repository_path(&self, repository: RepositoryId) -> Result<PathBuf, CommandError> {
+        self.repositories
+            .get(&repository)
+            .cloned()
+            .ok_or(CommandError::UnknownRepository { repository })
     }
 
     fn list_repositories(&self) -> Response {
@@ -912,6 +943,36 @@ impl State {
                     }),
                 })
                 .collect(),
+        }
+    }
+}
+
+/// Runs file system work off the command loop's thread. The loop still
+/// waits for it, as it waits for git in [`State::read_chat`].
+async fn blocking<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T, CliExtensionError> + Send + 'static,
+) -> Result<T, CommandError> {
+    match tokio::task::spawn_blocking(work).await {
+        Ok(result) => result.map_err(CommandError::from),
+        Err(error) => Err(CommandError::CliExtensionFileAccess {
+            file: PathBuf::new(),
+            reason: error.to_string(),
+        }),
+    }
+}
+
+impl From<CliExtensionError> for CommandError {
+    fn from(error: CliExtensionError) -> Self {
+        match error {
+            CliExtensionError::NotACliExtensionFile { file } => Self::NotACliExtensionFile { file },
+            CliExtensionError::Changed { file } => Self::CliExtensionFileChanged { file },
+            CliExtensionError::Invalid { file, reason } => {
+                Self::InvalidCliExtensionFile { file, reason }
+            }
+            CliExtensionError::Io { file, source } => Self::CliExtensionFileAccess {
+                file,
+                reason: source.to_string(),
+            },
         }
     }
 }
