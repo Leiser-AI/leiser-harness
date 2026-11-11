@@ -2,6 +2,11 @@
 //! its main checkout, parsed once where it is read.
 //!
 //! ```toml
+//! # The host account the repository belongs to, by name. The harness sets
+//! # its commit author and credentials in the repository's local git
+//! # config and checks the account before every push.
+//! host_account = "Work GitHub"
+//!
 //! # The permission mode new chats start in: "supervised",
 //! # "auto_accept_edits", "auto" (the default) or "full_access".
 //! permission_mode = "supervised"
@@ -70,6 +75,9 @@ pub(crate) enum ConfigError {
 /// A repository's settings.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 pub(crate) struct RepositoryConfig {
+    /// The host account the repository is bound to, by name.
+    #[serde(default)]
+    pub host_account: Option<String>,
     /// The permission mode new chats start in.
     #[serde(default)]
     pub permission_mode: PermissionMode,

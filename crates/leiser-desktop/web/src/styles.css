@@ -311,6 +311,27 @@ body {
   font-size: var(--text-sm);
 }
 
+/* A value that may be long, such as a commit author. */
+.top-bar-value.truncated {
+  max-width: 28ch;
+}
+
+/* A value that needs the developer's attention, such as an unbound host account. */
+.top-bar-value.warning {
+  padding: 0 4px;
+  border-radius: var(--radius-sm);
+  background: var(--color-warning-soft);
+  color: var(--color-warning);
+}
+
+/* A short result next to the buttons, such as the branch just pushed. */
+.top-bar-note {
+  flex: none;
+  color: var(--color-success);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+}
+
 .top-bar-action {
   flex: none;
   height: var(--control-height-sm);
@@ -323,11 +344,16 @@ body {
   color: var(--color-text);
 }
 
+/* A value that needs attention never shortens. */
+.top-bar-item:has(.warning) {
+  flex-shrink: 0;
+}
+
 /*
  * In a narrow column (a narrow window, or the terminal open beside it) the
  * values speak for themselves and the buttons show their icon.
  */
-@container (max-width: 620px) {
+@container (max-width: 900px) {
   .top-bar-facts {
     column-gap: var(--space-3);
   }
@@ -345,6 +371,14 @@ body {
   .top-bar-action {
     width: var(--control-height-sm);
     padding: 0;
+  }
+
+  /* A value that needs attention keeps its label. */
+  .top-bar-item:has(.warning) .top-bar-label {
+    position: static;
+    width: auto;
+    height: auto;
+    clip-path: none;
   }
 }
 
@@ -1394,7 +1428,7 @@ body {
 
 .subscription-rows {
   list-style: none;
-  margin: 0;
+  margin-block: 0;
   padding: 0;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-lg);
@@ -1446,6 +1480,32 @@ body {
   color: var(--color-text-muted);
   font-size: var(--text-sm);
   cursor: pointer;
+}
+
+.subscriptions-dialog > .subscription-rows {
+  margin-top: var(--space-4);
+}
+
+/* Host accounts: name over the account and commit author. */
+.host-account-row {
+  padding-left: var(--space-3);
+}
+
+.host-account-text {
+  display: flex;
+  flex: 1 1 240px;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.host-account-name {
+  font-weight: var(--weight-medium);
+}
+
+.host-account-details {
+  overflow-wrap: anywhere;
+  color: var(--color-text-muted);
+  font-size: var(--text-sm);
 }
 
 .subscription-actions {

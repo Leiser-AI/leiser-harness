@@ -14,6 +14,7 @@
         <div class="sidebar-actions">
           <button id="add-repository" type="button">Add repository</button>
           <button id="open-subscriptions" type="button">Subscriptions</button>
+          <button id="open-host-accounts" type="button">Host accounts</button>
         </div>
       </header>
       <nav id="repositories" aria-label="Repositories and chats"></nav>
@@ -108,6 +109,49 @@
         A repository's default subscription per provider is set by name in its
         <code>.leiser/config.toml</code>, for example
         <code>[subscriptions] anthropic = "Claude Team work"</code>.
+      </p>
+    </dialog>
+    <dialog id="host-accounts-dialog" class="subscriptions-dialog" aria-labelledby="host-accounts-title">
+      <header class="dialog-header">
+        <h2 id="host-accounts-title">Host accounts</h2>
+        <button id="close-host-accounts" class="ghost" type="button">Close</button>
+      </header>
+      <div id="host-accounts-error" class="error" role="alert" hidden></div>
+      <ul id="host-account-list" class="subscription-rows"></ul>
+      <section id="host-login-section" hidden>
+        <h3>Login output</h3>
+        <pre id="host-login-output" class="login-output"></pre>
+      </section>
+      <form id="add-host-account" class="add-subscription">
+        <h3>Add a host account</h3>
+        <label>
+          Name
+          <input id="new-host-name" type="text" placeholder="Work GitHub" autocomplete="off" />
+        </label>
+        <label>
+          Git host
+          <input id="new-host-git-host" type="text" value="github.com" autocomplete="off" />
+        </label>
+        <label>
+          Account (login on the git host)
+          <input id="new-host-login" type="text" autocomplete="off" spellcheck="false" />
+        </label>
+        <label>
+          Commit author name
+          <input id="new-host-author-name" type="text" autocomplete="off" />
+        </label>
+        <label>
+          Commit author email
+          <input id="new-host-author-email" type="email" autocomplete="off" spellcheck="false" />
+        </label>
+        <button class="primary" type="submit">Add host account</button>
+      </form>
+      <p class="muted dialog-note">
+        A repository is bound to its host account by name in its
+        <code>.leiser/config.toml</code>, for example
+        <code>host_account = "Work GitHub"</code>. The harness then sets the
+        commit author and the account's credentials in the repository's local
+        git config only, and checks the account before every push.
       </p>
     </dialog>
   </body>

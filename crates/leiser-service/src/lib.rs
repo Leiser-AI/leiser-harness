@@ -27,6 +27,12 @@
 //! servers, hooks, instruction files) can be listed, read and saved in the
 //! agent CLI's own files; they are not part of the harness (ADR 0003).
 //!
+//! Every repository is bound to one host account, named in its
+//! `.leiser/config.toml`. The harness service sets the commit author and
+//! the host account's credentials in the repository's local git config,
+//! never the global one, and checks with the [`GitHost`] that a push signs
+//! in as that account before it pushes.
+//!
 //! Each chat has a todo list, kept on disk like its transcript. Agent
 //! sessions get tools for it only where the repository's
 //! `.leiser/config.toml` switches agent access on.
@@ -42,8 +48,10 @@ mod cli_extensions;
 mod codex;
 mod driver;
 mod git;
+mod git_host;
 mod handoff;
 mod harness_mcp;
+mod host_accounts;
 mod installed;
 mod keychain;
 mod local_interface;
@@ -66,6 +74,9 @@ pub use driver::{
     DriverError, HARNESS_MCP_SERVER, LoginProcess, OPENAI_API_KEY, SessionInput, SessionSpec,
     SubscriptionAccess, SubscriptionEnvironment,
 };
+pub use git_host::{
+    GH_CONFIG_DIR, GhGitHost, GitHost, GitHostError, GitHostFuture, HostAccountAccess,
+};
 pub use harness_mcp::HarnessMcpError;
 pub use installed::Environment;
 pub use keychain::{KEYCHAIN_SERVICE, Keychain, KeychainError, OsKeychain};
@@ -76,11 +87,12 @@ pub use local_interface::{
 pub use program::{ArgsError, SERVICE_LOG_FILE, ServiceProgram};
 pub use protocol::{
     AgentCli, AgentEvent, Answer, ApiKey, Branch, ChatId, ChatOverview, ChatStatus, CheckId,
-    Checkout, CheckpointMoment, CliExtension, CliExtensionKind, Command, CommandError, DiffLine,
-    DiffRange, Event, FileChange, FileDiff, Finding, Hunk, InvalidCheckId, LoginAnswer,
-    LoginOutcome, OptOuts, Patch, PermissionMode, Provider, Question, QuestionOption, QueueReason,
-    RepoCheck, RepoCheckReport, RepositoryId, RepositoryOverview, RepositoryScript, Response,
-    SignIn, SubscriptionId, SubscriptionKind, SubscriptionOverview, SwitchedOffCheck, Todo, TodoId,
+    Checkout, CheckpointMoment, CliExtension, CliExtensionKind, Command, CommandError,
+    CommitAuthor, DiffLine, DiffRange, Event, FileChange, FileDiff, Finding, HostAccountBinding,
+    HostAccountId, HostAccountOverview, Hunk, InvalidCheckId, LoginAnswer, LoginOutcome, OptOuts,
+    Patch, PermissionMode, Provider, Question, QuestionOption, QueueReason, RepoCheck,
+    RepoCheckReport, RepositoryId, RepositoryOverview, RepositoryScript, Response, SignIn,
+    SubscriptionId, SubscriptionKind, SubscriptionOverview, SwitchedOffCheck, Todo, TodoId,
     TranscriptEntry, TurnCheckpoints, UnreadableCliExtensionFile, UsageLimit,
 };
 pub use service::{Service, ServiceConfig, ServiceHandle, StartError, start};

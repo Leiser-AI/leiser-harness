@@ -3,12 +3,14 @@
 //! Tests start the harness service in-process ([`TestService`]) with a
 //! [`FakeDriver`], which runs the scripted `fake-agent-cli` program instead
 //! of a real agent CLI, and a temporary git repository ([`TestRepo`]). No
-//! subscription and no network are needed. API keys go to a
+//! subscription and no network are needed; host accounts sign in to a
+//! [`FakeGitHost`]. API keys go to a
 //! [`MemoryKeychain`] and the shared Codex home is a temporary directory,
 //! so tests never touch the developer's real keychain or config.
 
 mod fake_driver;
 mod gate;
+mod git_host;
 mod harness_mcp_client;
 mod keychain;
 mod repo;
@@ -20,10 +22,11 @@ pub use fake_driver::{
     FAKE_LOGIN_FILE, FAKE_USAGE_LIMIT_FILE, FakeDriver, FakeLogin, FakeUsageLimit, UNSET,
 };
 pub use gate::Gate;
+pub use git_host::{FAKE_CREDENTIAL_HELPER, FAKE_GIT_HOST_LOGIN_FILE, FakeGitHost};
 pub use harness_mcp_client::{HarnessMcpClient, McpClientError, ToolOutput};
 pub use keychain::MemoryKeychain;
 pub use repo::{DEFAULT_BRANCH, TestRepo};
-pub use script::{FakeInput, Script, Step};
+pub use script::{FAKE_GLOBAL_AUTHOR, FakeInput, Script, Step};
 pub use service::{TestService, TestServiceError};
 pub use turn::{TurnError, collect_turn, collect_turn_within, next_event};
 

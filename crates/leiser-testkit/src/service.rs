@@ -7,7 +7,7 @@ use std::sync::Arc;
 use leiser_service::{AgentCli, Driver, Service, ServiceConfig, ServiceHandle, StartError};
 use tempfile::TempDir;
 
-use crate::{FakeDriver, MemoryKeychain, Script};
+use crate::{FakeDriver, FakeGitHost, MemoryKeychain, Script};
 
 /// Why [`TestService`] could not start.
 #[derive(Debug, thiserror::Error)]
@@ -28,7 +28,8 @@ struct Drivers {
 }
 
 /// A harness service on drivers, usually [`FakeDriver`]s, a temporary data
-/// directory, a [`MemoryKeychain`] and a temporary shared Codex home, all
+/// directory, a [`MemoryKeychain`], a temporary shared Codex home and a
+/// [`FakeGitHost`], all
 /// kept across [`TestService::restart`].
 #[derive(Debug)]
 pub struct TestService {
@@ -37,6 +38,7 @@ pub struct TestService {
     data: TempDir,
     keychain: MemoryKeychain,
     codex_home: TempDir,
+    git_host: FakeGitHost,
 }
 
 impl TestService {
@@ -112,13 +114,15 @@ impl TestService {
         let data = tempfile::tempdir()?;
         let keychain = MemoryKeychain::new();
         let codex_home = tempfile::tempdir()?;
-        let service = start(&drivers, &data, &keychain, &codex_home)?;
+        let git_host = FakeGitHost::new();
+        let service = start(&drivers, &data, &keychain, &codex_home, &git_host)?;
         Ok(Self {
             service,
             drivers,
             data,
             keychain,
             codex_home,
+            git_host,
         })
     }
 
@@ -126,6 +130,12 @@ impl TestService {
     #[must_use]
     pub fn keychain(&self) -> &MemoryKeychain {
         &self.keychain
+    }
+
+    /// The git host that host accounts sign in to.
+    #[must_use]
+    pub fn git_host(&self) -> &FakeGitHost {
+        &self.git_host
     }
 
     /// The shared Codex home that Codex subscriptions' shadow homes link to.
@@ -153,15 +163,17 @@ impl TestService {
             data,
             keychain,
             codex_home,
+            git_host,
         } = self;
         service.shutdown().await;
-        let service = start(&drivers, &data, &keychain, &codex_home)?;
+        let service = start(&drivers, &data, &keychain, &codex_home, &git_host)?;
         Ok(Self {
             service,
             drivers,
             data,
             keychain,
             codex_home,
+            git_host,
         })
     }
 }
@@ -181,15 +193,17 @@ impl TestService {
             data,
             keychain,
             codex_home,
+            git_host,
         } = self;
         service.stop_for_update().await;
-        let service = start(&drivers, &data, &keychain, &codex_home)?;
+        let service = start(&drivers, &data, &keychain, &codex_home, &git_host)?;
         Ok(Self {
             service,
             drivers,
             data,
             keychain,
             codex_home,
+            git_host,
         })
     }
 
@@ -205,12 +219,14 @@ fn start(
     data: &TempDir,
     keychain: &MemoryKeychain,
     codex_home: &TempDir,
+    git_host: &FakeGitHost,
 ) -> Result<Service, StartError> {
     let (agent_cli, driver) = &drivers.default;
     let mut config = drivers.others.iter().fold(
         ServiceConfig::new(*agent_cli, driver.clone(), data.path().to_path_buf())
             .with_keychain(Arc::new(keychain.clone()))
-            .with_codex_home(codex_home.path().to_path_buf()),
+            .with_codex_home(codex_home.path().to_path_buf())
+            .with_git_host(Arc::new(git_host.clone())),
         |config, (agent_cli, driver)| config.with_driver(*agent_cli, driver.clone()),
     );
     if let Some(driver) = &drivers.repo_check {

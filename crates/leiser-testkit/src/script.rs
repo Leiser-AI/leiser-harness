@@ -135,7 +135,17 @@ pub enum Step {
     /// answers `wrote <path>`. A read-only agent session declines, as a
     /// real agent CLI would, and answers `declined: read-only`.
     WriteFile { path: PathBuf, contents: String },
+    /// Commits everything in the working directory with `message`, as an
+    /// agent running `git commit` would, and answers `committed` or
+    /// `commit failed: <error>`. Git runs with a global config of its own
+    /// whose author is [`FAKE_GLOBAL_AUTHOR`], in place of the developer's.
+    Commit { message: String },
 }
+
+/// The commit author in the global git config that [`Step::Commit`] runs
+/// with: who commits are by when the repository's local config names no
+/// one.
+pub const FAKE_GLOBAL_AUTHOR: (&str, &str) = ("Global Author", "global@example.invalid");
 
 impl Step {
     /// A step that answers with this message.

@@ -46,8 +46,8 @@ use std::time::Duration;
 use leiser_service::{AgentEvent, Answer, PermissionMode, Question};
 use leiser_service::{CLAUDE_CONFIG_DIR, CODEX_HOME};
 use leiser_testkit::{
-    FAKE_LOGIN_FILE, FAKE_USAGE_LIMIT_FILE, FakeInput, FakeLogin, FakeUsageLimit, HarnessMcpClient,
-    McpClientError, Script, Step, UNSET,
+    FAKE_GLOBAL_AUTHOR, FAKE_LOGIN_FILE, FAKE_USAGE_LIMIT_FILE, FakeInput, FakeLogin,
+    FakeUsageLimit, HarnessMcpClient, McpClientError, Script, Step, UNSET,
 };
 use serde::{Deserialize, Serialize};
 
@@ -462,6 +462,12 @@ impl<W: Write> Turn<'_, W> {
                 return self.wait_for_answer(&request);
             }
             Step::AskQuestions { questions } => return self.ask(questions),
+            Step::Commit { message } => AgentEvent::Message {
+                text: match commit(&message) {
+                    Ok(()) => "committed".to_owned(),
+                    Err(error) => format!("commit failed: {error}"),
+                },
+            },
             Step::WriteFile { path, contents } => {
                 let text = if self.read_only {
                     "declined: read-only".to_owned()
@@ -611,4 +617,36 @@ fn emit(out: &mut impl Write, event: &AgentEvent) -> Result<(), FakeError> {
     out.write_all(b"\n")?;
     out.flush()?;
     Ok(())
+}
+
+/// Commits everything in the working directory, with a global git config
+/// of its own whose author is [`FAKE_GLOBAL_AUTHOR`].
+fn commit(message: &str) -> io::Result<()> {
+    let global = tempfile::tempdir()?;
+    let config = global.path().join("gitconfig");
+    let (name, email) = FAKE_GLOBAL_AUTHOR;
+    std::fs::write(
+        &config,
+        format!("[user]\n\tname = {name}\n\temail = {email}\n"),
+    )?;
+    let git = |args: &[&str]| -> io::Result<()> {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", &config)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env_remove("GIT_AUTHOR_NAME")
+            .env_remove("GIT_AUTHOR_EMAIL")
+            .env_remove("GIT_COMMITTER_NAME")
+            .env_remove("GIT_COMMITTER_EMAIL")
+            .output()?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(io::Error::other(
+                String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+            ))
+        }
+    };
+    git(&["add", "--all"])?;
+    git(&["commit", "--quiet", "--allow-empty", "--message", message])
 }
