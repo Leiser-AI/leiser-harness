@@ -144,11 +144,31 @@ impl AgentCli {
 }
 
 /// Where a chat works.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Checkout {
+    /// The repository's main checkout, on whatever branch it has.
+    Main,
+    /// A new git worktree on a new branch from the repository's base
+    /// branch, as the remote has it now. The repository's setup script
+    /// runs in it before the agent starts. The default.
+    #[default]
+    NewWorktree,
+    /// The worktree another chat of the repository works in, on its
+    /// branch: "new chat in this worktree".
+    Worktree { chat: ChatId },
+}
+
+/// A script of the repository, set in its `.leiser/config.toml`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum Checkout {
-    /// The repository's main checkout.
-    Main,
+pub enum RepositoryScript {
+    /// Runs after a chat's new worktree is created, before the agent
+    /// starts, for example `pnpm install`.
+    Setup,
+    /// Runs when the last chat in a worktree is done, for example
+    /// `cargo clean`.
+    Done,
 }
 
 /// A request to the harness service.
@@ -157,9 +177,14 @@ pub enum Checkout {
 pub enum Command {
     /// Adds a local git repository.
     AddRepository { path: PathBuf },
-    /// Starts a chat in a repository.
+    /// Starts a chat in a repository, by default in a new worktree.
+    ///
+    /// Answers once the chat's worktree exists; its setup script may still
+    /// run then. Messages sent meanwhile wait for it
+    /// ([`QueueReason::SettingUp`]).
     StartChat {
         repository: RepositoryId,
+        #[serde(default)]
         checkout: Checkout,
     },
     /// Sends the developer's message to the chat's agent session, starting
@@ -186,9 +211,15 @@ pub enum Command {
     /// Asks the agent CLI to stop the running turn. The turn ends with
     /// [`AgentEvent::TurnInterrupted`]; queued messages are sent after it.
     InterruptTurn { chat: ChatId },
+    /// Marks the chat as done. When it is the last chat in its worktree
+    /// that is not done, the repository's done script runs there. A later
+    /// message takes the chat up again. Fails while a turn runs.
+    MarkChatDone { chat: ChatId },
     /// Lists every repository added to the harness.
     ListRepositories,
-    /// Lists every chat with its current status.
+    /// Lists every chat with its current status: chats waiting for the
+    /// developer first, then working ones, then done ones; within each,
+    /// the chat that changed last first.
     ListChats,
     /// Reads a chat's status, branch, subscription and transcript.
     ReadChat { chat: ChatId },
@@ -258,6 +289,7 @@ pub enum Response {
     InterruptRequested,
     /// The chat's next message goes to the new agent CLI.
     AgentCliChanged,
+    ChatMarkedDone,
     Repositories {
         repositories: Vec<RepositoryOverview>,
     },
@@ -330,6 +362,8 @@ pub struct ChatOverview {
     /// The first line of the developer's first message; `None` until then.
     pub title: Option<String>,
     pub status: ChatStatus,
+    /// The worktree the chat works in; `None` in the main checkout.
+    pub worktree: Option<PathBuf>,
 }
 
 /// What is checked out in a working directory.
@@ -344,14 +378,17 @@ pub enum Branch {
     Unknown,
 }
 
-/// What a chat is doing right now.
+/// What a chat is doing right now, as the sidebar shows it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChatStatus {
-    /// No turn is running.
-    Idle,
-    /// A turn is running.
+    /// A turn runs, or the chat's worktree is being set up.
     Working,
+    /// The agent waits for the developer: for the next message, or for an
+    /// approval in the running turn.
+    WaitingForYou,
+    /// The developer marked the chat as done.
+    Done,
 }
 
 /// One entry of a chat's transcript, in the order it happened.
@@ -369,6 +406,15 @@ pub enum TranscriptEntry {
         agent_cli: AgentCli,
         event: AgentEvent,
     },
+    /// A script of the repository has finished in the chat's worktree.
+    ScriptFinished {
+        script: RepositoryScript,
+        /// `None` when the script could not start or was stopped.
+        exit_code: Option<i32>,
+        /// Its standard output, then its standard error; only the end of
+        /// a long output.
+        output: String,
+    },
 }
 
 /// Why a message was queued instead of being delivered now.
@@ -380,6 +426,8 @@ pub enum QueueReason {
     /// The developer steered it, but the agent CLI cannot take a message
     /// mid-turn.
     SteerUnsupported,
+    /// The chat's worktree is being set up; the agent starts after.
+    SettingUp,
 }
 
 /// Why a [`Command`] failed.
@@ -394,6 +442,16 @@ pub enum CommandError {
     UnknownRepository { repository: RepositoryId },
     #[error("unknown chat {chat:?}")]
     UnknownChat { chat: ChatId },
+    #[error("chat {chat:?} belongs to another repository")]
+    ChatInAnotherRepository { chat: ChatId },
+    #[error("chat {chat:?} works in the main checkout, not in a worktree")]
+    NotInAWorktree { chat: ChatId },
+    #[error("the worktree of chat {chat:?} is still being set up")]
+    SettingUp { chat: ChatId },
+    #[error("could not create the chat's worktree: {reason}")]
+    Worktree { reason: String },
+    #[error("the repository's .leiser/config.toml is invalid: {reason}")]
+    RepositoryConfig { reason: String },
     #[error("a turn is running in chat {chat:?}; queue or steer the message")]
     TurnRunning { chat: ChatId },
     #[error("no turn is running in chat {chat:?}")]
@@ -427,8 +485,6 @@ pub enum CommandError {
     NoLoginRunning { subscription: SubscriptionId },
     #[error("the OS keychain failed: {reason}")]
     Keychain { reason: String },
-    #[error("the repository's config is invalid: {reason}")]
-    RepositoryConfig { reason: String },
     #[error("the harness service has stopped")]
     ServiceStopped,
 }
@@ -449,6 +505,22 @@ pub enum Event {
     MessageSteered { chat: ChatId, text: String },
     /// A queued message was sent and starts the next turn.
     QueuedMessageSent { chat: ChatId, text: String },
+    /// A script of the repository started in the chat's worktree.
+    ScriptStarted {
+        chat: ChatId,
+        script: RepositoryScript,
+    },
+    /// A script of the repository has finished in the chat's worktree;
+    /// also stored in the chat's transcript.
+    ScriptFinished {
+        chat: ChatId,
+        script: RepositoryScript,
+        exit_code: Option<i32>,
+        output: String,
+    },
+    /// The chat's status changed without an event of its own, for example
+    /// when it was marked as done.
+    StatusChanged { chat: ChatId, status: ChatStatus },
     /// A line the agent CLI's login printed, such as the address to open
     /// when no browser opened by itself.
     LoginOutput {
@@ -470,7 +542,10 @@ impl Event {
             Self::Agent { chat, .. }
             | Self::MessageQueued { chat, .. }
             | Self::MessageSteered { chat, .. }
-            | Self::QueuedMessageSent { chat, .. } => Some(*chat),
+            | Self::QueuedMessageSent { chat, .. }
+            | Self::ScriptStarted { chat, .. }
+            | Self::ScriptFinished { chat, .. }
+            | Self::StatusChanged { chat, .. } => Some(*chat),
             Self::LoginOutput { .. } | Self::LoginFinished { .. } => None,
         }
     }

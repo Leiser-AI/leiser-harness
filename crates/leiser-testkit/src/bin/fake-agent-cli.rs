@@ -340,6 +340,17 @@ impl<W: Write> Turn<'_, W> {
             Step::ReportEnvironment { variable } => AgentEvent::Message {
                 text: std::env::var(&variable).unwrap_or_else(|_| UNSET.to_owned()),
             },
+            Step::WriteUserMessageToFile { path } => {
+                std::fs::write(path, &self.message)?;
+                return Ok(None);
+            }
+            Step::ReportFile { path } => AgentEvent::Message {
+                text: match std::fs::read_to_string(path) {
+                    Ok(contents) => contents,
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => "missing".to_owned(),
+                    Err(error) => return Err(error.into()),
+                },
+            },
             Step::EchoSteer => AgentEvent::Message {
                 text: self.steer.clone().ok_or(FakeError::NoSteer)?,
             },

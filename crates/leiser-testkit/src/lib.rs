@@ -20,7 +20,7 @@ pub use fake_driver::{FAKE_LOGIN_FILE, FakeDriver, FakeLogin, UNSET};
 pub use gate::Gate;
 pub use harness_mcp_client::{HarnessMcpClient, McpClientError, ToolOutput};
 pub use keychain::MemoryKeychain;
-pub use repo::TestRepo;
+pub use repo::{DEFAULT_BRANCH, TestRepo};
 pub use script::{FakeInput, Script, Step};
 pub use service::{TestService, TestServiceError};
 pub use turn::{TurnError, collect_turn, collect_turn_within, next_event};

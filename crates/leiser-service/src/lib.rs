@@ -23,11 +23,13 @@ mod handoff;
 mod harness_mcp;
 mod keychain;
 mod protocol;
-mod repository_config;
+mod repo_config;
+mod script;
 mod service;
 mod store;
 mod subscriptions;
 mod version;
+mod worktree;
 
 pub use claude_code::ClaudeCodeDriver;
 pub use codex::CodexDriver;
@@ -41,8 +43,8 @@ pub use keychain::{KEYCHAIN_SERVICE, Keychain, KeychainError, OsKeychain};
 pub use protocol::{
     AgentCli, AgentEvent, ApiKey, Branch, ChatId, ChatOverview, ChatStatus, Checkout, Command,
     CommandError, Event, LoginAnswer, LoginOutcome, Provider, QueueReason, RepositoryId,
-    RepositoryOverview, Response, SignIn, SubscriptionId, SubscriptionKind, SubscriptionOverview,
-    TranscriptEntry,
+    RepositoryOverview, RepositoryScript, Response, SignIn, SubscriptionId, SubscriptionKind,
+    SubscriptionOverview, TranscriptEntry,
 };
 pub use service::{Service, ServiceConfig, ServiceHandle, StartError, start};
 pub use store::StorageError;

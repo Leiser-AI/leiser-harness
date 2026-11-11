@@ -77,6 +77,12 @@ pub enum Step {
     /// Answers with the value of an environment variable, or
     /// [`UNSET`](crate::UNSET) when it is not set.
     ReportEnvironment { variable: String },
+    /// Writes the text of the message it received to `path`, relative to
+    /// the directory it runs in, as an agent editing a file would.
+    WriteUserMessageToFile { path: PathBuf },
+    /// Answers with the contents of the file at `path`, relative to the
+    /// directory it runs in, or with `missing` when there is none.
+    ReportFile { path: PathBuf },
     /// Waits for a steered message, unless one already came this turn;
     /// [`Step::EchoSteer`] can answer it.
     WaitForSteer,

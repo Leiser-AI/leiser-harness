@@ -280,8 +280,8 @@ async fn every_agent_session_gets_the_read_chat_tool() -> TestResult {
     change(&service, chat, AgentCli::Codex).await?;
     let on_codex = answer(&service, &mut events, chat, "two").await?;
 
-    assert_eq!(on_claude_code, "read_chat");
-    assert_eq!(on_codex, "read_chat");
+    assert!(on_claude_code.split(',').any(|tool| tool == "read_chat"));
+    assert!(on_codex.split(',').any(|tool| tool == "read_chat"));
     Ok(())
 }
 

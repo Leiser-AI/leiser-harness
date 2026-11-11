@@ -30,6 +30,10 @@ use crate::{AgentCli, AgentEvent, Provider, SubscriptionKind, TranscriptEntry};
 /// - 1: one agent session per chat; transcript entries without agent CLI.
 /// - 2: a chat can change agent CLI: it keeps one agent session per agent
 ///   CLI and a pending handoff, and agent entries name their agent CLI.
+///   Later additions that version 2 data without them reads as defaults:
+///   whether a chat works in a worktree, whether it is done and when its
+///   status last changed, and
+///   transcript entries for finished repository scripts.
 /// - 3: subscriptions, and each chat's subscription per provider.
 const VERSION: u32 = 3;
 
@@ -87,6 +91,14 @@ pub(crate) struct ChatV3 {
     pub agent_sessions: Vec<AgentSessionV2>,
     /// The handoff the chat's next message carries.
     pub handoff: Option<HandoffV2>,
+    /// Whether `working_directory` is a worktree rather than the main
+    /// checkout.
+    pub worktree: bool,
+    /// Whether the developer marked the chat as done.
+    pub done: bool,
+    /// When the chat's status last changed, in the harness service's count
+    /// of status changes; the sidebar lists the latest first.
+    pub status_changed: u64,
     /// The chat's subscription per provider; a provider without one runs
     /// on the agent CLI's own default login.
     pub subscriptions: Vec<ChatSubscriptionV3>,
@@ -117,6 +129,17 @@ struct ChatV2 {
     agent_sessions: Vec<AgentSessionV2>,
     /// The handoff the chat's next message carries.
     handoff: Option<HandoffV2>,
+    /// Whether `working_directory` is a worktree rather than the main
+    /// checkout.
+    #[serde(default)]
+    worktree: bool,
+    /// Whether the developer marked the chat as done.
+    #[serde(default)]
+    done: bool,
+    /// When the chat's status last changed; `0` for chats stored before
+    /// the count existed.
+    #[serde(default)]
+    status_changed: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -266,6 +289,9 @@ impl Store {
                     agent_cli: chat.agent_cli,
                     agent_sessions: chat.agent_sessions,
                     handoff: chat.handoff,
+                    worktree: chat.worktree,
+                    done: chat.done,
+                    status_changed: chat.status_changed,
                     subscriptions: Vec::new(),
                 })
                 .collect(),
@@ -331,6 +357,9 @@ impl Store {
                         .into_iter()
                         .collect(),
                     handoff: None,
+                    worktree: false,
+                    done: false,
+                    status_changed: 0,
                 })
                 .collect(),
         };

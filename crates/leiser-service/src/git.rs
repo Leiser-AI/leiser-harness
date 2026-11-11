@@ -40,3 +40,35 @@ async fn git(working_directory: &Path, args: &[&str]) -> Option<String> {
     let text = text.trim();
     (!text.is_empty()).then(|| text.to_owned())
 }
+
+/// Why a git command failed.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum GitError {
+    #[error("could not run git: {0}")]
+    Spawn(#[source] std::io::Error),
+    #[error("`git {command}` failed: {message}")]
+    Failed { command: String, message: String },
+}
+
+/// Runs git in `working_directory` without prompting for credentials and
+/// returns its trimmed standard output.
+pub(crate) async fn run(working_directory: &Path, args: &[&str]) -> Result<String, GitError> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(working_directory)
+        .args(args)
+        // A background service has no terminal to ask on.
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .output()
+        .await
+        .map_err(GitError::Spawn)?;
+    if !output.status.success() {
+        return Err(GitError::Failed {
+            command: args.join(" "),
+            message: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        });
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
