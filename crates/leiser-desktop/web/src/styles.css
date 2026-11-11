@@ -36,9 +36,9 @@ body {
   margin: 0;
   height: 100vh;
   display: grid;
-  grid-template-columns: 260px 1fr;
+  grid-template-columns: 260px 1fr 260px;
   grid-template-rows: auto 1fr;
-  grid-template-areas: "side top" "side chat";
+  grid-template-areas: "side top todos" "side chat todos";
   background: var(--bg);
   color: var(--text);
 }
@@ -140,8 +140,7 @@ button:disabled {
 .top-bar {
   grid-area: top;
   display: flex;
-  flex-wrap: wrap;
-  gap: 8px 24px;
+  gap: 24px;
   align-items: center;
   padding: 10px 16px;
   border-bottom: 1px solid var(--border);
@@ -340,60 +339,91 @@ button:disabled {
   border-color: #d05050;
 }
 
-.sidebar-actions {
+.todos {
+  grid-area: todos;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-left: 1px solid var(--border);
+  background: var(--bg-side);
+}
+
+/* Without a selected chat the chat column takes the panel's place. */
+.todos[hidden] {
+  display: none;
+}
+
+body:has(.todos[hidden]) {
+  grid-template-columns: 260px 1fr;
+  grid-template-areas: "side top" "side chat";
+}
+
+.todos-header {
+  margin: 0;
+  padding: 10px 12px;
+  font-size: 13px;
+  font-weight: 600;
+  border-bottom: 1px solid var(--border);
+}
+
+.todo-list {
+  flex: 1;
+  overflow-y: auto;
+  list-style: none;
+  margin: 0;
+  padding: 8px 12px;
   display: flex;
   flex-direction: column;
   gap: 4px;
 }
 
-select,
-input {
+.todo {
+  display: flex;
+  gap: 6px;
+  align-items: flex-start;
+}
+
+.todo label {
+  flex: 1;
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+
+.todo.done .todo-text {
+  color: var(--muted);
+  text-decoration: line-through;
+}
+
+.todo-remove {
+  border: none;
+  background: none;
+  color: var(--muted);
+  padding: 0 4px;
+}
+
+.todo-remove:hover {
+  color: var(--text);
+}
+
+.todo-form {
+  display: flex;
+  gap: 6px;
+  padding: 10px 12px;
+  border-top: 1px solid var(--border);
+}
+
+.todo-form input {
+  flex: 1;
+  min-width: 0;
   font: inherit;
+  padding: 4px 8px;
   border: 1px solid var(--border);
   border-radius: 6px;
   background: var(--bg);
   color: var(--text);
-  padding: 3px 6px;
-}
-
-.subscription-picker {
-  font-family: inherit;
-}
-
-.subscriptions-dialog {
-  width: min(640px, 90vw);
-  max-height: 85vh;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: var(--bg);
-  color: var(--text);
-  padding: 16px 20px;
-}
-
-.subscriptions-dialog::backdrop {
-  background: rgb(0 0 0 / 35%);
-}
-
-.dialog-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-
-.dialog-header h2 {
-  margin: 0;
-  font-size: 18px;
-}
-
-.subscriptions-dialog h3 {
-  font-size: 14px;
-  margin: 16px 0 6px;
-}
-
-.subscription-rows {
-  list-style: none;
-  margin: 0;
-  padding: 0;
 }
 
 .repository-actions {
@@ -449,63 +479,6 @@ input {
   list-style: none;
   margin: 0;
   padding: 0;
-}
-
-.subscription-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 4px 0;
-}
-
-.subscription-name {
-  flex: 1;
-}
-
-button.danger {
-  color: #b42318;
-}
-
-.add-subscription {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.add-subscription label {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  font-size: 13px;
-}
-
-.add-subscription button {
-  align-self: flex-start;
-}
-
-.login-output {
-  max-height: 160px;
-  overflow: auto;
-  white-space: pre-wrap;
-  font-size: 12px;
-  background: var(--bg-side);
-  border-radius: 6px;
-  padding: 8px;
-}
-
-.dialog-note {
-  font-size: 12px;
-  margin-top: 16px;
-}
-
-.login-answer {
-  display: flex;
-  gap: 8px;
-  margin-top: 6px;
-}
-
-.login-answer input {
-  flex: 1;
 }
 
 .extension {
@@ -625,4 +598,118 @@ button.danger {
 
 .extensions-editor-status.failed {
   color: #d05050;
+}
+
+/* Subscriptions dialog and picker. */
+.sidebar-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+select,
+input {
+  font: inherit;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  padding: 3px 6px;
+}
+
+.subscription-picker {
+  font-family: inherit;
+}
+
+.subscriptions-dialog {
+  width: min(640px, 90vw);
+  max-height: 85vh;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+  color: var(--text);
+  padding: 16px 20px;
+}
+
+.subscriptions-dialog::backdrop {
+  background: rgb(0 0 0 / 35%);
+}
+
+.dialog-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.dialog-header h2 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.subscriptions-dialog h3 {
+  font-size: 14px;
+  margin: 16px 0 6px;
+}
+
+.subscription-rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.subscription-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+}
+
+.subscription-name {
+  flex: 1;
+}
+
+button.danger {
+  color: #b42318;
+}
+
+.add-subscription {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.add-subscription label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 13px;
+}
+
+.add-subscription button {
+  align-self: flex-start;
+}
+
+.login-output {
+  max-height: 160px;
+  overflow: auto;
+  white-space: pre-wrap;
+  font-size: 12px;
+  background: var(--bg-side);
+  border-radius: 6px;
+  padding: 8px;
+}
+
+.dialog-note {
+  font-size: 12px;
+  margin-top: 16px;
+}
+
+.login-answer {
+  display: flex;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.login-answer input {
+  flex: 1;
 }

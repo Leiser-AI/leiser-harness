@@ -9,6 +9,7 @@ export type Provider = "anthropic" | "openai";
 export type SubscriptionKind = "login" | "api_key";
 export type SignIn = { type: "login" } | { type: "api_key"; api_key: string };
 export type LoginOutcome = { type: "signed_in" } | { type: "failed"; reason: string };
+export type TodoId = number;
 
 export type AgentCli = "claude_code" | "codex";
 export type Checkout =
@@ -43,6 +44,10 @@ export type Command =
       provider: Provider;
       subscription: SubscriptionId | null;
     }
+  | { type: "list_todos"; chat: ChatId }
+  | { type: "add_todo"; chat: ChatId; text: string }
+  | { type: "set_todo_done"; chat: ChatId; todo: TodoId; done: boolean }
+  | { type: "remove_todo"; chat: ChatId; todo: TodoId }
   | { type: "list_cli_extensions"; repository: RepositoryId }
   | { type: "read_cli_extension_file"; repository: RepositoryId; file: string }
   | {
@@ -79,6 +84,10 @@ export type Response =
   | { type: "login_answered" }
   | { type: "subscriptions"; subscriptions: SubscriptionOverview[] }
   | { type: "subscription_changed" }
+  | { type: "todos"; todos: Todo[] }
+  | { type: "todo_added"; todo: TodoId }
+  | { type: "todo_updated" }
+  | { type: "todo_removed" }
   | { type: "cli_extensions"; extensions: CliExtension[]; unreadable: UnreadableCliExtensionFile[] }
   | { type: "cli_extension_file"; text: string }
   | { type: "cli_extension_file_saved" };
@@ -96,6 +105,8 @@ export type CommandError =
   | { type: "no_turn_running"; chat: ChatId }
   | { type: "agent_cli_not_configured"; agent_cli: AgentCli }
   | { type: "agent_cli"; reason: string }
+  | { type: "empty_todo" }
+  | { type: "unknown_todo"; chat: ChatId; todo: TodoId }
   | { type: "storage"; reason: string }
   | { type: "unknown_subscription"; subscription: SubscriptionId }
   | { type: "unknown_subscription_name"; provider: Provider; name: string }
@@ -136,6 +147,12 @@ export interface ChatOverview {
   status: ChatStatus;
   /** The worktree the chat works in; `null` in the main checkout. */
   worktree: string | null;
+}
+
+export interface Todo {
+  id: TodoId;
+  text: string;
+  done: boolean;
 }
 
 /** A skill, MCP server, hook or instruction file an agent CLI loads. */
@@ -199,4 +216,5 @@ export type ServiceEvent =
     }
   | { type: "status_changed"; chat: ChatId; status: ChatStatus }
   | { type: "login_output"; subscription: SubscriptionId; text: string }
-  | { type: "login_finished"; subscription: SubscriptionId; outcome: LoginOutcome };
+  | { type: "login_finished"; subscription: SubscriptionId; outcome: LoginOutcome }
+  | { type: "todos_changed"; chat: ChatId; todos: Todo[] };

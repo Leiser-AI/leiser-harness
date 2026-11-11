@@ -12,6 +12,10 @@
 //! - `subscriptions/<subscription id>/`: a subscription's config directory
 //!   for its agent CLI (see `subscriptions.rs`). API keys are not here:
 //!   they are in the OS keychain.
+//! - `todos/<chat id>.json`: one chat's todo list, replaced atomically on
+//!   every change. A chat without the file has an empty todo list. Added in
+//!   version 2 without a version bump: an older harness service never
+//!   reads or writes these files, so it cannot damage them.
 //!
 //! The stored types are separate from the protocol types, except for
 //! [`TranscriptEntry`]. A change that old data no longer parses with bumps
@@ -40,6 +44,8 @@ const VERSION: u32 = 3;
 const STATE_FILE: &str = "state.json";
 const CHATS_DIR: &str = "chats";
 const SUBSCRIPTIONS_DIR: &str = "subscriptions";
+
+const TODOS_DIR: &str = "todos";
 
 /// Why the harness service could not read or write its data.
 #[derive(Debug, thiserror::Error)]
@@ -161,6 +167,21 @@ pub(crate) enum HandoffV2 {
     Resume { known: usize },
 }
 
+/// The contents of `todos/<chat id>.json`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct TodoListV1 {
+    /// The last todo id given out; ids are never used again.
+    pub last_id: u64,
+    pub todos: Vec<TodoV1>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct TodoV1 {
+    pub id: u64,
+    pub text: String,
+    pub done: bool,
+}
+
 /// The contents of `state.json`, storage version 1.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct StateV1 {
@@ -237,11 +258,10 @@ impl Store {
         let store = Self {
             dir: dir.to_path_buf(),
         };
-        let chats = store.dir.join(CHATS_DIR);
-        fs::create_dir_all(&chats).map_err(|source| StorageError::Io {
-            path: chats.clone(),
-            source,
-        })?;
+        for dir in [CHATS_DIR, TODOS_DIR] {
+            let dir = store.dir.join(dir);
+            fs::create_dir_all(&dir).map_err(|source| StorageError::Io { path: dir, source })?;
+        }
         let path = store.dir.join(STATE_FILE);
         let state = match fs::read(&path) {
             Ok(bytes) => parse_state(&path, &bytes)?,
@@ -417,6 +437,32 @@ impl Store {
                 })
             })
             .collect()
+    }
+
+    /// Reads a chat's todo list; a chat without one has an empty one.
+    pub fn todos(&self, chat: u64) -> Result<TodoListV1, StorageError> {
+        let path = self.todos_path(chat);
+        match fs::read(&path) {
+            Ok(bytes) => serde_json::from_slice(&bytes)
+                .map_err(|source| StorageError::Corrupt { path, source }),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(TodoListV1::default()),
+            Err(source) => Err(StorageError::Io { path, source }),
+        }
+    }
+
+    /// Replaces a chat's todo list atomically.
+    pub fn save_todos(&self, chat: u64, todos: &TodoListV1) -> Result<(), StorageError> {
+        let path = self.todos_path(chat);
+        let mut bytes = serde_json::to_vec_pretty(todos).map_err(|source| StorageError::Io {
+            path: path.clone(),
+            source: source.into(),
+        })?;
+        bytes.push(b'\n');
+        replace(&path, &bytes)
+    }
+
+    fn todos_path(&self, chat: u64) -> PathBuf {
+        self.dir.join(TODOS_DIR).join(format!("{chat}.json"))
     }
 
     /// Removes a last line that a crash cut off, so the next entry starts

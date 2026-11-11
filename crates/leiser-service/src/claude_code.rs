@@ -10,8 +10,9 @@
 //! the `session_id` field of Claude Code's output lines.
 //!
 //! The harness MCP server is passed with `--mcp-config` as an HTTP server,
-//! and its read-only `read_chat` tool is allowed with `--allowedTools`, so
-//! it never waits for an approval.
+//! and all its tools are allowed with `--allowedTools`, so they never wait
+//! for an approval: they only read the chat and change its todo list, which
+//! the repository switched on for agents.
 //!
 //! A subscription gets its own `CLAUDE_CONFIG_DIR`; an API key goes in
 //! `ANTHROPIC_API_KEY`, which print mode prefers over a login. Login runs
@@ -237,7 +238,7 @@ fn session_command(program: &Path, spec: &SessionSpec, resume: Option<&AgentSess
         .arg("--mcp-config")
         .arg(harness_mcp_config(&spec.harness_mcp_url))
         .arg("--allowedTools")
-        .arg(format!("mcp__{HARNESS_MCP_SERVER}__read_chat"));
+        .arg(format!("mcp__{HARNESS_MCP_SERVER}"));
     if let Some(session) = resume {
         command.arg("--resume").arg(session.as_str());
     }

@@ -1704,6 +1704,7 @@ version = "0.1.0"
 dependencies = [
  "leiser-service",
  "leiser-testkit",
+ "serde_json",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
