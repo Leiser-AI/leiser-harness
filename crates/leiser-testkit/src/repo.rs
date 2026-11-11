@@ -28,6 +28,7 @@ impl TestRepo {
     pub fn new() -> io::Result<Self> {
         let dir = tempfile::tempdir()?;
         git(dir.path(), &["init", "--quiet"])?;
+        keep_line_endings(dir.path())?;
         Ok(Self {
             path: dir.path().to_path_buf(),
             remote: None,
@@ -64,6 +65,7 @@ impl TestRepo {
             &["clone", "--quiet", "--bare", "seed", "origin.git"],
         )?;
         git(dir.path(), &["clone", "--quiet", "origin.git", "repo"])?;
+        keep_line_endings(&path)?;
         std::fs::remove_dir_all(seed)?;
         Ok(Self {
             path,
@@ -149,6 +151,13 @@ impl TestRepo {
     pub fn git(&self, args: &[&str]) -> io::Result<String> {
         git(&self.path, args)
     }
+}
+
+/// Makes git keep files' line endings as written, so a test sees the same
+/// bytes on every machine; Windows runners convert to CRLF by default.
+fn keep_line_endings(dir: &Path) -> io::Result<()> {
+    git(dir, &["config", "core.autocrlf", "false"])?;
+    Ok(())
 }
 
 /// Commits everything in `dir`, independent of the machine's git config.
