@@ -21,5 +21,7 @@
 - A hotfix branches from `main` as `hotfix/<name>`. After the release it
   returns through a new branch `sync/main-<date>` from `main`, with a pull
   request to `development`.
-- Pull requests are tested on Linux; macOS and Windows run on pushes to
-  `development`, `main` and `hotfix/**`.
+- Pull requests are tested on Linux and on the developer's own Windows PC
+  (`test (own Windows runner)`, see `docs/windows-runner.md`); it is not
+  required and waits while that PC is off. macOS and GitHub's Windows run
+  on pushes to `development`, `main` and `hotfix/**`.

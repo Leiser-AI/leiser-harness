@@ -57,6 +57,22 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace
 
+  # Pull requests also test on the developer's own Windows PC, a
+  # self-hosted runner with the label `leiser-windows` (setup in
+  # docs/windows-runner.md). The repository is public, so this job never
+  # runs for pull requests from forks: their code must not run on that PC.
+  # It is not a required check: when the PC is off, it waits.
+  test-windows-own:
+    name: test (own Windows runner)
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, Windows, leiser-windows]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace
+
   ui:
     name: desktop UI (TypeScript)
     runs-on: ubuntu-latest
