@@ -11,7 +11,7 @@
 mod conversation;
 mod wire;
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -20,7 +20,7 @@ use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::{mpsc, oneshot};
 
 use self::conversation::{Conversation, Output, ProtocolError};
-use crate::installed::{self, Program};
+use crate::installed::{self, Found, Program};
 use crate::{
     Access, AgentEvent, AgentSession, AgentSessionId, Driver, DriverError, Environment,
     HARNESS_MCP_SERVER, SessionInput, SessionSpec, Version,
@@ -82,7 +82,7 @@ impl CodexDriver {
     ///
     /// Returns [`DriverError::NotInstalled`] when the driver finds none.
     pub fn program(&self) -> Result<PathBuf, DriverError> {
-        self.program.resolve()
+        Ok(self.program.resolve()?.program)
     }
 
     /// Asks the program for its version.
@@ -93,10 +93,10 @@ impl CodexDriver {
     /// [`DriverError::Spawn`] when it cannot run and
     /// [`DriverError::UnreadableVersion`] when its answer is not a version.
     pub fn version(&self) -> Result<Version, DriverError> {
-        version_of(&self.program()?)
+        version_of(&self.program.resolve()?)
     }
 
-    fn check_version(program: &Path) -> Result<(), DriverError> {
+    fn check_version(program: &Found) -> Result<(), DriverError> {
         let found = version_of(program)?;
         if found < Self::MINIMUM_VERSION {
             return Err(DriverError::UnsupportedVersion {
@@ -111,12 +111,9 @@ impl CodexDriver {
 }
 
 /// Asks `program` for its version.
-fn version_of(program: &Path) -> Result<Version, DriverError> {
-    let mut command = std::process::Command::new(program);
-    if let Some(path) = installed::path_for(program) {
-        command.env("PATH", path);
-    }
-    let output = command
+fn version_of(program: &Found) -> Result<Version, DriverError> {
+    let output = program
+        .command()
         .arg("--version")
         .stdin(Stdio::null())
         .stderr(Stdio::null())
@@ -166,7 +163,7 @@ impl CodexDriver {
         spec: &SessionSpec,
         resume: Option<String>,
     ) -> Result<AgentSession, DriverError> {
-        let program = self.program()?;
+        let program = self.program.resolve()?;
         Self::check_version(&program)?;
         let working_directory = spec
             .working_directory
@@ -178,10 +175,7 @@ impl CodexDriver {
                 ))
             })?
             .to_owned();
-        let mut command = Command::new(&program);
-        if let Some(path) = installed::path_for(&program) {
-            command.env("PATH", path);
-        }
+        let mut command = Command::from(program.command());
         if let Some(url) = &spec.harness_mcp_url {
             command.arg("-c").arg(format!(
                 "mcp_servers.{HARNESS_MCP_SERVER}.url={}",

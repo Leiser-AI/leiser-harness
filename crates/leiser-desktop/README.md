@@ -19,10 +19,12 @@ resumes every chat.
 
 Chats start on the installed Claude Code; Codex is configured as a second
 agent CLI. An app started from the Finder does not get the shell's `PATH`,
-so the harness service also looks in common install directories and, for
-Claude Code, at the copy the Claude desktop app bundles (see
-`crates/leiser-service/src/installed.rs`). To run another program, set
-`LEISER_CLAUDE_CODE` or `LEISER_CODEX` to its path.
+so the harness service asks the developer's login shell for it once when
+it starts, and the agent CLIs run with it; after a change to the shell
+profile, restart the app. The service also looks in common install
+directories and, for Claude Code, at the copy the Claude desktop app
+bundles (see `crates/leiser-service/src/installed.rs`). To run another
+program, set `LEISER_CLAUDE_CODE` or `LEISER_CODEX` to its path.
 `repo-check` runs on Claude Code, read-only, when a repository is added and
 on demand; it needs the `repo-check` skill in `~/.claude/skills/`.
 
