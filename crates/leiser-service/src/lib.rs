@@ -17,6 +17,7 @@ mod driver;
 mod git;
 mod handoff;
 mod harness_mcp;
+mod installed;
 mod protocol;
 mod service;
 mod store;
@@ -29,6 +30,7 @@ pub use driver::{
     SessionSpec,
 };
 pub use harness_mcp::HarnessMcpError;
+pub use installed::Environment;
 pub use protocol::{
     AgentCli, AgentEvent, Branch, ChatId, ChatOverview, ChatStatus, Checkout, Command,
     CommandError, Event, QueueReason, RepositoryId, RepositoryOverview, Response, TranscriptEntry,
