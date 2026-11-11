@@ -6,6 +6,7 @@
 // panel instead of its transcript.
 
 import type {
+  AgentCli,
   AgentEvent,
   Answer,
   AutoFix,
@@ -1041,30 +1042,61 @@ function labelled(label: string, value: string | HTMLElement): HTMLElement {
 
 const DEFAULT_LOGIN = "default";
 
-/** The chat's subscription, changeable between turns. */
+/** A provider's subscription, or its agent CLI's default login (`null`). */
+interface SubscriptionChoice {
+  provider: Provider;
+  subscription: SubscriptionId | null;
+}
+
+/** The picker's option value for a choice. */
+function pickerValue({ provider, subscription }: SubscriptionChoice): string {
+  return `${provider}:${subscription === null ? DEFAULT_LOGIN : subscription}`;
+}
+
+/**
+ * The chat's subscription, changeable between turns: every agent CLI's
+ * default login and every subscription, grouped by provider. Choosing a
+ * subscription or default login of the other provider moves the chat to
+ * that provider's agent CLI.
+ */
 function subscriptionPicker(view: ChatView, subscriptions: SubscriptionOverview[]): HTMLElement {
-  const provider = AGENT_CLI_PROVIDERS[view.agentCli];
+  const current = AGENT_CLI_PROVIDERS[view.agentCli];
   const select = el("select", "subscription-picker");
-  select.title = "The subscription the chat's next turns use";
+  select.title = "The subscription and agent CLI the chat's next turns use";
   select.setAttribute("aria-label", "Subscription");
-  select.append(new Option(`${AGENT_CLI_NAMES[view.agentCli]} default login`, DEFAULT_LOGIN));
-  for (const subscription of subscriptions.filter((overview) => overview.provider === provider)) {
-    select.append(new Option(subscription.name, String(subscription.subscription)));
+  const choices = new Map<string, SubscriptionChoice>();
+  for (const agentCli of Object.keys(AGENT_CLI_PROVIDERS) as AgentCli[]) {
+    const provider = AGENT_CLI_PROVIDERS[agentCli];
+    const group = document.createElement("optgroup");
+    group.label = `${PROVIDER_NAMES[provider]} · ${AGENT_CLI_NAMES[agentCli]}`;
+    const add = (label: string, subscription: SubscriptionId | null): void => {
+      const choice = { provider, subscription };
+      const value = pickerValue(choice);
+      choices.set(value, choice);
+      group.append(new Option(label, value));
+    };
+    add(`${AGENT_CLI_NAMES[agentCli]} default login`, null);
+    for (const subscription of subscriptions.filter((overview) => overview.provider === provider)) {
+      add(subscription.name, subscription.subscription);
+    }
+    if (
+      provider === current &&
+      view.subscription !== null &&
+      !subscriptions.some((overview) => overview.subscription === view.subscription)
+    ) {
+      add("Removed subscription", view.subscription);
+    }
+    select.append(group);
   }
-  if (
-    view.subscription !== null &&
-    !subscriptions.some((overview) => overview.subscription === view.subscription)
-  ) {
-    select.append(new Option("Removed subscription", String(view.subscription)));
-  }
-  select.value = view.subscription === null ? DEFAULT_LOGIN : String(view.subscription);
-  select.disabled = view.status === "working";
+  select.value = pickerValue({ provider: current, subscription: view.subscription });
+  // A turn that waits for an answer still runs.
+  select.disabled = view.status === "working" || view.openRequests.length > 0;
   select.addEventListener("change", () =>
     act(async () => {
-      if (selectedChat === null) return;
-      const chosen = select.value === DEFAULT_LOGIN ? null : Number(select.value);
+      const choice = choices.get(select.value);
+      if (selectedChat === null || choice === undefined) return;
       try {
-        await service.changeSubscription(selectedChat, provider, chosen);
+        await service.changeSubscription(selectedChat, choice.provider, choice.subscription);
       } finally {
         await refresh();
       }

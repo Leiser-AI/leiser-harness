@@ -14,7 +14,7 @@ use leiser_service::{
 };
 use leiser_testkit::{
     FAKE_LOGIN_FILE, FakeDriver, FakeLogin, Script, Step, TestRepo, TestService, UNSET,
-    collect_turn,
+    collect_turn, next_event,
 };
 use tokio::sync::broadcast;
 
@@ -35,6 +35,17 @@ fn codex_service(script: &Script) -> TestResult<TestService> {
     let driver =
         FakeDriver::new(Path::new(FAKE_AGENT_CLI), script)?.standing_in_for(AgentCli::Codex);
     Ok(TestService::with_driver(AgentCli::Codex, Arc::new(driver))?)
+}
+
+/// A harness service whose chats start on Claude Code and can move to
+/// Codex, both played by the fake agent CLI.
+fn claude_and_codex_service(claude_code: &Script, codex: &Script) -> TestResult<TestService> {
+    let claude_code = FakeDriver::new(Path::new(FAKE_AGENT_CLI), claude_code)?;
+    let codex = FakeDriver::new(Path::new(FAKE_AGENT_CLI), codex)?.standing_in_for(AgentCli::Codex);
+    Ok(TestService::with_drivers(
+        (AgentCli::ClaudeCode, Arc::new(claude_code)),
+        vec![(AgentCli::Codex, Arc::new(codex))],
+    )?)
 }
 
 async fn add(
@@ -184,6 +195,13 @@ async fn chat_subscription(
     }
 }
 
+async fn chat_agent_cli(service: &ServiceHandle, chat: ChatId) -> TestResult<AgentCli> {
+    match service.execute(Command::ReadChat { chat }).await? {
+        Response::Chat { agent_cli, .. } => Ok(agent_cli),
+        response => Err(format!("expected Chat, got {response:?}").into()),
+    }
+}
+
 async fn change(
     service: &ServiceHandle,
     chat: ChatId,
@@ -197,6 +215,18 @@ async fn change(
             subscription,
         })
         .await
+}
+
+/// Fails unless the turn's only message echoes a handoff that quotes
+/// `quoted`, followed by `message`.
+fn assert_handoff_echo(messages: &[String], quoted: &str, message: &str) -> TestResult {
+    let [echo] = messages else {
+        return Err(format!("expected one message, got {messages:?}").into());
+    };
+    assert!(echo.starts_with("<handoff>"), "{echo}");
+    assert!(echo.contains(quoted), "{echo}");
+    assert!(echo.ends_with(message), "{echo}");
+    Ok(())
 }
 
 fn report(variable: &str) -> Step {
@@ -756,6 +786,140 @@ async fn a_chat_on_a_removed_subscription_does_not_move_to_another_by_itself() -
         result,
         Err(CommandError::UnknownSubscription { subscription: work })
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn choosing_the_codex_default_login_continues_a_claude_chat_on_codex_with_a_handoff()
+-> TestResult {
+    let claude_code = Script::new().turn([Step::message("Plan: parse the config with serde.")]);
+    let codex = Script::new().turn([Step::EchoUserMessage]);
+    let harness = claude_and_codex_service(&claude_code, &codex)?;
+    let service = harness.connect();
+    let repo = TestRepo::new()?;
+    let chat = start_chat(&service, &repo).await?;
+    let mut events = service.subscribe();
+    turn(&service, &mut events, chat, "Write a config parser.").await?;
+
+    let response = change(&service, chat, Provider::OpenAi, None).await?;
+    let messages = turn(&service, &mut events, chat, "Now add tests.").await?;
+
+    assert_eq!(response, Response::SubscriptionChanged);
+    assert_eq!(chat_agent_cli(&service, chat).await?, AgentCli::Codex);
+    assert_eq!(chat_subscription(&service, chat).await?, None);
+    // Codex played its own first turn: a new agent session took the
+    // message, with the chat so far as a handoff.
+    assert_handoff_echo(
+        &messages,
+        "Plan: parse the config with serde.",
+        "Now add tests.",
+    )
+}
+
+#[tokio::test]
+async fn choosing_the_claude_default_login_moves_a_codex_chat_back_to_claude_code() -> TestResult {
+    let claude_code = Script::new()
+        .turn([Step::message("first on Claude Code")])
+        .turn([Step::EchoUserMessage]);
+    let codex = Script::new().turn([Step::message("done on Codex")]);
+    let harness = claude_and_codex_service(&claude_code, &codex)?;
+    let service = harness.connect();
+    let repo = TestRepo::new()?;
+    let chat = start_chat(&service, &repo).await?;
+    let mut events = service.subscribe();
+    turn(&service, &mut events, chat, "one").await?;
+    change(&service, chat, Provider::OpenAi, None).await?;
+    turn(&service, &mut events, chat, "two").await?;
+
+    change(&service, chat, Provider::Anthropic, None).await?;
+    let messages = turn(&service, &mut events, chat, "three").await?;
+
+    assert_eq!(chat_agent_cli(&service, chat).await?, AgentCli::ClaudeCode);
+    // Claude Code's agent session plays its second turn and gets what it
+    // missed on Codex as a handoff.
+    assert_handoff_echo(&messages, "done on Codex", "three")
+}
+
+#[tokio::test]
+async fn choosing_a_codex_subscription_runs_the_next_turn_on_it() -> TestResult {
+    let claude_code = Script::new().turn([Step::message("on Claude Code")]);
+    let codex = Script::new().turn([report(CODEX_HOME)]);
+    let harness = claude_and_codex_service(&claude_code, &codex)?;
+    let service = harness.connect();
+    let work = add_signed_in(&service, Provider::OpenAi, "Codex work").await?;
+    let repo = TestRepo::new()?;
+    let chat = start_chat(&service, &repo).await?;
+    let mut events = service.subscribe();
+    turn(&service, &mut events, chat, "one").await?;
+
+    change(&service, chat, Provider::OpenAi, Some(work)).await?;
+    let messages = turn(&service, &mut events, chat, "two").await?;
+
+    assert_eq!(
+        messages,
+        vec![home(&service, work).await?.display().to_string()]
+    );
+    assert_eq!(chat_subscription(&service, chat).await?, Some(work));
+    Ok(())
+}
+
+#[tokio::test]
+async fn choosing_another_provider_while_a_turn_waits_for_an_approval_is_refused() -> TestResult {
+    let claude_code = Script::new().turn([Step::RequestApproval {
+        description: "Run `ls`".to_owned(),
+    }]);
+    let harness = claude_and_codex_service(&claude_code, &Script::new())?;
+    let service = harness.connect();
+    let repo = TestRepo::new()?;
+    let chat = start_chat(&service, &repo).await?;
+    let mut events = service.subscribe();
+    service
+        .execute(Command::SendMessage {
+            chat,
+            text: "look".to_owned(),
+        })
+        .await?;
+    loop {
+        if let Event::Agent {
+            event: AgentEvent::ApprovalRequested { .. },
+            ..
+        } = next_event(&mut events, chat).await?
+        {
+            break;
+        }
+    }
+
+    let result = change(&service, chat, Provider::OpenAi, None).await;
+
+    assert_eq!(result, Err(CommandError::TurnRunning { chat }));
+    assert_eq!(chat_agent_cli(&service, chat).await?, AgentCli::ClaudeCode);
+    Ok(())
+}
+
+#[tokio::test]
+async fn choosing_a_provider_whose_agent_cli_is_not_configured_changes_nothing() -> TestResult {
+    let harness = claude_service(&Script::new())?;
+    let service = harness.connect();
+    let openai = add(
+        &service,
+        Provider::OpenAi,
+        "OpenAI API",
+        api_key("sk-openai"),
+    )
+    .await?;
+    let repo = TestRepo::new()?;
+    let chat = start_chat(&service, &repo).await?;
+
+    let result = change(&service, chat, Provider::OpenAi, Some(openai)).await;
+
+    assert_eq!(
+        result,
+        Err(CommandError::AgentCliNotConfigured {
+            agent_cli: AgentCli::Codex
+        })
+    );
+    assert_eq!(chat_agent_cli(&service, chat).await?, AgentCli::ClaudeCode);
+    assert_eq!(chat_subscription(&service, chat).await?, None);
     Ok(())
 }
 

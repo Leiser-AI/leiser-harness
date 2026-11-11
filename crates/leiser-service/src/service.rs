@@ -1967,23 +1967,52 @@ impl State {
         id: ChatId,
         agent_cli: AgentCli,
     ) -> Result<Response, CommandError> {
+        self.chat_between_turns(id)?;
+        self.driver(agent_cli)?;
+        let entries = self.store.transcript(id.0)?.len();
+        self.move_to_agent_cli(id, agent_cli, entries)?;
+        self.save()?;
+        Ok(Response::AgentCliChanged)
+    }
+
+    /// The chat, unless a turn runs there (also one that waits for the
+    /// developer's answer) or it is being set up.
+    fn chat_between_turns(&self, id: ChatId) -> Result<&Chat, CommandError> {
         let chat = self
             .chats
             .get(&id)
             .ok_or(CommandError::UnknownChat { chat: id })?;
-        if !self.drivers.contains_key(&agent_cli) {
-            return Err(CommandError::AgentCliNotConfigured { agent_cli });
-        }
-        if chat.turn_running() {
+        if chat.turn_running() || chat.status() == ChatStatus::Working {
             return Err(CommandError::TurnRunning { chat: id });
         }
+        Ok(chat)
+    }
+
+    /// The driver of `agent_cli`, if the service has one.
+    fn driver(&self, agent_cli: AgentCli) -> Result<&Arc<dyn Driver>, CommandError> {
+        self.drivers
+            .get(&agent_cli)
+            .ok_or(CommandError::AgentCliNotConfigured { agent_cli })
+    }
+
+    /// Moves the chat, which no turn uses now and whose transcript has
+    /// `entries` entries, to `agent_cli`: the next message goes to that
+    /// agent CLI's earlier agent session with a handoff of what it missed,
+    /// or to a new agent session with a handoff of the chat so far. The
+    /// caller saves.
+    fn move_to_agent_cli(
+        &mut self,
+        id: ChatId,
+        agent_cli: AgentCli,
+        entries: usize,
+    ) -> Result<(), CommandError> {
+        let chat = self
+            .chats
+            .get_mut(&id)
+            .ok_or(CommandError::UnknownChat { chat: id })?;
         if chat.agent_cli == agent_cli {
-            return Ok(Response::AgentCliChanged);
+            return Ok(());
         }
-        let entries = self.store.transcript(id.0)?.len();
-        let Some(chat) = self.chats.get_mut(&id) else {
-            return Err(CommandError::UnknownChat { chat: id });
-        };
         let left = chat.agent_cli;
         // An agent CLI whose handoff is still pending has not seen it.
         if chat.handoff.is_none()
@@ -2000,8 +2029,7 @@ impl State {
             }),
             None => (entries > 0).then_some(Handoff::NewSession),
         };
-        self.save()?;
-        Ok(Response::AgentCliChanged)
+        Ok(())
     }
 
     fn add_subscription(
@@ -2100,11 +2128,7 @@ impl State {
 
     /// The driver of the agent CLI that logs in to the provider.
     fn login_driver(&self, provider: Provider) -> Result<Arc<dyn Driver>, CommandError> {
-        let agent_cli = provider.agent_cli();
-        self.drivers
-            .get(&agent_cli)
-            .cloned()
-            .ok_or(CommandError::AgentCliNotConfigured { agent_cli })
+        self.driver(provider.agent_cli()).cloned()
     }
 
     /// Runs the agent CLI's login in the subscription's config directory
@@ -2396,25 +2420,24 @@ impl State {
     }
 
     /// Changes the subscription the chat's agent CLI of `provider` runs
-    /// on. The running agent session there ends, so the next message runs
-    /// on the new subscription. An agent session the new subscription
-    /// cannot continue is forgotten: the next message goes to a new agent
-    /// session with a handoff.
+    /// on, and moves the chat to that agent CLI. The running agent session
+    /// there ends, so the next message runs on the new subscription. An
+    /// agent session the new subscription cannot continue is forgotten:
+    /// the next message goes to a new agent session with a handoff.
     fn change_subscription(
         &mut self,
         id: ChatId,
         provider: Provider,
         subscription: Option<SubscriptionId>,
     ) -> Result<Response, CommandError> {
-        let chat = self
-            .chats
-            .get(&id)
-            .ok_or(CommandError::UnknownChat { chat: id })?;
+        self.chat_between_turns(id)?;
         self.check_subscription(provider, subscription)?;
-        if chat.status() == ChatStatus::Working {
-            return Err(CommandError::TurnRunning { chat: id });
-        }
-        self.switch_subscription(id, provider, subscription)?;
+        let agent_cli = provider.agent_cli();
+        self.driver(agent_cli)?;
+        let entries = self.store.transcript(id.0)?.len();
+        self.switch_subscription(id, provider, subscription, entries)?;
+        self.move_to_agent_cli(id, agent_cli, entries)?;
+        self.save()?;
         Ok(Response::SubscriptionChanged)
     }
 
@@ -2439,27 +2462,23 @@ impl State {
     }
 
     /// Changes the chat's subscription of `provider`, which no turn uses
-    /// now; see [`State::change_subscription`].
+    /// now, and whose transcript has `entries` entries; see
+    /// [`State::change_subscription`]. The caller saves.
     fn switch_subscription(
         &mut self,
         id: ChatId,
         provider: Provider,
         subscription: Option<SubscriptionId>,
+        entries: usize,
     ) -> Result<(), CommandError> {
-        let current = self
+        let chat = self
             .chats
-            .get(&id)
-            .ok_or(CommandError::UnknownChat { chat: id })?
-            .subscriptions
-            .get(&provider)
-            .copied();
+            .get_mut(&id)
+            .ok_or(CommandError::UnknownChat { chat: id })?;
+        let current = chat.subscriptions.get(&provider).copied();
         if current == subscription {
             return Ok(());
         }
-        let entries = self.store.transcript(id.0)?.len();
-        let Some(chat) = self.chats.get_mut(&id) else {
-            return Err(CommandError::UnknownChat { chat: id });
-        };
         match subscription {
             Some(subscription) => chat.subscriptions.insert(provider, subscription),
             None => chat.subscriptions.remove(&provider),
@@ -2476,7 +2495,7 @@ impl State {
                 chat.handoff = (entries > 0).then_some(Handoff::NewSession);
             }
         }
-        self.save()
+        Ok(())
     }
 
     fn set_interchangeable(
@@ -2529,7 +2548,9 @@ impl State {
             .ok_or(CommandError::UnknownChat { chat: id })?
             .agent_cli
             .provider();
-        self.switch_subscription(id, provider, subscription)?;
+        let entries = self.store.transcript(id.0)?.len();
+        self.switch_subscription(id, provider, subscription, entries)?;
+        self.save()?;
         self.store.append(
             id.0,
             &TranscriptEntry::ContinuedOnSubscription {

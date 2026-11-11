@@ -20,6 +20,9 @@ const FAKE_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const FAKE_TURNS: usize = 1000;
 /// Where the fake agent CLI keeps its agent sessions, in the data directory.
 const FAKE_STATE_DIR: &str = "fake-agent-cli-state";
+/// Where the fake agent CLI standing in for Codex keeps its agent sessions,
+/// in [`FAKE_STATE_DIR`].
+const FAKE_CODEX_STATE_DIR: &str = "codex";
 /// The shared Codex home of fake Codex subscriptions, in the data directory.
 const FAKE_CODEX_HOME: &str = "codex-home";
 /// A fake turn waits after its tool call while this file, in
@@ -33,7 +36,8 @@ const FAKE_TURN_GATE: &str = "turn-gate";
 pub struct FakeAgentCliError(#[from] io::Error);
 
 /// The harness service's configuration. Chats start on Claude Code and can
-/// change to Codex, or run on the fake agent CLI when the program says so.
+/// change to Codex; when the program says so, the fake agent CLI plays
+/// both.
 /// `repo-check` runs on Claude Code, which has the skill, or on the fake
 /// agent CLI. Worktrees go where the program says, by default into the
 /// data directory. API keys go to the OS keychain and Codex subscriptions
@@ -42,9 +46,14 @@ pub struct FakeAgentCliError(#[from] io::Error);
 pub fn service_config(program: &ServiceProgram) -> Result<ServiceConfig, FakeAgentCliError> {
     let data_dir = program.data_dir().to_path_buf();
     let config = if let Some(fake) = program.fake_agent_cli() {
-        let driver = fake_driver(fake, &data_dir.join(FAKE_STATE_DIR))?;
+        let state = data_dir.join(FAKE_STATE_DIR);
+        let gate = state.join(FAKE_TURN_GATE);
+        let claude_code = fake_driver(fake, &state, &gate)?;
+        let codex = fake_driver(fake, &state.join(FAKE_CODEX_STATE_DIR), &gate)?
+            .standing_in_for(AgentCli::Codex);
         let codex_home = data_dir.join(FAKE_CODEX_HOME);
-        ServiceConfig::new(AgentCli::ClaudeCode, Arc::new(driver), data_dir)
+        ServiceConfig::new(AgentCli::ClaudeCode, Arc::new(claude_code), data_dir)
+            .with_driver(AgentCli::Codex, Arc::new(codex))
             .with_codex_home(codex_home)
             .with_repo_check(Arc::new(fake_repo_check(fake)?))
             .with_git_host(Arc::new(FakeGitHost::new()))
@@ -72,8 +81,9 @@ fn fake_repo_check(program: &Path) -> io::Result<FakeDriver> {
 /// repository without agent access to the todo list, the harness MCP
 /// server refuses the todo, and the answer says so. Of every three turns,
 /// the second first asks for an approval and the third asks a question,
-/// to try the cards. Its agent sessions survive a service update.
-fn fake_driver(program: &Path, state: &Path) -> io::Result<FakeDriver> {
+/// to try the cards. Its agent sessions, kept in `state`, survive a service
+/// update; its turns wait at `gate`.
+fn fake_driver(program: &Path, state: &Path, gate: &Path) -> io::Result<FakeDriver> {
     let approval = Step::RequestApproval {
         description: "Run `cargo test --workspace`".to_owned(),
     };
@@ -96,9 +106,8 @@ fn fake_driver(program: &Path, state: &Path) -> io::Result<FakeDriver> {
         }],
     };
     std::fs::create_dir_all(state)?;
-    let gate = state.join(FAKE_TURN_GATE);
     if !gate.exists() {
-        std::fs::write(&gate, b"")?;
+        std::fs::write(gate, b"")?;
     }
     let turn = [
         Step::Emit {
@@ -107,7 +116,9 @@ fn fake_driver(program: &Path, state: &Path) -> io::Result<FakeDriver> {
                 detail: "README.md".to_owned(),
             },
         },
-        Step::WaitForGate { gate },
+        Step::WaitForGate {
+            gate: gate.to_path_buf(),
+        },
         Step::Emit {
             event: AgentEvent::ToolResult {
                 name: "read_file".to_owned(),
