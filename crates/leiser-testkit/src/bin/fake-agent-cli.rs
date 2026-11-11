@@ -21,6 +21,13 @@
 //!
 //! `fake-agent-cli --version` prints [`FAKE_VERSION`], older than any agent
 //! CLI the harness supports, for tests of the minimum version check.
+//!
+//! `fake-agent-cli login [--fail] [--ask-for-code]` signs in like an agent
+//! CLI's login: it prints where to sign in and writes [`FAKE_LOGIN_FILE`]
+//! into its config directory, `CLAUDE_CONFIG_DIR` or `CODEX_HOME`, naming
+//! the variable it found. With `--ask-for-code` it first prompts for a code
+//! without a line end, as Claude Code does, and reads it from standard
+//! input. With `--fail` it exits with an error instead.
 
 use std::ffi::OsString;
 use std::io::{self, BufRead, Write};
@@ -30,7 +37,10 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, TryRecvError};
 use std::time::Duration;
 
 use leiser_service::AgentEvent;
-use leiser_testkit::{FakeInput, HarnessMcpClient, McpClientError, Script, Step};
+use leiser_service::{CLAUDE_CONFIG_DIR, CODEX_HOME};
+use leiser_testkit::{
+    FAKE_LOGIN_FILE, FakeInput, FakeLogin, HarnessMcpClient, McpClientError, Script, Step, UNSET,
+};
 use serde::{Deserialize, Serialize};
 
 /// How often a turn waiting at a gate looks for the gate file.
@@ -57,6 +67,10 @@ enum FakeError {
     Unexpected(&'static str),
     #[error("no steered message to echo")]
     NoSteer,
+    #[error("the login failed, as scripted")]
+    LoginFailed,
+    #[error("the login found no config directory in CLAUDE_CONFIG_DIR or CODEX_HOME")]
+    NoConfigDirectory,
 }
 
 fn main() -> ExitCode {
@@ -184,6 +198,13 @@ fn run() -> Result<(), FakeError> {
         writeln!(io::stdout(), "{FAKE_VERSION}")?;
         return Ok(());
     }
+    if std::env::args_os().nth(1).is_some_and(|arg| arg == "login") {
+        let flags: Vec<_> = std::env::args_os().skip(2).collect();
+        return login(
+            flags.iter().any(|flag| flag == "--fail"),
+            flags.iter().any(|flag| flag == "--ask-for-code"),
+        );
+    }
     let args = parse_args()?;
     let script: Script = serde_json::from_slice(&std::fs::read(&args.script)?)?;
     let mut session = SessionFile::open(&args.sessions, args.session)?;
@@ -225,6 +246,36 @@ fn run() -> Result<(), FakeError> {
             FakeInput::Interrupt => {}
         }
     }
+    Ok(())
+}
+
+fn login(fail: bool, ask_for_code: bool) -> Result<(), FakeError> {
+    let mut out = io::stdout().lock();
+    writeln!(out, "Open https://login.invalid/fake to sign in.")?;
+    if fail {
+        return Err(FakeError::LoginFailed);
+    }
+    let code = if ask_for_code {
+        write!(out, "Paste code here if prompted > ")?;
+        out.flush()?;
+        let mut code = String::new();
+        io::stdin().lock().read_line(&mut code)?;
+        Some(code.trim().to_owned())
+    } else {
+        None
+    };
+    let (variable, home) = [CLAUDE_CONFIG_DIR, CODEX_HOME]
+        .into_iter()
+        .find_map(|variable| std::env::var_os(variable).map(|home| (variable, home)))
+        .ok_or(FakeError::NoConfigDirectory)?;
+    let login = FakeLogin {
+        variable: variable.to_owned(),
+        code,
+    };
+    std::fs::write(
+        Path::new(&home).join(FAKE_LOGIN_FILE),
+        serde_json::to_vec(&login)?,
+    )?;
     Ok(())
 }
 
@@ -297,6 +348,9 @@ impl<W: Write> Turn<'_, W> {
             },
             Step::ReportWorkingDirectory => AgentEvent::Message {
                 text: std::env::current_dir()?.display().to_string(),
+            },
+            Step::ReportEnvironment { variable } => AgentEvent::Message {
+                text: std::env::var(&variable).unwrap_or_else(|_| UNSET.to_owned()),
             },
             Step::WriteUserMessageToFile { path } => {
                 std::fs::write(path, &self.message)?;

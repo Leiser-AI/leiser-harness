@@ -2,12 +2,16 @@
 //!
 //! Layout of the data directory (see ADR 0006):
 //!
-//! - `state.json`: repositories, chats, their agent session ids per agent
-//!   CLI and a pending handoff. Holds
+//! - `state.json`: repositories, subscriptions, chats, their agent session
+//!   ids per agent CLI, their subscription per provider and a pending
+//!   handoff. Holds
 //!   the storage version of the whole directory and is replaced atomically
 //!   on every change.
 //! - `chats/<chat id>.jsonl`: one chat's transcript, one
 //!   [`TranscriptEntry`] per line, only ever appended to.
+//! - `subscriptions/<subscription id>/`: a subscription's config directory
+//!   for its agent CLI (see `subscriptions.rs`). API keys are not here:
+//!   they are in the OS keychain.
 //! - `repo-checks/<repository id>.json`: the repository's last
 //!   `repo-check` result, replaced atomically when the next one finishes.
 //!   It has its own storage version, [`REPO_CHECK_VERSION`].
@@ -27,7 +31,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::repo_check::Outcome;
-use crate::{AgentCli, AgentEvent, TranscriptEntry};
+use crate::{AgentCli, AgentEvent, Provider, SubscriptionKind, TranscriptEntry};
 
 /// The storage version this harness service writes.
 ///
@@ -38,10 +42,13 @@ use crate::{AgentCli, AgentEvent, TranscriptEntry};
 ///   whether a chat works in a worktree, whether it is done and when its
 ///   status last changed, and
 ///   transcript entries for finished repository scripts.
-const VERSION: u32 = 2;
+/// - 3: subscriptions, and each chat's subscription per provider.
+const VERSION: u32 = 3;
 
 const STATE_FILE: &str = "state.json";
 const CHATS_DIR: &str = "chats";
+const SUBSCRIPTIONS_DIR: &str = "subscriptions";
+
 const REPO_CHECKS_DIR: &str = "repo-checks";
 
 /// The storage version of a stored `repo-check` result.
@@ -84,16 +91,25 @@ pub enum StorageError {
     UnsupportedVersion { found: u32, supported: u32 },
 }
 
-/// The contents of `state.json`, storage version 2.
+/// The contents of `state.json`, storage version 3.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct StateV2 {
+pub(crate) struct StateV3 {
     pub next_id: u64,
     pub repositories: Vec<RepositoryV1>,
-    pub chats: Vec<ChatV2>,
+    pub subscriptions: Vec<SubscriptionV3>,
+    pub chats: Vec<ChatV3>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct ChatV2 {
+pub(crate) struct SubscriptionV3 {
+    pub id: u64,
+    pub provider: Provider,
+    pub name: String,
+    pub kind: SubscriptionKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ChatV3 {
     pub id: u64,
     pub repository: u64,
     pub working_directory: PathBuf,
@@ -105,16 +121,53 @@ pub(crate) struct ChatV2 {
     pub handoff: Option<HandoffV2>,
     /// Whether `working_directory` is a worktree rather than the main
     /// checkout.
-    #[serde(default)]
     pub worktree: bool,
     /// Whether the developer marked the chat as done.
-    #[serde(default)]
     pub done: bool,
     /// When the chat's status last changed, in the harness service's count
-    /// of status changes; the sidebar lists the latest first. `0` for
-    /// chats stored before the count existed.
-    #[serde(default)]
+    /// of status changes; the sidebar lists the latest first.
     pub status_changed: u64,
+    /// The chat's subscription per provider; a provider without one runs
+    /// on the agent CLI's own default login.
+    pub subscriptions: Vec<ChatSubscriptionV3>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ChatSubscriptionV3 {
+    pub provider: Provider,
+    pub subscription: u64,
+}
+
+/// The contents of `state.json`, storage version 2.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+struct StateV2 {
+    next_id: u64,
+    repositories: Vec<RepositoryV1>,
+    chats: Vec<ChatV2>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct ChatV2 {
+    id: u64,
+    repository: u64,
+    working_directory: PathBuf,
+    /// The agent CLI the chat's next message goes to.
+    agent_cli: AgentCli,
+    /// The chat's agent sessions, at most one per agent CLI.
+    agent_sessions: Vec<AgentSessionV2>,
+    /// The handoff the chat's next message carries.
+    handoff: Option<HandoffV2>,
+    /// Whether `working_directory` is a worktree rather than the main
+    /// checkout.
+    #[serde(default)]
+    worktree: bool,
+    /// Whether the developer marked the chat as done.
+    #[serde(default)]
+    done: bool,
+    /// When the chat's status last changed; `0` for chats stored before
+    /// the count existed.
+    #[serde(default)]
+    status_changed: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -192,7 +245,13 @@ struct Versioned {
 struct VersionedRef<'a> {
     version: u32,
     #[serde(flatten)]
-    state: &'a StateV2,
+    state: &'a StateV3,
+}
+
+#[derive(Deserialize)]
+struct VersionedV3 {
+    #[serde(flatten)]
+    state: StateV3,
 }
 
 #[derive(Deserialize)]
@@ -217,7 +276,7 @@ impl Store {
     /// Opens the data directory, creating it if needed, and reads the state.
     /// Data of an older storage version is migrated; version 1 knew one
     /// agent CLI, taken to be `agent_cli`.
-    pub fn open(dir: &Path, agent_cli: AgentCli) -> Result<(Self, StateV2), StorageError> {
+    pub fn open(dir: &Path, agent_cli: AgentCli) -> Result<(Self, StateV3), StorageError> {
         let store = Self {
             dir: dir.to_path_buf(),
         };
@@ -228,7 +287,7 @@ impl Store {
         let path = store.dir.join(STATE_FILE);
         let state = match fs::read(&path) {
             Ok(bytes) => parse_state(&path, &bytes)?,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Stored::V2(StateV2::default()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Stored::V3(StateV3::default()),
             Err(source) => return Err(StorageError::Io { path, source }),
         };
         let state = match state {
@@ -236,9 +295,16 @@ impl Store {
                 for chat in &state.chats {
                     store.repair_transcript(chat.id)?;
                 }
-                store.migrate_v1(state, agent_cli)?
+                let state = store.migrate_v1(state, agent_cli)?;
+                store.migrate_v2(state)?
             }
             Stored::V2(state) => {
+                for chat in &state.chats {
+                    store.repair_transcript(chat.id)?;
+                }
+                store.migrate_v2(state)?
+            }
+            Stored::V3(state) => {
                 for chat in &state.chats {
                     store.repair_transcript(chat.id)?;
                 }
@@ -248,9 +314,38 @@ impl Store {
         Ok((store, state))
     }
 
-    /// Converts storage version 1 to 2 and writes it. Each transcript is
-    /// replaced atomically and `state.json` last, so a crash midway leaves
-    /// version 1, which migrates again: version 1 reads converted lines.
+    /// Converts storage version 2 to 3 and writes it: no subscriptions yet,
+    /// so every chat runs on the agent CLIs' own default logins.
+    fn migrate_v2(&self, state: StateV2) -> Result<StateV3, StorageError> {
+        let state = StateV3 {
+            next_id: state.next_id,
+            repositories: state.repositories,
+            subscriptions: Vec::new(),
+            chats: state
+                .chats
+                .into_iter()
+                .map(|chat| ChatV3 {
+                    id: chat.id,
+                    repository: chat.repository,
+                    working_directory: chat.working_directory,
+                    agent_cli: chat.agent_cli,
+                    agent_sessions: chat.agent_sessions,
+                    handoff: chat.handoff,
+                    worktree: chat.worktree,
+                    done: chat.done,
+                    status_changed: chat.status_changed,
+                    subscriptions: Vec::new(),
+                })
+                .collect(),
+        };
+        self.save(&state)?;
+        Ok(state)
+    }
+
+    /// Converts storage version 1 to 2. Each transcript is replaced
+    /// atomically, and `state.json` is written only after the migration to
+    /// the current version, so a crash midway leaves version 1, which
+    /// migrates again: version 1 reads converted lines.
     fn migrate_v1(&self, state: StateV1, agent_cli: AgentCli) -> Result<StateV2, StorageError> {
         for chat in &state.chats {
             let path = self.transcript_path(chat.id);
@@ -310,13 +405,12 @@ impl Store {
                 })
                 .collect(),
         };
-        self.save(&state)?;
         Ok(state)
     }
 
     /// Replaces `state.json` atomically: a crash leaves the old or the new
     /// state, never a mix.
-    pub fn save(&self, state: &StateV2) -> Result<(), StorageError> {
+    pub fn save(&self, state: &StateV3) -> Result<(), StorageError> {
         let path = self.dir.join(STATE_FILE);
         let mut bytes = serde_json::to_vec_pretty(&VersionedRef {
             version: VERSION,
@@ -420,6 +514,11 @@ impl Store {
             .map_err(io_error)
     }
 
+    /// The directory that holds one directory per subscription.
+    pub fn subscriptions_dir(&self) -> PathBuf {
+        self.dir.join(SUBSCRIPTIONS_DIR)
+    }
+
     /// Stores the repository's last `repo-check` result.
     pub fn save_repo_check(&self, repository: u64, outcome: &Outcome) -> Result<(), StorageError> {
         let dir = self.dir.join(REPO_CHECKS_DIR);
@@ -494,6 +593,7 @@ fn replace(path: &Path, bytes: &[u8]) -> Result<(), StorageError> {
 enum Stored {
     V1(StateV1),
     V2(StateV2),
+    V3(StateV3),
 }
 
 fn parse_state(path: &Path, bytes: &[u8]) -> Result<Stored, StorageError> {
@@ -512,6 +612,11 @@ fn parse_state(path: &Path, bytes: &[u8]) -> Result<Stored, StorageError> {
         )),
         2 => Ok(Stored::V2(
             serde_json::from_slice::<VersionedV2>(bytes)
+                .map_err(corrupt)?
+                .state,
+        )),
+        3 => Ok(Stored::V3(
+            serde_json::from_slice::<VersionedV3>(bytes)
                 .map_err(corrupt)?
                 .state,
         )),

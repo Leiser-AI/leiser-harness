@@ -11,19 +11,22 @@ import type {
   ChatOverview,
   ChatStatus,
   Checkout,
+  Provider,
   Finding,
   OptOuts,
   RepoCheck,
   RepositoryId,
   RepositoryOverview,
   RepositoryScript,
+  ServiceEvent,
+  SubscriptionOverview,
   ServiceConnection,
   Todo,
   TranscriptEntry,
 } from "./protocol";
 import * as extensions from "./extensions";
 import * as service from "./service";
-import { AGENT_CLI_NAMES, type ChatView } from "./service";
+import { AGENT_CLI_NAMES, AGENT_CLI_PROVIDERS, PROVIDER_NAMES, type ChatView } from "./service";
 
 let selectedChat: ChatId | null = null;
 // Shown instead of a chat when set.
@@ -41,6 +44,26 @@ const messageInput = byId<HTMLTextAreaElement>("message");
 const sendButton = byId<HTMLButtonElement>("send");
 const interruptButton = byId<HTMLButtonElement>("interrupt");
 const errorBox = byId("error");
+const subscriptionsDialog = byId<HTMLDialogElement>("subscriptions-dialog");
+const subscriptionsError = byId("subscriptions-error");
+const subscriptionList = byId("subscription-list");
+const addSubscriptionForm = byId<HTMLFormElement>("add-subscription");
+const newProvider = byId<HTMLSelectElement>("new-provider");
+const newName = byId<HTMLInputElement>("new-name");
+const newKind = byId<HTMLSelectElement>("new-kind");
+const newKeyLabel = byId("new-key-label");
+const newKey = byId<HTMLInputElement>("new-key");
+const loginSection = byId("login-section");
+const loginOutput = byId("login-output");
+const loginAnswer = byId<HTMLFormElement>("login-answer");
+const loginAnswerText = byId<HTMLInputElement>("login-answer-text");
+
+// The lines of logins run since the app started; the service does not
+// keep them.
+const loginLines: string[] = [];
+// The subscription whose login printed last; the answer goes to it.
+let answeringLogin: number | null = null;
+
 const repoCheckView = byId("repo-check");
 const serviceNotice = byId("service-notice");
 const todosPanel = byId("todos");
@@ -99,9 +122,10 @@ async function refresh(): Promise<void> {
   }
   const read = ++readCount;
   const chat = selectedChat;
-  const [repositories, chats, view, todos, updateWaiting] = await Promise.all([
+  const [repositories, chats, subscriptions, view, todos, updateWaiting] = await Promise.all([
     service.listRepositories(),
     service.listChats(),
+    service.listSubscriptions(),
     chat === null ? Promise.resolve(null) : service.readChat(chat),
     chat === null ? Promise.resolve(null) : service.listTodos(chat),
     service.serviceUpdateWaiting(),
@@ -120,6 +144,8 @@ async function refresh(): Promise<void> {
   if (read !== readCount) return;
   renderServiceNotice(updateWaiting);
   renderSidebar(repositories, chats, checks);
+  // The subscriptions dialog can open over any view.
+  renderSubscriptions(subscriptions);
   if (selectedExtensions !== null) {
     const shown = repositories.find((overview) => overview.repository === selectedExtensions);
     repoCheckView.hidden = true;
@@ -141,6 +167,7 @@ async function refresh(): Promise<void> {
     view,
     overview,
     repositories.find((candidate) => candidate.repository === overview?.repository) ?? null,
+    subscriptions,
   );
   renderTodos(chat, todos);
 }
@@ -349,6 +376,7 @@ function renderChat(
   view: ChatView | null,
   overview: ChatOverview | null,
   repository: RepositoryOverview | null,
+  subscriptions: SubscriptionOverview[],
 ): void {
   if (view === null || overview === null) {
     selectedWorking = false;
@@ -361,6 +389,8 @@ function renderChat(
     labelled("Repository", repository?.name ?? "unknown"),
     labelled("Branch", branchName(view.branch)),
     labelled("Checkout", overview.worktree === null ? "main checkout" : "worktree"),
+    labelled("Agent CLI", AGENT_CLI_NAMES[view.agentCli]),
+    subscriptionPicker(view, subscriptions),
     ...chatActions(overview),
   );
   const entries = view.transcript.map(renderEntry);
@@ -510,10 +540,139 @@ function optOuts(optOuts: OptOuts): HTMLElement[] {
   return [section];
 }
 
-function labelled(label: string, value: string): HTMLElement {
+function labelled(label: string, value: string | HTMLElement): HTMLElement {
   const item = el("span", "top-bar-item");
-  item.append(el("span", "top-bar-label", label), el("span", "top-bar-value", value));
+  const shown = typeof value === "string" ? el("span", "top-bar-value", value) : value;
+  item.append(el("span", "top-bar-label", label), shown);
   return item;
+}
+
+const DEFAULT_LOGIN = "default";
+
+/** The chat's subscription, changeable between turns. */
+function subscriptionPicker(view: ChatView, subscriptions: SubscriptionOverview[]): HTMLElement {
+  const provider = AGENT_CLI_PROVIDERS[view.agentCli];
+  const select = el("select", "top-bar-value subscription-picker");
+  select.title = "The subscription the chat's next turns use";
+  select.append(new Option(`${AGENT_CLI_NAMES[view.agentCli]} default login`, DEFAULT_LOGIN));
+  for (const subscription of subscriptions.filter((overview) => overview.provider === provider)) {
+    select.append(new Option(subscription.name, String(subscription.subscription)));
+  }
+  if (
+    view.subscription !== null &&
+    !subscriptions.some((overview) => overview.subscription === view.subscription)
+  ) {
+    select.append(new Option("Removed subscription", String(view.subscription)));
+  }
+  select.value = view.subscription === null ? DEFAULT_LOGIN : String(view.subscription);
+  select.disabled = view.status === "working";
+  select.addEventListener("change", () =>
+    act(async () => {
+      if (selectedChat === null) return;
+      const chosen = select.value === DEFAULT_LOGIN ? null : Number(select.value);
+      try {
+        await service.changeSubscription(selectedChat, provider, chosen);
+      } finally {
+        await refresh();
+      }
+    }),
+  );
+  return labelled("Subscription", select);
+}
+
+function renderSubscriptions(subscriptions: SubscriptionOverview[]): void {
+  const sections: HTMLElement[] = [];
+  for (const provider of Object.keys(PROVIDER_NAMES) as Provider[]) {
+    const section = el("section", "subscription-provider");
+    section.append(el("h3", "", PROVIDER_NAMES[provider]));
+    const list = el("ul", "subscription-rows");
+    const own = subscriptions.filter((overview) => overview.provider === provider);
+    if (own.length === 0) {
+      list.append(el("li", "muted", "None yet: chats use the agent CLI's default login."));
+    }
+    for (const subscription of own) list.append(subscriptionRow(subscription));
+    section.append(list);
+    sections.push(section);
+  }
+  subscriptionList.replaceChildren(...sections);
+}
+
+function subscriptionRow(subscription: SubscriptionOverview): HTMLElement {
+  const row = el("li", "subscription-row");
+  const name = el("input", "subscription-name");
+  name.value = subscription.name;
+  name.setAttribute("aria-label", "Name");
+  const kind = subscription.kind === "login" ? "Login" : "API key";
+  const status = el("span", "muted", subscription.logging_in ? `${kind} · logging in…` : kind);
+  status.title = subscription.home;
+  const rename = el("button", "", "Rename");
+  rename.type = "button";
+  rename.addEventListener("click", () =>
+    actInDialog(async () => {
+      await service.renameSubscription(subscription.subscription, name.value);
+      await refresh();
+    }),
+  );
+  row.append(name, status, rename);
+  if (subscription.kind === "login") {
+    const login = el("button", "", "Log in");
+    login.type = "button";
+    login.title = "Run the agent CLI's login again";
+    login.addEventListener("click", () =>
+      actInDialog(async () => {
+        await service.logIn(subscription.subscription);
+        await refresh();
+      }),
+    );
+    row.append(login);
+  }
+  const remove = el("button", "danger", "Remove");
+  remove.type = "button";
+  remove.addEventListener("click", () =>
+    actInDialog(async () => {
+      // A second click confirms: removing deletes the login or the key.
+      if (remove.dataset.confirm !== "yes") {
+        remove.dataset.confirm = "yes";
+        remove.textContent = "Remove for good";
+        return;
+      }
+      await service.removeSubscription(subscription.subscription);
+      await refresh();
+    }),
+  );
+  row.append(remove);
+  return row;
+}
+
+/** Like `act`, for actions in the subscriptions dialog. */
+async function actInDialog(action: () => Promise<void>): Promise<void> {
+  subscriptionsError.hidden = true;
+  try {
+    await action();
+  } catch (error) {
+    subscriptionsError.textContent = error instanceof Error ? error.message : String(error);
+    subscriptionsError.hidden = false;
+  }
+}
+
+function showLogin(event: ServiceEvent): void {
+  if (event.type === "login_output") {
+    loginLines.push(event.text);
+    answeringLogin = event.subscription;
+    loginAnswer.hidden = false;
+  } else if (event.type === "login_finished") {
+    loginLines.push(
+      event.outcome.type === "signed_in" ? "Signed in." : `Login failed: ${event.outcome.reason}`,
+    );
+    if (answeringLogin === event.subscription) {
+      answeringLogin = null;
+      loginAnswer.hidden = true;
+    }
+  } else {
+    return;
+  }
+  loginOutput.textContent = loginLines.join("\n");
+  loginSection.hidden = false;
 }
 
 function branchName(branch: Branch): string {
@@ -669,9 +828,49 @@ messageInput.addEventListener("keydown", (event) => {
   }
 });
 
+byId("open-subscriptions").addEventListener("click", () =>
+  act(async () => {
+    await refresh();
+    subscriptionsDialog.showModal();
+  }),
+);
+
+byId("close-subscriptions").addEventListener("click", () => subscriptionsDialog.close());
+
+loginAnswer.addEventListener("submit", (event) => {
+  event.preventDefault();
+  void actInDialog(async () => {
+    if (answeringLogin === null || loginAnswerText.value.trim() === "") return;
+    await service.answerLogin(answeringLogin, loginAnswerText.value);
+    loginAnswerText.value = "";
+  });
+});
+
+newKind.addEventListener("change", () => {
+  newKeyLabel.hidden = newKind.value !== "api_key";
+});
+
+addSubscriptionForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  void actInDialog(async () => {
+    const provider = newProvider.value as Provider;
+    const signIn =
+      newKind.value === "api_key"
+        ? { type: "api_key" as const, api_key: newKey.value }
+        : { type: "login" as const };
+    await service.addSubscription(provider, newName.value, signIn);
+    newName.value = "";
+    newKey.value = "";
+    await refresh();
+  });
+});
+
 void act(async () => {
   await service.subscribe(
-    () => void refresh().catch(showError),
+    (event) => {
+      showLogin(event);
+      void refresh().catch(showError);
+    },
     () => void refresh().catch(showError),
     (changed) => {
       connection = changed;

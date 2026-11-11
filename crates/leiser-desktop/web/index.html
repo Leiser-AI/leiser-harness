@@ -11,7 +11,10 @@
     <aside class="sidebar">
       <header class="sidebar-header">
         <span class="app-name">leiser-harness</span>
-        <button id="add-repository" type="button">Add repository</button>
+        <div class="sidebar-actions">
+          <button id="add-repository" type="button">Add repository</button>
+          <button id="open-subscriptions" type="button">Subscriptions</button>
+        </div>
       </header>
       <nav id="repositories" aria-label="Repositories and chats"></nav>
     </aside>
@@ -38,5 +41,59 @@
         <button type="submit">Add</button>
       </form>
     </aside>
+    <dialog id="subscriptions-dialog" class="subscriptions-dialog" aria-labelledby="subscriptions-title">
+      <header class="dialog-header">
+        <h2 id="subscriptions-title">Subscriptions</h2>
+        <button id="close-subscriptions" type="button">Close</button>
+      </header>
+      <div id="subscriptions-error" class="error" role="alert" hidden></div>
+      <div id="subscription-list"></div>
+      <section id="login-section" hidden>
+        <h3>Login output</h3>
+        <pre id="login-output" class="login-output"></pre>
+        <form id="login-answer" class="login-answer" hidden>
+          <input
+            id="login-answer-text"
+            type="password"
+            autocomplete="off"
+            spellcheck="false"
+            placeholder="Paste the code from the browser"
+            aria-label="Code for the login"
+          />
+          <button type="submit">Send to login</button>
+        </form>
+      </section>
+      <form id="add-subscription" class="add-subscription">
+        <h3>Add a subscription</h3>
+        <label>
+          Provider
+          <select id="new-provider">
+            <option value="anthropic">Anthropic (Claude Code)</option>
+            <option value="openai">OpenAI (Codex)</option>
+          </select>
+        </label>
+        <label>
+          Name
+          <input id="new-name" type="text" placeholder="Claude Team work" autocomplete="off" />
+        </label>
+        <label>
+          Signs in with
+          <select id="new-kind">
+            <option value="login">Login: runs the agent CLI's own login</option>
+            <option value="api_key">API key: kept in the OS keychain</option>
+          </select>
+        </label>
+        <label id="new-key-label" hidden>
+          API key
+          <input id="new-key" type="password" autocomplete="off" spellcheck="false" />
+        </label>
+        <button type="submit">Add</button>
+      </form>
+      <p class="muted dialog-note">
+        A repository's default subscription per provider is set by name in its
+        <code>.leiser/config.toml</code>, for example
+        <code>[subscriptions] anthropic = "Claude Team work"</code>.
+      </p>
+    </dialog>
   </body>
 </html>

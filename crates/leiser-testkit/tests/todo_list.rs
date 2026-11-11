@@ -486,12 +486,21 @@ async fn an_invalid_repository_config_is_reported() -> TestResult {
     let harness = start_service(&Script::new())?;
     let service = harness.connect();
     let repo = repo_with_config("[agent_access]\ntodo_list = \"yes\"\n")?;
-    let chat = start_chat(&service, &repo).await?;
+    let Response::RepositoryAdded { repository } = service
+        .execute(Command::AddRepository {
+            path: repo.path().to_path_buf(),
+        })
+        .await?
+    else {
+        return Err("expected RepositoryAdded".into());
+    };
 
+    // The config is read when the chat starts, for its default
+    // subscriptions, so the chat does not start.
     let result = service
-        .execute(Command::SendMessage {
-            chat,
-            text: "hello".to_owned(),
+        .execute(Command::StartChat {
+            repository,
+            checkout: Checkout::Main,
         })
         .await;
 

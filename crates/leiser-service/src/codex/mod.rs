@@ -7,6 +7,13 @@
 //!
 //! The harness MCP server is configured with `-c mcp_servers.<name>.url`,
 //! which Codex reaches over streamable HTTP.
+//!
+//! A subscription runs with `CODEX_HOME` set to its shadow home: the shared
+//! Codex home with its own `auth.json`, so threads resume across
+//! subscriptions. Its login is kept in that `auth.json` (`codex login` with
+//! the file credential store). An API key goes in `OPENAI_API_KEY`, read by
+//! a model provider of the harness's own, so Codex never writes it to a
+//! file: Codex's built-in provider takes keys only from `auth.json`.
 
 mod conversation;
 mod wire;
@@ -22,9 +29,17 @@ use tokio::sync::{mpsc, oneshot};
 use self::conversation::{Conversation, Output, ProtocolError};
 use crate::installed::{self, Found, Program};
 use crate::{
-    Access, AgentEvent, AgentSession, AgentSessionId, Driver, DriverError, Environment,
-    HARNESS_MCP_SERVER, SessionInput, SessionSpec, Version,
+    Access, AgentCli, AgentEvent, AgentSession, AgentSessionId, Driver, DriverError, Environment,
+    HARNESS_MCP_SERVER, LoginProcess, OPENAI_API_KEY, SessionInput, SessionSpec,
+    SubscriptionAccess, Version,
 };
+
+/// Keeps a subscription's login in its shadow home's `auth.json`, never in
+/// the OS keyring, where every shadow home would share one entry.
+const FILE_CREDENTIAL_STORE: &str = r#"cli_auth_credentials_store="file""#;
+/// The model provider of API key subscriptions. Built-in provider ids
+/// cannot be redefined, so it has an id of its own.
+const API_KEY_PROVIDER: &str = "leiser-openai-api-key";
 
 const AGENT_CLI: &str = "Codex";
 
@@ -155,6 +170,32 @@ impl Driver for CodexDriver {
     fn supports_steer(&self) -> bool {
         true
     }
+
+    /// Runs `codex login` in the subscription's shadow home.
+    fn login(&self, access: &SubscriptionAccess) -> Result<LoginProcess, DriverError> {
+        let program = self.program.resolve()?;
+        Self::check_version(&program)?;
+        let mut command = Command::from(program.command());
+        command.arg("-c").arg(FILE_CREDENTIAL_STORE).arg("login");
+        access.environment(AgentCli::Codex).apply(&mut command);
+        LoginProcess::spawn(command)
+    }
+}
+
+/// Codex's `-c` overrides that put it on a subscription.
+fn subscription_overrides(access: &SubscriptionAccess) -> Vec<String> {
+    match access.api_key {
+        None => vec![FILE_CREDENTIAL_STORE.to_owned()],
+        Some(_) => vec![
+            format!("model_provider={}", toml_string(API_KEY_PROVIDER)),
+            format!(
+                "model_providers.{API_KEY_PROVIDER}={{name=\"OpenAI API key\",\
+                 base_url=\"https://api.openai.com/v1\",env_key={},\
+                 wire_api=\"responses\",requires_openai_auth=false}}",
+                toml_string(OPENAI_API_KEY)
+            ),
+        ],
+    }
 }
 
 impl CodexDriver {
@@ -175,15 +216,7 @@ impl CodexDriver {
                 ))
             })?
             .to_owned();
-        let mut command = Command::from(program.command());
-        if let Some(url) = &spec.harness_mcp_url {
-            command.arg("-c").arg(format!(
-                "mcp_servers.{HARNESS_MCP_SERVER}.url={}",
-                toml_string(url)
-            ));
-        }
-        let mut child = command
-            .arg("app-server")
+        let mut child = session_command(Command::from(program.command()), spec)
             .current_dir(&spec.working_directory)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -222,6 +255,28 @@ impl CodexDriver {
         });
         Ok(AgentSession { id, input, events })
     }
+}
+
+/// The command that runs `codex app-server` for an agent session, without
+/// its streams.
+/// `command`, which runs the program, set up for an agent session.
+fn session_command(mut command: Command, spec: &SessionSpec) -> Command {
+    if let Some(url) = &spec.harness_mcp_url {
+        command.arg("-c").arg(format!(
+            "mcp_servers.{HARNESS_MCP_SERVER}.url={}",
+            toml_string(url)
+        ));
+    }
+    if let Some(subscription) = &spec.subscription {
+        for value in subscription_overrides(subscription) {
+            command.arg("-c").arg(value);
+        }
+        subscription
+            .environment(AgentCli::Codex)
+            .apply(&mut command);
+    }
+    command.arg("app-server");
+    command
 }
 
 /// `text` as a TOML basic string, as `-c` overrides expect their values.
@@ -330,4 +385,53 @@ fn unix_now() -> i64 {
         .map_or(0, |elapsed| {
             i64::try_from(elapsed.as_secs()).unwrap_or(i64::MAX)
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use tokio::process::Command;
+
+    use crate::Access;
+
+    use super::session_command;
+    use crate::{ApiKey, SessionSpec, SubscriptionAccess};
+
+    fn arguments(api_key: Option<ApiKey>) -> Vec<String> {
+        let spec = SessionSpec {
+            working_directory: PathBuf::from("/work"),
+            harness_mcp_url: Some("http://127.0.0.1:1/mcp".to_owned()),
+            access: Access::Chat,
+            subscription: Some(SubscriptionAccess {
+                home: PathBuf::from("/data/subscriptions/3/codex-home"),
+                api_key,
+            }),
+        };
+        session_command(Command::new("codex"), &spec)
+            .as_std()
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn a_login_subscription_keeps_its_login_in_its_own_auth_json() {
+        let arguments = arguments(None);
+
+        assert!(arguments.contains(&r#"cli_auth_credentials_store="file""#.to_owned()));
+        assert_eq!(arguments.last().map(String::as_str), Some("app-server"));
+    }
+
+    #[test]
+    fn an_api_key_subscription_reads_its_key_from_the_environment() {
+        let arguments = arguments(Some(ApiKey::new("sk-test")));
+
+        assert!(arguments.contains(&r#"model_provider="leiser-openai-api-key""#.to_owned()));
+        assert!(arguments.iter().any(
+            |arg| arg.starts_with("model_providers.leiser-openai-api-key=")
+                && arg.contains(r#"env_key="OPENAI_API_KEY""#)
+        ));
+        assert!(!arguments.iter().any(|arg| arg.contains("sk-test")));
+    }
 }

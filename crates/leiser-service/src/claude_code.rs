@@ -14,6 +14,9 @@
 //! for an approval: they only read the chat and change its todo list, which
 //! the repository switched on for agents.
 //!
+//! A subscription gets its own `CLAUDE_CONFIG_DIR`; an API key goes in
+//! `ANTHROPIC_API_KEY`, which print mode prefers over a login. Login runs
+//! `claude auth login` in the subscription's config directory.
 //! A read-only agent session runs in plan mode with the editing tools
 //! switched off (see [`READ_ONLY_ARGUMENTS`]).
 //!
@@ -33,8 +36,8 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::installed::{self, Found, Program};
 use crate::{
-    Access, AgentEvent, AgentSession, AgentSessionId, Driver, DriverError, Environment,
-    HARNESS_MCP_SERVER, SessionInput, SessionSpec, Version,
+    Access, AgentCli, AgentEvent, AgentSession, AgentSessionId, Driver, DriverError, Environment,
+    HARNESS_MCP_SERVER, LoginProcess, SessionInput, SessionSpec, SubscriptionAccess, Version,
 };
 
 const AGENT_CLI: &str = "Claude Code";
@@ -190,6 +193,16 @@ impl Driver for ClaudeCodeDriver {
     ) -> Result<AgentSession, DriverError> {
         self.spawn(&spec, Some(session))
     }
+
+    /// Runs `claude auth login` with the subscription's config directory.
+    fn login(&self, access: &SubscriptionAccess) -> Result<LoginProcess, DriverError> {
+        let program = self.program.resolve()?;
+        Self::check_version(&program)?;
+        let mut command = Command::from(program.command());
+        command.args(["auth", "login"]);
+        access.environment(AgentCli::ClaudeCode).apply(&mut command);
+        LoginProcess::spawn(command)
+    }
 }
 
 impl ClaudeCodeDriver {
@@ -200,23 +213,7 @@ impl ClaudeCodeDriver {
     ) -> Result<AgentSession, DriverError> {
         let program = self.program.resolve()?;
         Self::check_version(&program)?;
-        let mut command = Command::from(program.command());
-        command.args(ARGUMENTS);
-        if spec.access == Access::ReadOnly {
-            command.args(READ_ONLY_ARGUMENTS);
-        }
-        // Both options take several values; each is followed by another
-        // option or ends the arguments.
-        if let Some(url) = &spec.harness_mcp_url {
-            command
-                .arg("--mcp-config")
-                .arg(harness_mcp_config(url))
-                .arg("--allowedTools")
-                .arg(format!("mcp__{HARNESS_MCP_SERVER}"));
-        }
-        if let Some(session) = resume {
-            command.arg("--resume").arg(session.as_str());
-        }
+        let mut command = session_command(Command::from(program.command()), spec, resume);
         let mut child = command
             .current_dir(&spec.working_directory)
             .stdin(Stdio::piped())
@@ -242,6 +239,38 @@ impl ClaudeCodeDriver {
         });
         Ok(AgentSession { id, input, events })
     }
+}
+
+/// The command that runs an agent session on `program`, without its
+/// streams.
+/// `command`, which runs the program, set up for an agent session.
+fn session_command(
+    mut command: Command,
+    spec: &SessionSpec,
+    resume: Option<&AgentSessionId>,
+) -> Command {
+    command.args(ARGUMENTS);
+    if spec.access == Access::ReadOnly {
+        command.args(READ_ONLY_ARGUMENTS);
+    }
+    // Both options take several values; each is followed by another
+    // option or ends the arguments.
+    if let Some(url) = &spec.harness_mcp_url {
+        command
+            .arg("--mcp-config")
+            .arg(harness_mcp_config(url))
+            .arg("--allowedTools")
+            .arg(format!("mcp__{HARNESS_MCP_SERVER}"));
+    }
+    if let Some(session) = resume {
+        command.arg("--resume").arg(session.as_str());
+    }
+    if let Some(subscription) = &spec.subscription {
+        subscription
+            .environment(AgentCli::ClaudeCode)
+            .apply(&mut command);
+    }
+    command
 }
 
 /// Claude Code's MCP configuration with only the harness MCP server.
@@ -673,8 +702,83 @@ impl RateLimitInfo {
 
 #[cfg(test)]
 mod tests {
-    use super::{ControlRequest, InputLine, OutputLine, Parser, session_id};
-    use crate::{AgentEvent, AgentSessionId};
+    use std::ffi::OsStr;
+    use std::path::PathBuf;
+
+    use tokio::process::Command;
+
+    use crate::Access;
+
+    use super::{ControlRequest, InputLine, OutputLine, Parser, session_command, session_id};
+    use crate::{AgentEvent, AgentSessionId, ApiKey, SessionSpec, SubscriptionAccess};
+
+    fn spec(subscription: Option<SubscriptionAccess>) -> SessionSpec {
+        SessionSpec {
+            working_directory: PathBuf::from("/work"),
+            harness_mcp_url: Some("http://127.0.0.1:1/mcp".to_owned()),
+            access: Access::Chat,
+            subscription,
+        }
+    }
+
+    /// The variables the command sets (`Some`) or removes (`None`).
+    fn environment(spec: &SessionSpec) -> Vec<(String, Option<String>)> {
+        let command = session_command(Command::new("claude"), spec, None);
+        let mut environment: Vec<_> = command
+            .as_std()
+            .get_envs()
+            .map(|(name, value)| {
+                (
+                    name.to_string_lossy().into_owned(),
+                    value.map(|value| value.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+        environment.sort();
+        environment
+    }
+
+    #[test]
+    fn a_login_subscription_runs_in_its_config_directory_without_other_sign_ins() {
+        let spec = spec(Some(SubscriptionAccess {
+            home: PathBuf::from("/data/subscriptions/1/claude"),
+            api_key: None,
+        }));
+
+        assert_eq!(
+            environment(&spec),
+            vec![
+                ("ANTHROPIC_API_KEY".to_owned(), None),
+                ("ANTHROPIC_AUTH_TOKEN".to_owned(), None),
+                ("CLAUDE_CODE_OAUTH_TOKEN".to_owned(), None),
+                (
+                    "CLAUDE_CONFIG_DIR".to_owned(),
+                    Some("/data/subscriptions/1/claude".to_owned())
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_api_key_subscription_passes_its_key_as_anthropic_api_key() {
+        let spec = spec(Some(SubscriptionAccess {
+            home: PathBuf::from("/data/subscriptions/2/claude"),
+            api_key: Some(ApiKey::new("sk-ant-test")),
+        }));
+        let command = session_command(Command::new("claude"), &spec, None);
+
+        let key = command
+            .as_std()
+            .get_envs()
+            .find(|(name, _)| *name == OsStr::new("ANTHROPIC_API_KEY"))
+            .and_then(|(_, value)| value);
+        assert_eq!(key, Some(OsStr::new("sk-ant-test")));
+    }
+
+    #[test]
+    fn without_a_subscription_the_environment_is_left_alone() {
+        assert_eq!(environment(&spec(None)), vec![]);
+    }
 
     /// The events of `lines`, read in order by one parser.
     fn events(lines: &[&str]) -> Vec<AgentEvent> {

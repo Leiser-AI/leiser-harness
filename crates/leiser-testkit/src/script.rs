@@ -21,6 +21,13 @@ pub struct Script {
     /// Whether the fake agent CLI takes messages mid-turn.
     #[serde(default)]
     pub supports_steer: bool,
+    /// Whether the fake agent CLI's login fails.
+    #[serde(default)]
+    pub login_fails: bool,
+    /// Whether the fake agent CLI's login asks for a code, as Claude
+    /// Code's does after the developer signed in in the browser.
+    #[serde(default)]
+    pub login_asks_for_code: bool,
 }
 
 impl Script {
@@ -33,6 +40,20 @@ impl Script {
     #[must_use]
     pub fn supports_steer(mut self) -> Self {
         self.supports_steer = true;
+        self
+    }
+
+    /// Makes the fake agent CLI's login fail.
+    #[must_use]
+    pub fn failing_login(mut self) -> Self {
+        self.login_fails = true;
+        self
+    }
+
+    /// Makes the fake agent CLI's login ask for a code and wait for it.
+    #[must_use]
+    pub fn login_asking_for_code(mut self) -> Self {
+        self.login_asks_for_code = true;
         self
     }
 
@@ -54,6 +75,9 @@ pub enum Step {
     EchoUserMessage,
     /// Answers with the directory the fake agent CLI runs in.
     ReportWorkingDirectory,
+    /// Answers with the value of an environment variable, or
+    /// [`UNSET`](crate::UNSET) when it is not set.
+    ReportEnvironment { variable: String },
     /// Writes the text of the message it received to `path`, relative to
     /// the directory it runs in, as an agent editing a file would.
     WriteUserMessageToFile { path: PathBuf },

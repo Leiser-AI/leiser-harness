@@ -14,6 +14,10 @@
 //! never a summary. Every agent session also gets the harness MCP server,
 //! whose `read_chat` tool reads the entries a handoff left out.
 //!
+//! Chats run on subscriptions: several per provider, signed in by the
+//! agent CLI's own login in a config directory of their own, or by an API
+//! key kept in the OS keychain ([`Keychain`]).
+//!
 //! When a repository is added, and on demand, the harness service runs
 //! the `repo-check` skill in a read-only agent session and keeps the Must
 //! and Should findings of its report. It never fixes them. A repository's
@@ -35,6 +39,7 @@ mod git;
 mod handoff;
 mod harness_mcp;
 mod installed;
+mod keychain;
 mod local_interface;
 mod program;
 mod protocol;
@@ -43,6 +48,7 @@ mod repo_config;
 mod script;
 mod service;
 mod store;
+mod subscriptions;
 mod todos;
 mod version;
 mod worktree;
@@ -50,21 +56,25 @@ mod worktree;
 pub use claude_code::ClaudeCodeDriver;
 pub use codex::CodexDriver;
 pub use driver::{
-    Access, AgentSession, AgentSessionId, Driver, DriverError, HARNESS_MCP_SERVER, SessionInput,
-    SessionSpec,
+    ANTHROPIC_API_KEY, Access, AgentSession, AgentSessionId, CLAUDE_CONFIG_DIR, CODEX_HOME, Driver,
+    DriverError, HARNESS_MCP_SERVER, LoginProcess, OPENAI_API_KEY, SessionInput, SessionSpec,
+    SubscriptionAccess, SubscriptionEnvironment,
 };
 pub use harness_mcp::HarnessMcpError;
 pub use installed::Environment;
+pub use keychain::{KEYCHAIN_SERVICE, Keychain, KeychainError, OsKeychain};
 pub use local_interface::{
     ConnectError, ENDPOINT_FILE, LOCAL_INTERFACE_VERSION, LocalClient, LocalInterface,
     Notification, ServeError, serve,
 };
 pub use program::{ArgsError, SERVICE_LOG_FILE, ServiceProgram};
 pub use protocol::{
-    AgentCli, AgentEvent, Branch, ChatId, ChatOverview, ChatStatus, CheckId, Checkout,
-    CliExtension, CliExtensionKind, Command, CommandError, Event, Finding, InvalidCheckId, OptOuts,
-    QueueReason, RepoCheck, RepoCheckReport, RepositoryId, RepositoryOverview, RepositoryScript,
-    Response, SwitchedOffCheck, Todo, TodoId, TranscriptEntry, UnreadableCliExtensionFile,
+    AgentCli, AgentEvent, ApiKey, Branch, ChatId, ChatOverview, ChatStatus, CheckId, Checkout,
+    CliExtension, CliExtensionKind, Command, CommandError, Event, Finding, InvalidCheckId,
+    LoginAnswer, LoginOutcome, OptOuts, Provider, QueueReason, RepoCheck, RepoCheckReport,
+    RepositoryId, RepositoryOverview, RepositoryScript, Response, SignIn, SubscriptionId,
+    SubscriptionKind, SubscriptionOverview, SwitchedOffCheck, Todo, TodoId, TranscriptEntry,
+    UnreadableCliExtensionFile,
 };
 pub use service::{Service, ServiceConfig, ServiceHandle, StartError, start};
 pub use store::StorageError;

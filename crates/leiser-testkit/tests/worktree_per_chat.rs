@@ -109,6 +109,7 @@ async fn read_chat(
             status,
             branch,
             transcript,
+            ..
         } => Ok((status, branch, transcript)),
         response => Err(format!("expected Chat, got {response:?}").into()),
     }
