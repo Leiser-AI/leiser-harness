@@ -1,0 +1,38 @@
+// Small line icons for buttons and labels, drawn on a 16×16 grid. They are
+// decoration: the button or label that holds one carries the text for
+// screen readers (`aria-label` or visible text).
+
+const PATHS = {
+  plus: "M8 3v10M3 8h10",
+  folderPlus: "M2 4.5A1.5 1.5 0 0 1 3.5 3h3l1.5 1.5h4.5A1.5 1.5 0 0 1 14 6v5.5a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 11.5zM8 6.5v4M6 8.5h4",
+  home: "M2.5 7.5 8 3l5.5 4.5M4 6.5V13h3v-3h2v3h3V6.5",
+  blocks: "M3 3h4v4H3zM9 3h4v4H9zM3 9h4v4H3zM9 9h4v4H9z",
+  key: "M10 2.5a3.5 3.5 0 1 1-2.9 5.46L3 12v1.5h2V12h1.5v-1.5H8l.04-.04A3.5 3.5 0 0 1 10 2.5zM10.75 5.25h.01",
+  check: "M3.5 8.5 6.5 11.5 12.5 4.5",
+  close: "M4 4l8 8M12 4l-8 8",
+  stop: "M5 5h6v6H5z",
+  arrowUp: "M8 13V3M4 7l4-4 4 4",
+  terminal: "M3 4.5 6 8l-3 3.5M8 12h5",
+  shield: "M8 2 3 4v4c0 3 2.2 5 5 6 2.8-1 5-3 5-6V4z",
+  alert: "M8 2.5 14 13H2zM8 6.5v3M8 11.25h.01",
+  branch: "M5 3v10M5 13a1.5 1.5 0 1 0 0-.01M11 3a1.5 1.5 0 1 0 0 .01M11 4.5c0 3-6 2.5-6 5.5",
+  chevron: "M6 4l4 4-4 4",
+  clipboard: "M5.5 3H4.5A1.5 1.5 0 0 0 3 4.5v8A1.5 1.5 0 0 0 4.5 14h7a1.5 1.5 0 0 0 1.5-1.5v-8A1.5 1.5 0 0 0 11.5 3h-1M6 2h4v2H6z",
+} as const;
+
+export type IconName = keyof typeof PATHS;
+
+const SVG = "http://www.w3.org/2000/svg";
+
+/** An inline icon in the current text color. */
+export function icon(name: IconName): SVGSVGElement {
+  const svg = document.createElementNS(SVG, "svg");
+  svg.setAttribute("class", `icon icon-${name}`);
+  svg.setAttribute("viewBox", "0 0 16 16");
+  svg.setAttribute("aria-hidden", "true");
+  svg.setAttribute("focusable", "false");
+  const path = document.createElementNS(SVG, "path");
+  path.setAttribute("d", PATHS[name]);
+  svg.append(path);
+  return svg;
+}

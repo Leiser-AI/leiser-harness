@@ -1,0 +1,144 @@
+/*
+ * Design tokens: the only place that names a color, a size or a radius.
+ * Components and views use these variables, never raw values, so light and
+ * dark stay in step. Dark follows the OS (`prefers-color-scheme`).
+ */
+
+:root {
+  color-scheme: light dark;
+
+  /* Surfaces, from the window background up. */
+  --color-bg: #ffffff;
+  --color-bg-sidebar: #f7f7f6;
+  --color-surface: #ffffff;
+  --color-surface-raised: #f4f4f3;
+  --color-surface-sunken: #f9f9f8;
+  --color-hover: rgb(20 20 18 / 5%);
+  --color-selected: rgb(20 20 18 / 8%);
+  --color-border: #e7e7e4;
+  --color-border-strong: #d5d5d1;
+  --color-backdrop: rgb(10 10 10 / 35%);
+
+  /* Text. */
+  --color-text: #1d1d1b;
+  --color-text-muted: #66665f;
+  --color-text-faint: #9b9b94;
+  --color-text-on-accent: #ffffff;
+
+  /* One accent for focus, selection and primary actions. */
+  --color-accent: #3b5bd9;
+  --color-accent-hover: #3150c8;
+  --color-accent-soft: rgb(59 91 217 / 10%);
+
+  /* Status: text color and a soft background each. */
+  --color-success: #1d7a3a;
+  --color-success-soft: rgb(29 122 58 / 10%);
+  --color-warning: #8a5a00;
+  --color-warning-soft: rgb(214 150 0 / 13%);
+  --color-warning-border: rgb(214 150 0 / 45%);
+  --color-danger: #c42b2b;
+  --color-danger-soft: rgb(196 43 43 / 9%);
+  --color-danger-border: rgb(196 43 43 / 40%);
+
+  /* Diffs. */
+  --color-diff-added: rgb(46 160 67 / 14%);
+  --color-diff-removed: rgb(248 81 73 / 14%);
+
+  /* Type. */
+  --font-sans: -apple-system, BlinkMacSystemFont, system-ui, "Segoe UI", Roboto, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  --text-xs: 11px;
+  --text-sm: 12px;
+  --text-md: 13px;
+  --text-lg: 14px;
+  --text-xl: 16px;
+  --text-2xl: 20px;
+  --leading-tight: 1.3;
+  --leading-normal: 1.5;
+  --leading-relaxed: 1.6;
+  --weight-normal: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+
+  /* Spacing on a 4px grid. */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+
+  /* Radii and elevation. */
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 10px;
+  --radius-xl: 14px;
+  --radius-full: 999px;
+  --shadow-sm: 0 1px 2px rgb(0 0 0 / 5%);
+  --shadow-md: 0 2px 8px rgb(0 0 0 / 6%), 0 1px 2px rgb(0 0 0 / 4%);
+  --shadow-lg: 0 16px 48px rgb(0 0 0 / 18%), 0 2px 6px rgb(0 0 0 / 8%);
+  --focus-ring: 0 0 0 2px var(--color-bg), 0 0 0 4px var(--color-accent);
+
+  /* Layout. */
+  --sidebar-width: 264px;
+  --panel-width: 264px;
+  --content-width: 780px;
+  --control-height: 28px;
+  --control-height-sm: 24px;
+
+  /*
+   * Older names, kept so styles written against them pick up the tokens.
+   * New styles use the names above.
+   */
+  --bg: var(--color-bg);
+  --bg-side: var(--color-bg-sidebar);
+  --bg-card: var(--color-surface-raised);
+  --border: var(--color-border);
+  --text: var(--color-text);
+  --muted: var(--color-text-muted);
+  --accent: var(--color-accent);
+  --user: var(--color-selected);
+  --warn: var(--color-warning-soft);
+  --error: var(--color-danger-soft);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-bg: #1a1a1c;
+    --color-bg-sidebar: #141415;
+    --color-surface: #1f1f22;
+    --color-surface-raised: #232326;
+    --color-surface-sunken: #161618;
+    --color-hover: rgb(255 255 255 / 5%);
+    --color-selected: rgb(255 255 255 / 8%);
+    --color-border: #2c2c30;
+    --color-border-strong: #3b3b40;
+    --color-backdrop: rgb(0 0 0 / 55%);
+
+    --color-text: #e9e9eb;
+    --color-text-muted: #a2a2aa;
+    --color-text-faint: #6f6f78;
+    --color-text-on-accent: #10142a;
+
+    --color-accent: #7b97ff;
+    --color-accent-hover: #93abff;
+    --color-accent-soft: rgb(123 151 255 / 14%);
+
+    --color-success: #57c278;
+    --color-success-soft: rgb(87 194 120 / 13%);
+    --color-warning: #e3b341;
+    --color-warning-soft: rgb(227 179 65 / 11%);
+    --color-warning-border: rgb(227 179 65 / 38%);
+    --color-danger: #f47067;
+    --color-danger-soft: rgb(244 112 103 / 11%);
+    --color-danger-border: rgb(244 112 103 / 40%);
+
+    --color-diff-added: rgb(46 160 67 / 18%);
+    --color-diff-removed: rgb(248 81 73 / 18%);
+
+    --shadow-sm: 0 1px 2px rgb(0 0 0 / 30%);
+    --shadow-md: 0 2px 8px rgb(0 0 0 / 35%);
+    --shadow-lg: 0 16px 48px rgb(0 0 0 / 55%), 0 0 0 1px rgb(255 255 255 / 6%);
+  }
+}

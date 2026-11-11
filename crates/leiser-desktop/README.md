@@ -65,6 +65,17 @@ cargo build -p leiser-testkit --bin fake-agent-cli
 LEISER_FAKE_AGENT_CLI="$PWD/../../target/debug/fake-agent-cli" npm run tauri dev
 ```
 
+## Styles
+
+- `web/src/tokens.css` names every color, font size, spacing step, radius
+  and shadow, for light and dark (dark follows the OS). Views use these
+  variables, never raw values.
+- `web/src/components.css` styles the shared pieces: buttons (`primary`,
+  `ghost`, `danger`, `small`, `icon-button`), inputs, `badge`, `callout`,
+  `code-block`, dialogs.
+- `web/src/styles.css` lays out the window and the views.
+- `web/src/icons.ts` draws the few line icons; no icon font or package.
+
 ## Checks
 
 - `npm run build` type-checks and builds the UI (also in CI).
