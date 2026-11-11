@@ -30,11 +30,18 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      # The desktop app (Tauri) links against WebKitGTK on Linux.
-      - name: Install Tauri system libraries
+      # The desktop app (Tauri) links against WebKitGTK on Linux. The
+      # runner's apt tries the Azure mirror first and falls back to
+      # archive.ubuntu.com per package only after a timeout, so a stalled
+      # Azure mirror held a run for 40 minutes; this step skips it.
+      - &install-tauri-libraries
+        name: Install Tauri system libraries
         if: runner.os == 'Linux'
         timeout-minutes: 5
         run: |
+          if [ -f /etc/apt/apt-mirrors.txt ]; then
+            sudo sed -i '/azure\.archive\.ubuntu\.com/d' /etc/apt/apt-mirrors.txt
+          fi
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev librsvg2-dev libxdo-dev
       - uses: Swatinem/rust-cache@v2
@@ -54,13 +61,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
-      # The desktop app (Tauri) links against WebKitGTK on Linux.
-      - name: Install Tauri system libraries
-        if: runner.os == 'Linux'
-        timeout-minutes: 5
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev librsvg2-dev libxdo-dev
+      - *install-tauri-libraries
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace
 
