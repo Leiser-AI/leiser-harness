@@ -133,8 +133,9 @@ LEISER_FAKE_AGENT_CLI="$PWD/../../target/debug/fake-agent-cli" npm run tauri dev
   and shadow, for light and dark (dark follows the OS). Views use these
   variables, never raw values.
 - `web/src/components.css` styles the shared pieces: buttons (`primary`,
-  `ghost`, `danger`, `small`, `icon-button`), inputs, `badge`, `callout`,
-  `code-block`, dialogs.
+  `ghost`, `danger`, `small`, `icon-button`, `round-button`), menus
+  (`menu-button` and its `menu`, built by `web/src/menu.ts`), inputs,
+  `badge`, `callout`, `code-block`, dialogs.
 - `web/src/styles.css` lays out the window and the views.
 - `web/src/icons.ts` draws the few line icons; no icon font or package.
 

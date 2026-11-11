@@ -61,11 +61,6 @@ export function current(): Readonly<NewChat> {
 export function open(repository: RepositoryId | null, checkout?: Checkout): void {
   state.repository = repository;
   state.checkout = checkout ?? preferredCheckout();
-  resetSettings();
-}
-
-/** Puts the settings back to the repository's defaults. */
-export function resetSettings(): void {
   state.startOn = null;
   state.permissionMode = null;
 }
@@ -90,8 +85,9 @@ export function remember(repository: RepositoryId): void {
 }
 
 function remembered(): RepositoryId | null {
-  const last = stored(LAST_REPOSITORY);
-  return last === null ? null : Number(last);
+  const last = Number(stored(LAST_REPOSITORY) ?? NaN);
+  // Whatever else the storage holds is not a repository.
+  return Number.isSafeInteger(last) ? last : null;
 }
 
 /**

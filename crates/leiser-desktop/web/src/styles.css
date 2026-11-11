@@ -225,7 +225,7 @@ body {
   width: 100%;
   height: var(--row-height);
   /* In line with the repository's name, past its icon. */
-  padding: 0 var(--space-2) 0 calc(var(--space-2) + 16px + var(--space-2));
+  padding: 0 var(--space-2) 0 calc(var(--space-2) + var(--icon-size) + var(--space-2));
   border: none;
   border-radius: var(--radius-md);
   background: none;
@@ -423,7 +423,8 @@ body {
   .top-bar-action {
     width: var(--control-height-sm);
     padding: 0;
-  }}
+  }
+}
 
 /* ---- Main column ---- */
 
@@ -842,7 +843,7 @@ body {
 }
 
 /* While a turn runs: a quiet line at the end of the transcript. */
-.working {
+.transcript > .working {
   display: flex;
   align-items: center;
   gap: var(--space-2);
@@ -905,131 +906,12 @@ body {
   text-decoration: underline;
   text-decoration-color: var(--color-border-strong);
   text-decoration-thickness: 1.5px;
-  text-underline-offset: 5px;
+  text-underline-offset: var(--space-1);
 }
 
 .menu-button.new-chat-repository:hover:not(:disabled) {
   background: none;
   text-decoration-color: currentColor;
-}
-
-/* ---- Menus: a button that shows a choice and opens the others ---- */
-
-.menu-button {
-  gap: 5px;
-  min-width: 0;
-  height: var(--control-height);
-  padding: 0 var(--space-2);
-  border-color: transparent;
-  background: transparent;
-  box-shadow: none;
-  color: var(--color-text-muted);
-  font-weight: var(--weight-normal);
-}
-
-.menu-button:hover:not(:disabled),
-.menu-button[aria-expanded="true"] {
-  background: var(--color-hover);
-  color: var(--color-text);
-}
-
-.menu-button .icon {
-  width: 14px;
-  height: 14px;
-}
-
-.menu-button .icon-chevronDown {
-  width: 12px;
-  height: 12px;
-  color: var(--color-text-faint);
-}
-
-.menu-button-label,
-.menu-button-detail {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.menu-button-detail {
-  color: var(--color-text-faint);
-}
-
-.menu {
-  position: fixed;
-  z-index: 10;
-  display: flex;
-  flex-direction: column;
-  min-width: 220px;
-  max-width: min(340px, calc(100vw - 12px));
-  padding: var(--space-1);
-  overflow-y: auto;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-lg);
-  background: var(--color-surface);
-  box-shadow: var(--shadow-lg);
-}
-
-.menu-section + .menu-section {
-  margin-top: var(--space-1);
-  padding-top: var(--space-1);
-  border-top: 1px solid var(--color-border);
-}
-
-.menu-heading {
-  padding: var(--space-1) var(--space-2);
-  color: var(--color-text-faint);
-  font-size: var(--text-sm);
-}
-
-.menu-item {
-  justify-content: flex-start;
-  align-items: flex-start;
-  gap: var(--space-2);
-  width: 100%;
-  height: auto;
-  padding: 6px var(--space-2);
-  border: none;
-  background: none;
-  box-shadow: none;
-  font-weight: var(--weight-normal);
-  line-height: var(--leading-tight);
-  text-align: left;
-  white-space: normal;
-}
-
-.menu-item:hover:not(:disabled),
-.menu-item:focus-visible {
-  background: var(--color-hover);
-  box-shadow: none;
-}
-
-.menu-item .icon {
-  margin-top: 1px;
-  color: var(--color-text-muted);
-}
-
-.menu-item-text {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-  overflow-wrap: anywhere;
-}
-
-.menu-item-description {
-  color: var(--color-text-muted);
-  font-size: var(--text-sm);
-  line-height: var(--leading-normal);
-}
-
-.menu-note {
-  margin: var(--space-1) 0 0;
-  padding: var(--space-2);
-  border-top: 1px solid var(--color-border);
-  color: var(--color-text-faint);
-  font-size: var(--text-xs);
 }
 
 /* ---- Composer ---- */
@@ -1063,11 +945,18 @@ body {
   display: none;
 }
 
+/* A chat that takes no more messages shows the strip alone. */
+.composer-context:has(+ .composer-box[hidden]) {
+  margin-bottom: 0;
+  padding-bottom: var(--space-1);
+  border-radius: var(--radius-2xl);
+}
+
 .context-item {
   display: inline-flex;
   flex: 0 1 auto;
   align-items: center;
-  gap: 5px;
+  gap: var(--space-1);
   min-width: 0;
   height: var(--control-height);
   padding: 0 var(--space-2);
@@ -1141,7 +1030,7 @@ body {
   min-width: 0;
   display: flex;
   align-items: center;
-  gap: 2px;
+  gap: var(--space-half);
 }
 
 .composer-option {
@@ -1171,19 +1060,6 @@ body {
   display: flex;
   min-width: 0;
   margin-right: var(--space-1);
-}
-
-/* Send and interrupt: round buttons that show only an icon. */
-.round-button {
-  flex: none;
-  width: 30px;
-  height: 30px;
-  padding: 0;
-  border-radius: var(--radius-full);
-}
-
-.round-button .icon {
-  stroke-width: 1.8;
 }
 
 @container (max-width: 520px) {

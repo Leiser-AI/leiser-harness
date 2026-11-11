@@ -13,7 +13,6 @@ export interface MenuItem {
   icon?: IconName;
   /** Marks the current choice of a group of alternatives. */
   selected?: boolean;
-  disabled?: boolean;
   onSelect: () => void;
 }
 
@@ -49,7 +48,7 @@ interface OpenMenu {
   element: HTMLElement;
 }
 
-let open: OpenMenu | null = null;
+let openMenu: OpenMenu | null = null;
 
 function button(key: string): HTMLButtonElement | null {
   return document.querySelector<HTMLButtonElement>(`button[data-menu="${CSS.escape(key)}"]`);
@@ -57,9 +56,9 @@ function button(key: string): HTMLButtonElement | null {
 
 /** Closes the open menu, if any; `focus` puts the cursor back on its button. */
 export function close(focus = false): void {
-  if (open === null) return;
-  const { key, element } = open;
-  open = null;
+  if (openMenu === null) return;
+  const { key, element } = openMenu;
+  openMenu = null;
   element.remove();
   const opener = button(key);
   opener?.setAttribute("aria-expanded", "false");
@@ -68,8 +67,8 @@ export function close(focus = false): void {
 
 /** After a render: closes the open menu when its button is gone or disabled. */
 export function sync(): void {
-  if (open === null) return;
-  const opener = button(open.key);
+  if (openMenu === null) return;
+  const opener = button(openMenu.key);
   if (opener === null || opener.disabled) {
     close();
     return;
@@ -78,7 +77,7 @@ export function sync(): void {
 }
 
 function items(menu: HTMLElement): HTMLButtonElement[] {
-  return Array.from(menu.querySelectorAll<HTMLButtonElement>("button:not(:disabled)"));
+  return Array.from(menu.querySelectorAll<HTMLButtonElement>("button"));
 }
 
 function show(opener: HTMLButtonElement, options: MenuButtonOptions): void {
@@ -127,17 +126,18 @@ function show(opener: HTMLButtonElement, options: MenuButtonOptions): void {
   });
   document.body.append(menu);
   place(menu, opener);
-  open = { key: options.key, element: menu };
+  openMenu = { key: options.key, element: menu };
   opener.setAttribute("aria-expanded", "true");
+  // The menu itself takes the keyboard when it has no item, so Escape still closes it.
+  menu.tabIndex = -1;
   const all = items(menu);
-  (all.find((item) => item.getAttribute("aria-checked") === "true") ?? all[0])?.focus();
+  (all.find((item) => item.getAttribute("aria-checked") === "true") ?? all[0] ?? menu).focus();
 }
 
 function menuItem(item: MenuItem): HTMLButtonElement {
   const element = document.createElement("button");
   element.type = "button";
   element.className = "menu-item";
-  element.disabled = item.disabled ?? false;
   if (item.selected === undefined) {
     element.setAttribute("role", "menuitem");
   } else {
@@ -166,20 +166,22 @@ function menuItem(item: MenuItem): HTMLButtonElement {
   return element;
 }
 
-/** The gap between a button and its menu, and between the menu and the window's edge. */
-const GAP = 6;
-
-/** Puts the menu where there is more room: above or below its button, inside the window. */
+/**
+ * Puts the menu where there is more room: above or below its button,
+ * inside the window. The gap to the button and to the window's edge is
+ * the menu's `--menu-gap`, a spacing step of `tokens.css`.
+ */
 function place(menu: HTMLElement, opener: HTMLElement): void {
+  const gap = parseFloat(getComputedStyle(menu).getPropertyValue("--menu-gap")) || 0;
   const anchor = opener.getBoundingClientRect();
-  const above = anchor.top - GAP;
-  const below = window.innerHeight - anchor.bottom - GAP;
+  const above = anchor.top - gap;
+  const below = window.innerHeight - anchor.bottom - gap;
   const upwards = above > below;
-  menu.style.maxHeight = `${Math.max(120, (upwards ? above : below) - GAP)}px`;
+  menu.style.maxHeight = `${(upwards ? above : below) - gap}px`;
   const { width, height } = menu.getBoundingClientRect();
-  const left = Math.min(anchor.left, window.innerWidth - width - GAP);
-  menu.style.left = `${Math.max(GAP, left)}px`;
-  menu.style.top = `${upwards ? Math.max(GAP, anchor.top - GAP - height) : anchor.bottom + GAP}px`;
+  const left = Math.min(anchor.left, window.innerWidth - width - gap);
+  menu.style.left = `${Math.max(gap, left)}px`;
+  menu.style.top = `${upwards ? Math.max(gap, anchor.top - gap - height) : anchor.bottom + gap}px`;
 }
 
 /** A button that shows the current choice and opens a menu of the others. */
@@ -190,7 +192,7 @@ export function menuButton(options: MenuButtonOptions): HTMLButtonElement {
   element.dataset.menu = options.key;
   element.disabled = options.disabled ?? false;
   element.setAttribute("aria-haspopup", "menu");
-  element.setAttribute("aria-expanded", String(open?.key === options.key));
+  element.setAttribute("aria-expanded", String(openMenu?.key === options.key));
   const choice = options.detail === undefined ? options.label : `${options.label}, ${options.detail}`;
   element.setAttribute("aria-label", `${options.name}: ${choice}`);
   element.title = options.hint === undefined ? options.name : `${options.name}: ${options.hint}`;
@@ -207,17 +209,17 @@ export function menuButton(options: MenuButtonOptions): HTMLButtonElement {
   }
   if (options.inline !== true) element.append(icon("chevronDown"));
   element.addEventListener("click", () => {
-    if (open?.key === options.key) close();
+    if (openMenu?.key === options.key) close();
     else show(element, options);
   });
   return element;
 }
 
 document.addEventListener("pointerdown", (event) => {
-  if (open === null || !(event.target instanceof Node)) return;
-  if (open.element.contains(event.target)) return;
+  if (openMenu === null || !(event.target instanceof Node)) return;
+  if (openMenu.element.contains(event.target)) return;
   // The menu's own button closes it in its click handler.
-  if (button(open.key)?.contains(event.target)) return;
+  if (button(openMenu.key)?.contains(event.target)) return;
   close();
 });
 window.addEventListener("resize", () => close());

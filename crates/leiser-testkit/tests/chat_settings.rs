@@ -4,19 +4,17 @@
 use std::error::Error;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
 
 use leiser_service::{
-    AgentCli, AgentEvent, CODEX_HOME, ChatId, ChatSettings, ChatStatus, Checkout, Command,
-    CommandError, Event, LoginOutcome, PermissionMode, Provider, RepositoryId, Response,
-    ServiceHandle, SignIn, StartOn, SubscriptionId,
+    AgentCli, AgentEvent, ApiKey, ChatId, ChatSettings, ChatStatus, Checkout, Command,
+    CommandError, PermissionMode, Provider, RepositoryId, Response, ServiceHandle, SignIn, StartOn,
+    SubscriptionId,
 };
 use leiser_testkit::{FakeDriver, Gate, Script, Step, TestRepo, TestService, collect_turn};
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
 const FAKE_AGENT_CLI: &str = env!("CARGO_BIN_EXE_fake-agent-cli");
-const LOGIN_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// A harness service whose chats run on Claude Code, played by the fake
 /// agent CLI.
@@ -38,39 +36,25 @@ fn claude_and_codex_service(codex: &Script) -> TestResult<TestService> {
     )?)
 }
 
-/// Adds a login subscription and waits until its login has signed in.
-async fn add_signed_in(
+/// Adds a subscription that signs in with a made-up API key, so no login
+/// has to run first.
+async fn add_subscription(
     service: &ServiceHandle,
     provider: Provider,
     name: &str,
 ) -> TestResult<SubscriptionId> {
-    let mut events = service.subscribe();
     let response = service
         .execute(Command::AddSubscription {
             provider,
             name: name.to_owned(),
-            sign_in: SignIn::Login,
+            sign_in: SignIn::ApiKey {
+                api_key: ApiKey::new("sk-test-not-a-key"),
+            },
         })
         .await?;
     let Response::SubscriptionAdded { subscription } = response else {
         return Err(format!("expected SubscriptionAdded, got {response:?}").into());
     };
-    let signed_in = async {
-        loop {
-            if let Event::LoginFinished {
-                subscription: from,
-                outcome,
-            } = events.recv().await?
-                && from == subscription
-            {
-                return Ok::<_, Box<dyn Error>>(outcome);
-            }
-        }
-    };
-    let outcome = tokio::time::timeout(LOGIN_TIMEOUT, signed_in)
-        .await
-        .map_err(|_| "the login did not end in time")??;
-    assert_eq!(outcome, LoginOutcome::SignedIn);
     Ok(subscription)
 }
 
@@ -158,12 +142,10 @@ async fn status(service: &ServiceHandle, chat: ChatId) -> TestResult<ChatStatus>
 
 #[tokio::test]
 async fn a_new_chat_starts_on_the_chosen_agent_cli_and_subscription() -> TestResult {
-    let codex = Script::new().turn([Step::ReportEnvironment {
-        variable: CODEX_HOME.to_owned(),
-    }]);
+    let codex = Script::new().turn([Step::message("on Codex")]);
     let harness = claude_and_codex_service(&codex)?;
     let service = harness.connect();
-    let work = add_signed_in(&service, Provider::OpenAi, "Codex work").await?;
+    let work = add_subscription(&service, Provider::OpenAi, "Codex work").await?;
     let repo = TestRepo::new()?;
     let repository = add_repository(&service, &repo).await?;
 
@@ -195,17 +177,7 @@ async fn a_new_chat_starts_on_the_chosen_agent_cli_and_subscription() -> TestRes
             _ => None,
         })
         .collect();
-    let Response::Subscriptions { subscriptions } =
-        service.execute(Command::ListSubscriptions).await?
-    else {
-        return Err("expected Subscriptions".into());
-    };
-    let home = subscriptions
-        .into_iter()
-        .find(|overview| overview.subscription == work)
-        .ok_or("the subscription is not listed")?
-        .home;
-    assert_eq!(messages, vec![home.display().to_string()]);
+    assert_eq!(messages, vec!["on Codex".to_owned()]);
     Ok(())
 }
 
@@ -213,7 +185,7 @@ async fn a_new_chat_starts_on_the_chosen_agent_cli_and_subscription() -> TestRes
 async fn a_chosen_default_login_replaces_the_repository_default_subscription() -> TestResult {
     let harness = claude_service()?;
     let service = harness.connect();
-    add_signed_in(&service, Provider::Anthropic, "Work").await?;
+    add_subscription(&service, Provider::Anthropic, "Work").await?;
     let repo = TestRepo::new()?;
     configure(&repo, "[subscriptions]\nanthropic = \"Work\"\n")?;
     let repository = add_repository(&service, &repo).await?;
@@ -301,7 +273,7 @@ async fn the_chosen_settings_hold_while_the_worktrees_setup_script_runs() -> Tes
 async fn chat_defaults_are_the_repositorys() -> TestResult {
     let harness = claude_service()?;
     let service = harness.connect();
-    let work = add_signed_in(&service, Provider::Anthropic, "Work").await?;
+    let work = add_subscription(&service, Provider::Anthropic, "Work").await?;
     let plain = TestRepo::new()?;
     let configured = TestRepo::new()?;
     configure(
@@ -392,7 +364,7 @@ async fn a_chosen_agent_cli_that_is_not_configured_starts_no_chat() -> TestResul
 async fn a_chosen_subscription_of_another_provider_starts_no_chat() -> TestResult {
     let harness = claude_and_codex_service(&Script::new())?;
     let service = harness.connect();
-    let anthropic = add_signed_in(&service, Provider::Anthropic, "Work").await?;
+    let anthropic = add_subscription(&service, Provider::Anthropic, "Work").await?;
     let repo = TestRepo::new()?;
     let repository = add_repository(&service, &repo).await?;
 

@@ -67,7 +67,8 @@
   --weight-medium: 500;
   --weight-semibold: 600;
 
-  /* Spacing on a 4px grid. */
+  /* Spacing on a 4px grid; the half step sets apart what belongs together. */
+  --space-half: 2px;
   --space-1: 4px;
   --space-2: 8px;
   --space-3: 12px;
@@ -94,6 +95,7 @@
   --content-width: 760px;
   --control-height: 28px;
   --control-height-sm: 24px;
+  --icon-size: 16px;
   /* The top bar and the sidebar's header beside it; a row in the sidebar. */
   --bar-height: 46px;
   --row-height: 30px;
