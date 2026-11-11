@@ -229,6 +229,20 @@ async fn wait_for_push(opened: &Opened) -> TestResult<String> {
     Ok(head)
 }
 
+/// Waits until the pull request has had `more` polls after the first
+/// `known`, however long they take on a slow machine. A poll after a
+/// pushed fix also means the service has recorded the push.
+async fn polls_after(opened: &Opened, known: usize, more: usize) -> TestResult {
+    let number = opened.pull_request.number;
+    tokio::time::timeout(WAIT, async {
+        while opened.harness.git_host().polls(number).len() < known + more {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await?;
+    Ok(())
+}
+
 /// Collects the chat's auto-fix events for [`QUIET`].
 async fn quiet_period(events: &mut broadcast::Receiver<Event>, chat: ChatId) -> Vec<Event> {
     let mut seen = Vec::new();
@@ -406,13 +420,14 @@ async fn a_review_comment_wakes_the_agent_with_the_comment() -> TestResult {
 async fn an_unchanged_pull_request_is_polled_with_its_entity_tag_and_answered_not_modified()
 -> TestResult {
     let opened = opened(&fixing()).await?;
+    let number = opened.pull_request.number;
     let mut events = opened.service.subscribe();
 
+    polls_after(&opened, 0, 3).await?;
     let seen = quiet_period(&mut events, opened.chat).await;
-    let polls = opened.harness.git_host().polls(opened.pull_request.number);
+    let polls = opened.harness.git_host().polls(number);
 
     assert_eq!(seen, Vec::new());
-    assert!(polls.len() >= 3, "{polls:?}");
     assert_eq!(polls[0], FakePoll::Full);
     assert!(
         polls[1..].iter().all(|poll| *poll == FakePoll::NotModified),
@@ -475,8 +490,9 @@ async fn a_check_that_passed_in_between_may_fail_and_be_fixed_again() -> TestRes
     next_fix(&mut events, opened.chat).await?;
     collect_turn(&mut events, opened.chat).await?;
     wait_for_push(&opened).await?;
+    let known = git_host.polls(number).len();
     git_host.pass_check(number, "test");
-    quiet_period(&mut events, opened.chat).await;
+    polls_after(&opened, known, 2).await?;
 
     git_host.fail_check(number, "test", "a new failure");
     let triggers = next_fix(&mut events, opened.chat).await?;
@@ -685,9 +701,9 @@ async fn auto_fix_keeps_its_setting_and_its_attempts_across_a_restart() -> TestR
         .fail_check(number, "test", "first failure");
     next_fix(&mut events, opened.chat).await?;
     collect_turn(&mut events, opened.chat).await?;
+    let known = opened.harness.git_host().polls(number).len();
     wait_for_push(&opened).await?;
-    // The service records the push once it hears back from it.
-    quiet_period(&mut events, opened.chat).await;
+    polls_after(&opened, known, 1).await?;
     let Opened {
         harness,
         repo: _repo,
