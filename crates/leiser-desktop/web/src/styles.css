@@ -405,7 +405,7 @@ body {
  * In a narrow column (a narrow window, or the terminal open beside it) the
  * values speak for themselves and the buttons show their icon.
  */
-@container (max-width: 900px) {
+@container (max-width: 1100px) {
   .top-bar-facts {
     column-gap: var(--space-3);
   }
