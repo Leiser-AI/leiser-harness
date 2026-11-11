@@ -9,8 +9,9 @@
 //! cargo test -p leiser-testkit --test claude_code_contract -- --ignored
 //! ```
 //!
-//! `LEISER_CLAUDE_CODE` names the program to run (default: `claude` on
-//! `PATH`). Set `ANTHROPIC_MODEL=haiku` to spend less of the subscription.
+//! They run Claude Code as the desktop app finds it: the program
+//! `LEISER_CLAUDE_CODE` names, `claude` on `PATH`, in common install
+//! directories, or the copy the Claude desktop app bundles. Set `ANTHROPIC_MODEL=haiku` to spend less of the subscription.
 //! Run them from a plain terminal, not from inside a Claude Code session,
 //! whose environment changes how the child Claude Code signs in.
 
@@ -34,9 +35,7 @@ const LONG_TURN: &str = "Write a 1500-word story about a lighthouse keeper. Do n
 const TURN_TIMEOUT: Duration = Duration::from_secs(180);
 
 fn driver() -> ClaudeCodeDriver {
-    std::env::var_os("LEISER_CLAUDE_CODE").map_or_else(ClaudeCodeDriver::installed, |program| {
-        ClaudeCodeDriver::new(program)
-    })
+    ClaudeCodeDriver::installed()
 }
 
 /// A chat on Claude Code; the [`TestService`] keeps the service running.
@@ -92,7 +91,9 @@ async fn collect_turn(
                 AgentEvent::SessionEnded => {
                     return Err(format!("the agent session ended during the turn: {turn:?}").into());
                 }
-                AgentEvent::TurnEnded | AgentEvent::TurnInterrupted => {
+                AgentEvent::TurnEnded
+                | AgentEvent::TurnInterrupted
+                | AgentEvent::TurnFailed { .. } => {
                     turn.push(event);
                     return Ok(turn);
                 }

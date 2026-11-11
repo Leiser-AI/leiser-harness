@@ -1,7 +1,8 @@
 // The desktop app's UI. It holds no chat state of its own: it reads
 // repositories, their repo-check results and the selected chat from the
 // harness service and reads them again on every service event. The only
-// thing it keeps is what is selected: a chat or a repository's repo-check.
+// thing it keeps is what is selected: a chat, a repository's repo-check or
+// a repository's CLI extensions panel.
 
 import type {
   AgentEvent,
@@ -18,12 +19,15 @@ import type {
   RepositoryScript,
   TranscriptEntry,
 } from "./protocol";
+import * as extensions from "./extensions";
 import * as service from "./service";
 import { AGENT_CLI_NAMES, type ChatView } from "./service";
 
 let selectedChat: ChatId | null = null;
 // Shown instead of a chat when set.
 let selectedCheck: RepositoryId | null = null;
+// The repository whose CLI extensions panel is open instead of a chat.
+let selectedExtensions: RepositoryId | null = null;
 // Drops answers to older reads that arrive after newer ones.
 let readCount = 0;
 
@@ -36,6 +40,7 @@ const sendButton = byId<HTMLButtonElement>("send");
 const interruptButton = byId<HTMLButtonElement>("interrupt");
 const errorBox = byId("error");
 const repoCheckView = byId("repo-check");
+extensions.mount(byId("extensions"));
 
 function byId<T extends HTMLElement = HTMLElement>(id: string): T {
   const element = document.getElementById(id);
@@ -94,6 +99,12 @@ async function refresh(): Promise<void> {
   );
   if (read !== readCount) return;
   renderSidebar(repositories, chats, checks);
+  if (selectedExtensions !== null) {
+    const shown = repositories.find((overview) => overview.repository === selectedExtensions);
+    repoCheckView.hidden = true;
+    renderExtensionsTopBar(shown ?? null);
+    return;
+  }
   const checked = repositories.find((overview) => overview.repository === selectedCheck);
   const check = selectedCheck === null ? undefined : checks.get(selectedCheck);
   if (checked && check) {
@@ -123,10 +134,31 @@ const SCRIPT_NAMES: Record<RepositoryScript, string> = {
 
 /** Starts a chat, selects it and puts the cursor in the composer. */
 async function startAndSelect(repository: RepositoryId, checkout?: Checkout): Promise<void> {
+  if (!leaveExtensions()) return;
   selectedChat = await service.startChat(repository, checkout);
   selectedCheck = null;
   await refresh();
   messageInput.focus();
+}
+
+/** Leaves the CLI extensions panel; refuses while it has unsaved changes. */
+function leaveExtensions(): boolean {
+  if (selectedExtensions === null) return true;
+  if (extensions.hasUnsavedChanges()) {
+    showError("Save or discard your changes to the CLI extension first.");
+    return false;
+  }
+  selectedExtensions = null;
+  extensions.hide();
+  transcript.hidden = false;
+  return true;
+}
+
+function renderExtensionsTopBar(repository: RepositoryOverview | null): void {
+  topBar.replaceChildren(
+    labelled("Repository", repository?.name ?? "unknown"),
+    labelled("Panel", "CLI extensions"),
+  );
 }
 
 function renderSidebar(
@@ -153,8 +185,28 @@ function renderSidebar(
     inMain.addEventListener("click", () =>
       act(() => startAndSelect(repository.repository, { type: "main" })),
     );
+    const showExtensions = el("button", "new-chat", "Extensions");
+    showExtensions.type = "button";
+    showExtensions.title = `Skills, MCP servers, hooks and instruction files the agent CLIs load from ${repository.name}`;
+    if (repository.repository === selectedExtensions) {
+      showExtensions.classList.add("selected");
+      showExtensions.setAttribute("aria-current", "true");
+    }
+    showExtensions.addEventListener("click", () =>
+      act(async () => {
+        if (selectedExtensions !== repository.repository && !leaveExtensions()) return;
+        selectedChat = null;
+        selectedCheck = null;
+        selectedExtensions = repository.repository;
+        repoCheckView.hidden = true;
+        transcript.hidden = true;
+        composer.hidden = true;
+        await extensions.show(repository.repository);
+        await refresh();
+      }),
+    );
     const actions = el("span", "repository-actions");
-    actions.append(newChat, inMain);
+    actions.append(showExtensions, newChat, inMain);
     header.append(name, actions);
 
     const chatList = el("ul", "chat-list");
@@ -170,6 +222,7 @@ function renderSidebar(
       }
       button.addEventListener("click", () =>
         act(async () => {
+          if (!leaveExtensions()) return;
           selectedCheck = repository.repository;
           selectedChat = null;
           await refresh();
@@ -194,6 +247,7 @@ function renderSidebar(
       }
       button.addEventListener("click", () =>
         act(async () => {
+          if (!leaveExtensions()) return;
           selectedChat = chat.chat;
           selectedCheck = null;
           await refresh();
@@ -454,6 +508,11 @@ function renderAgentEvent(event: AgentEvent, agentCli: string): HTMLElement {
       return el("li", "turn-ended", "Turn ended");
     case "turn_interrupted":
       return el("li", "turn-ended", "Turn interrupted");
+    case "turn_failed": {
+      const item = el("li", "entry notice failed");
+      item.append(el("div", "entry-label", "Turn failed"), el("div", "entry-text", event.reason));
+      return item;
+    }
     case "session_ended":
       return el("li", "entry notice", "The agent session ended.");
   }

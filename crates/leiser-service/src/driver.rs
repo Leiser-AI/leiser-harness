@@ -126,6 +126,20 @@ pub trait Driver: Send + Sync + std::fmt::Debug {
 pub enum DriverError {
     #[error("could not start the agent CLI: {0}")]
     Spawn(#[source] std::io::Error),
+    #[error(
+        "{agent_cli} was not found: looked for `{program}` on PATH{}. \
+         Install {agent_cli}, or set {variable} to the path of its program.",
+        and_in(searched)
+    )]
+    NotInstalled {
+        agent_cli: &'static str,
+        /// The program's name.
+        program: &'static str,
+        /// The variable that names the program to run.
+        variable: &'static str,
+        /// Where the driver looked besides `PATH`.
+        searched: Vec<PathBuf>,
+    },
     #[error("the agent CLI did not provide its standard streams")]
     MissingStreams,
     #[error("could not read the version of {agent_cli} from `--version`: {output:?}")]
@@ -143,4 +157,16 @@ pub enum DriverError {
         minimum: Version,
         reason: &'static str,
     },
+}
+
+/// ` and in <paths>`, or nothing when there are none.
+fn and_in(paths: &[PathBuf]) -> String {
+    if paths.is_empty() {
+        return String::new();
+    }
+    let paths: Vec<_> = paths
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect();
+    format!(" and in {}", paths.join(", "))
 }
