@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "next_id": 2,
+  "repositories": [
+    { "id": 1, "path": "/leiser-fixture/repo" }
+  ],
+  "chats": [
+    {
+      "id": 2,
+      "repository": 1,
+      "working_directory": "/leiser-fixture/repo",
+      "agent_session": "fixture-session"
+    }
+  ]
+}

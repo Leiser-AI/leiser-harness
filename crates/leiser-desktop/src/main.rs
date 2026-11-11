@@ -5,18 +5,19 @@
 //! For v1 the app hosts the harness service in-process and forwards the
 //! service's local interface 1:1: the `execute` command takes a
 //! [`Command`] and answers with its [`Response`], and every service
-//! [`Event`](leiser_service::Event) reaches the UI as `service-event`. Once
-//! the service runs on its own (#29), only this file changes.
+//! [`Event`](leiser_service::Event) reaches the UI as `service-event`. The
+//! service keeps its data in the app's data directory, so chats survive
+//! restarts. Once the service runs as its own process, only this file
+//! changes.
 
 // Release builds on Windows open no console window next to the app.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod demo;
+mod agents;
 
 use std::path::PathBuf;
-use std::sync::Arc;
 
-use leiser_service::{Command, CommandError, Response, ServiceConfig, ServiceHandle};
+use leiser_service::{Command, CommandError, Response, Service, ServiceHandle};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 use tokio::sync::broadcast::{self, error::RecvError};
@@ -30,20 +31,26 @@ fn main() -> Result<(), tauri::Error> {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
-            let driver = demo::driver()?;
+            let config = agents::service_config(app.path().app_data_dir()?)?;
             // `start` spawns the service's command loop on the current
             // runtime, which lives as long as the app.
-            let service = tauri::async_runtime::block_on(async {
-                leiser_service::start(ServiceConfig {
-                    driver: Arc::new(driver),
-                })
-            });
-            tauri::async_runtime::spawn(forward_events(app.handle().clone(), service.subscribe()));
-            app.manage(service);
+            let service = tauri::async_runtime::block_on(async { leiser_service::start(config) })?;
+            let connection = service.connect();
+            tauri::async_runtime::spawn(forward_events(
+                app.handle().clone(),
+                connection.subscribe(),
+            ));
+            app.manage(HostedService { _service: service });
+            app.manage(connection);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![execute, pick_folder])
         .run(tauri::generate_context!())
+}
+
+/// Keeps the harness service running as long as the app.
+struct HostedService {
+    _service: Service,
 }
 
 /// Runs a command in the harness service.

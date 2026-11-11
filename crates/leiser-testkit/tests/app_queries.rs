@@ -4,23 +4,19 @@
 use std::error::Error;
 use std::path::Path;
 use std::process::Command as Process;
-use std::sync::Arc;
 
 use leiser_service::{
-    AgentEvent, Branch, ChatId, ChatSummary, ChatView, Checkout, Command, CommandError,
-    RepositoryId, Response, ServiceConfig, ServiceHandle, TranscriptEntry,
+    AgentCli, AgentEvent, Branch, ChatId, ChatOverview, ChatStatus, Checkout, Command,
+    CommandError, RepositoryId, RepositoryOverview, Response, ServiceHandle, TranscriptEntry,
 };
-use leiser_testkit::{FakeDriver, Script, Step, TestRepo, collect_turn};
+use leiser_testkit::{Script, Step, TestRepo, TestService, collect_turn};
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
 const FAKE_AGENT_CLI: &str = env!("CARGO_BIN_EXE_fake-agent-cli");
 
-fn start_service(script: &Script) -> TestResult<ServiceHandle> {
-    let driver = FakeDriver::new(Path::new(FAKE_AGENT_CLI), script)?;
-    Ok(leiser_service::start(ServiceConfig {
-        driver: Arc::new(driver),
-    }))
+fn start_service(script: &Script) -> TestResult<TestService> {
+    Ok(TestService::start(Path::new(FAKE_AGENT_CLI), script)?)
 }
 
 async fn add_repository(service: &ServiceHandle, repo: &TestRepo) -> TestResult<RepositoryId> {
@@ -58,12 +54,25 @@ async fn send(service: &ServiceHandle, chat: ChatId, text: &str) -> TestResult {
     Ok(())
 }
 
-async fn get_chat(service: &ServiceHandle, chat: ChatId) -> TestResult<ChatView> {
-    let response = service.execute(Command::GetChat { chat }).await?;
-    let Response::Chat { chat } = response else {
-        return Err(format!("expected Chat, got {response:?}").into());
-    };
-    Ok(chat)
+async fn list_repositories(service: &ServiceHandle) -> TestResult<Vec<RepositoryOverview>> {
+    match service.execute(Command::ListRepositories).await? {
+        Response::Repositories { repositories } => Ok(repositories),
+        response => Err(format!("expected Repositories, got {response:?}").into()),
+    }
+}
+
+async fn list_chats(service: &ServiceHandle) -> TestResult<Vec<ChatOverview>> {
+    match service.execute(Command::ListChats).await? {
+        Response::Chats { chats } => Ok(chats),
+        response => Err(format!("expected Chats, got {response:?}").into()),
+    }
+}
+
+async fn read_branch(service: &ServiceHandle, chat: ChatId) -> TestResult<Branch> {
+    match service.execute(Command::ReadChat { chat }).await? {
+        Response::Chat { branch, .. } => Ok(branch),
+        response => Err(format!("expected Chat, got {response:?}").into()),
+    }
 }
 
 fn git(repo: &TestRepo, args: &[&str]) -> TestResult {
@@ -88,52 +97,68 @@ fn directory_name(repo: &TestRepo) -> TestResult<String> {
 }
 
 #[tokio::test]
-async fn repositories_are_listed_with_their_chats_and_titles() -> TestResult {
-    let service = start_service(&Script::new().turn([Step::message("ok")]))?;
+async fn repositories_are_listed_with_their_names_and_paths() -> TestResult {
+    let service = start_service(&Script::new())?;
+    let app = service.connect();
     let first_repo = TestRepo::new()?;
     let second_repo = TestRepo::new()?;
-    let first = add_repository(&service, &first_repo).await?;
-    let second = add_repository(&service, &second_repo).await?;
-    let talked_in = start_chat(&service, first).await?;
-    let untouched = start_chat(&service, first).await?;
-    let mut events = service.subscribe();
-    send(
-        &service,
-        talked_in,
-        "Fix the login bug\nIt fails on Windows.",
-    )
-    .await?;
-    collect_turn(&mut events, talked_in).await?;
+    let first = add_repository(&app, &first_repo).await?;
+    let second = add_repository(&app, &second_repo).await?;
 
-    let response = service.execute(Command::ListRepositories).await?;
-
-    let Response::Repositories { repositories } = response else {
-        return Err(format!("expected Repositories, got {response:?}").into());
-    };
-    assert_eq!(repositories.len(), 2);
-    assert_eq!(repositories[0].repository, first);
-    assert_eq!(repositories[0].name, directory_name(&first_repo)?);
-    assert_eq!(repositories[0].path, first_repo.path());
     assert_eq!(
-        repositories[0].chats,
+        list_repositories(&app).await?,
         vec![
-            ChatSummary {
-                chat: talked_in,
-                title: Some("Fix the login bug".to_owned()),
+            RepositoryOverview {
+                repository: first,
+                name: directory_name(&first_repo)?,
+                path: first_repo.path().to_path_buf(),
             },
-            ChatSummary {
-                chat: untouched,
-                title: None,
+            RepositoryOverview {
+                repository: second,
+                name: directory_name(&second_repo)?,
+                path: second_repo.path().to_path_buf(),
             },
         ]
     );
-    assert_eq!(repositories[1].repository, second);
-    assert_eq!(repositories[1].chats, vec![]);
     Ok(())
 }
 
 #[tokio::test]
-async fn a_chat_shows_messages_tool_calls_and_results_in_order() -> TestResult {
+async fn a_chat_is_titled_by_the_first_line_of_its_first_message() -> TestResult {
+    let service = start_service(&Script::new().turn([Step::message("ok")]))?;
+    let app = service.connect();
+    let repo = TestRepo::new()?;
+    let repository = add_repository(&app, &repo).await?;
+    let talked_in = start_chat(&app, repository).await?;
+    let untouched = start_chat(&app, repository).await?;
+    let mut events = app.subscribe();
+
+    send(&app, talked_in, "Fix the login bug\nIt fails on Windows.").await?;
+    collect_turn(&mut events, talked_in).await?;
+
+    let expected = vec![
+        ChatOverview {
+            chat: talked_in,
+            repository,
+            title: Some("Fix the login bug".to_owned()),
+            status: ChatStatus::Idle,
+        },
+        ChatOverview {
+            chat: untouched,
+            repository,
+            title: None,
+            status: ChatStatus::Idle,
+        },
+    ];
+    assert_eq!(list_chats(&app).await?, expected);
+    // The title comes back after a restart, from the stored transcript.
+    let service = service.restart().await?;
+    assert_eq!(list_chats(&service.connect()).await?, expected);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_chat_shows_tool_calls_and_their_results_in_order() -> TestResult {
     let tool_call = AgentEvent::ToolCall {
         name: "read_file".to_owned(),
         detail: "README.md".to_owned(),
@@ -142,51 +167,42 @@ async fn a_chat_shows_messages_tool_calls_and_results_in_order() -> TestResult {
         name: "read_file".to_owned(),
         output: "# Demo".to_owned(),
     };
-    let script = Script::new()
-        .turn([
-            Step::Emit {
-                event: tool_call.clone(),
-            },
-            Step::Emit {
-                event: tool_result.clone(),
-            },
-            Step::EchoUserMessage,
-        ])
-        .turn([Step::EchoUserMessage]);
+    let script = Script::new().turn([
+        Step::Emit {
+            event: tool_call.clone(),
+        },
+        Step::Emit {
+            event: tool_result.clone(),
+        },
+        Step::EchoUserMessage,
+    ]);
     let service = start_service(&script)?;
+    let app = service.connect();
     let repo = TestRepo::new()?;
-    let repository = add_repository(&service, &repo).await?;
-    let chat = start_chat(&service, repository).await?;
-    let mut events = service.subscribe();
+    let chat = start_chat(&app, add_repository(&app, &repo).await?).await?;
+    let mut events = app.subscribe();
 
-    send(&service, chat, "one").await?;
-    collect_turn(&mut events, chat).await?;
-    send(&service, chat, "two").await?;
+    send(&app, chat, "one").await?;
     collect_turn(&mut events, chat).await?;
 
-    let user = |text: &str| TranscriptEntry::UserMessage {
-        text: text.to_owned(),
+    let agent = |event: AgentEvent| TranscriptEntry::Agent {
+        agent_cli: AgentCli::ClaudeCode,
+        event,
     };
-    let agent = |event: AgentEvent| TranscriptEntry::Agent { event };
-    let message = |text: &str| {
-        agent(AgentEvent::Message {
-            text: text.to_owned(),
-        })
+    let Response::Chat { transcript, .. } = app.execute(Command::ReadChat { chat }).await? else {
+        return Err("expected Chat".into());
     };
-    let view = get_chat(&service, chat).await?;
-    assert_eq!(view.chat, chat);
-    assert_eq!(view.repository, repository);
-    assert_eq!(view.repository_name, directory_name(&repo)?);
     assert_eq!(
-        view.transcript,
+        transcript,
         vec![
-            user("one"),
+            TranscriptEntry::UserMessage {
+                text: "one".to_owned()
+            },
             agent(tool_call),
             agent(tool_result),
-            message("one"),
-            agent(AgentEvent::TurnEnded),
-            user("two"),
-            message("two"),
+            agent(AgentEvent::Message {
+                text: "one".to_owned()
+            }),
             agent(AgentEvent::TurnEnded),
         ]
     );
@@ -196,15 +212,13 @@ async fn a_chat_shows_messages_tool_calls_and_results_in_order() -> TestResult {
 #[tokio::test]
 async fn a_chat_shows_the_branch_checked_out_where_it_works() -> TestResult {
     let service = start_service(&Script::new())?;
+    let app = service.connect();
     let repo = TestRepo::new()?;
     git(&repo, &["checkout", "--quiet", "-b", "feat/top-bar"])?;
-    let repository = add_repository(&service, &repo).await?;
-    let chat = start_chat(&service, repository).await?;
-
-    let view = get_chat(&service, chat).await?;
+    let chat = start_chat(&app, add_repository(&app, &repo).await?).await?;
 
     assert_eq!(
-        view.branch,
+        read_branch(&app, chat).await?,
         Branch::Named {
             name: "feat/top-bar".to_owned()
         }
@@ -212,13 +226,38 @@ async fn a_chat_shows_the_branch_checked_out_where_it_works() -> TestResult {
     Ok(())
 }
 
-#[tokio::test]
-async fn reading_an_unknown_chat_fails() -> TestResult {
-    let service = start_service(&Script::new())?;
-    let unknown: ChatId = serde_json::from_str("42")?;
+#[test]
+fn every_command_error_reaches_the_app() -> TestResult {
+    // Ids only arrive over the local interface, so tests deserialize them.
+    let chat: ChatId = serde_json::from_str("7")?;
+    let repository: RepositoryId = serde_json::from_str("3")?;
+    let errors = [
+        CommandError::NotAGitRepository {
+            path: "/tmp/not-a-repo".into(),
+        },
+        CommandError::UnknownRepository { repository },
+        CommandError::UnknownChat { chat },
+        CommandError::TurnRunning { chat },
+        CommandError::NoTurnRunning { chat },
+        CommandError::AgentCliNotConfigured {
+            agent_cli: AgentCli::Codex,
+        },
+        CommandError::AgentCli {
+            reason: "exited".to_owned(),
+        },
+        CommandError::Storage {
+            reason: "disk full".to_owned(),
+        },
+        CommandError::ServiceStopped,
+    ];
 
-    let result = service.execute(Command::GetChat { chat: unknown }).await;
-
-    assert_eq!(result, Err(CommandError::UnknownChat(unknown)));
+    for error in errors {
+        let json = serde_json::to_string(&error)?;
+        assert_eq!(
+            serde_json::from_str::<CommandError>(&json)?,
+            error,
+            "{json}"
+        );
+    }
     Ok(())
 }

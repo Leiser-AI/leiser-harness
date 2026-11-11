@@ -3,8 +3,16 @@
 // them again on every service event. The only thing it keeps is which chat
 // is selected.
 
-import type { AgentEvent, Branch, ChatId, ChatView, RepositorySummary, TranscriptEntry } from "./protocol";
+import type {
+  AgentEvent,
+  Branch,
+  ChatId,
+  ChatOverview,
+  RepositoryOverview,
+  TranscriptEntry,
+} from "./protocol";
 import * as service from "./service";
+import { AGENT_CLI_NAMES, type ChatView } from "./service";
 
 let selectedChat: ChatId | null = null;
 // Drops answers to older reads that arrive after newer ones.
@@ -15,6 +23,8 @@ const topBar = byId("top-bar");
 const transcript = byId("transcript");
 const composer = byId<HTMLFormElement>("composer");
 const messageInput = byId<HTMLTextAreaElement>("message");
+const sendButton = byId<HTMLButtonElement>("send");
+const interruptButton = byId<HTMLButtonElement>("interrupt");
 const errorBox = byId("error");
 
 function byId<T extends HTMLElement = HTMLElement>(id: string): T {
@@ -53,19 +63,24 @@ async function act(action: () => Promise<void>): Promise<void> {
   }
 }
 
+// Whether the selected chat runs a turn, as last read from the service.
+let selectedWorking = false;
+
 async function refresh(): Promise<void> {
   const read = ++readCount;
   const chat = selectedChat;
-  const [repositories, view] = await Promise.all([
+  const [repositories, chats, view] = await Promise.all([
     service.listRepositories(),
-    chat === null ? Promise.resolve(null) : service.getChat(chat),
+    service.listChats(),
+    chat === null ? Promise.resolve(null) : service.readChat(chat),
   ]);
   if (read !== readCount) return;
-  renderSidebar(repositories);
-  renderChat(view);
+  renderSidebar(repositories, chats);
+  const repository = chats.find((overview) => overview.chat === chat)?.repository;
+  renderChat(view, repositories.find((overview) => overview.repository === repository) ?? null);
 }
 
-function renderSidebar(repositories: RepositorySummary[]): void {
+function renderSidebar(repositories: RepositoryOverview[], chats: ChatOverview[]): void {
   const list = el("ul", "repository-list");
   if (repositories.length === 0) {
     list.append(el("li", "empty", "Add a repository to start a chat."));
@@ -87,11 +102,15 @@ function renderSidebar(repositories: RepositorySummary[]): void {
     );
     header.append(name, newChat);
 
-    const chats = el("ul", "chat-list");
-    for (const chat of repository.chats) {
+    const chatList = el("ul", "chat-list");
+    for (const chat of chats.filter((overview) => overview.repository === repository.repository)) {
       const chatItem = el("li");
-      const button = el("button", "chat-link", chat.title ?? "New chat");
+      const button = el("button", "chat-link");
       button.type = "button";
+      button.append(el("span", "chat-title", chat.title ?? "New chat"));
+      if (chat.status === "working") {
+        button.append(el("span", "chat-status", "working"));
+      }
       if (chat.chat === selectedChat) {
         button.classList.add("selected");
         button.setAttribute("aria-current", "true");
@@ -103,23 +122,24 @@ function renderSidebar(repositories: RepositorySummary[]): void {
         }),
       );
       chatItem.append(button);
-      chats.append(chatItem);
+      chatList.append(chatItem);
     }
-    item.append(header, chats);
+    item.append(header, chatList);
     list.append(item);
   }
   repositoriesNav.replaceChildren(list);
 }
 
-function renderChat(view: ChatView | null): void {
+function renderChat(view: ChatView | null, repository: RepositoryOverview | null): void {
   if (view === null) {
+    selectedWorking = false;
     topBar.replaceChildren(el("span", "muted", "No chat selected"));
     transcript.replaceChildren(el("li", "empty", "Select a chat or start a new one."));
     composer.hidden = true;
     return;
   }
   topBar.replaceChildren(
-    labelled("Repository", view.repository_name),
+    labelled("Repository", repository?.name ?? "unknown"),
     labelled("Branch", branchName(view.branch)),
   );
   const entries = view.transcript.map(renderEntry);
@@ -129,6 +149,9 @@ function renderChat(view: ChatView | null): void {
   const atBottom = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 40;
   transcript.replaceChildren(...entries);
   if (atBottom) transcript.scrollTop = transcript.scrollHeight;
+  selectedWorking = view.status === "working";
+  sendButton.textContent = selectedWorking ? "Queue" : "Send";
+  interruptButton.hidden = !selectedWorking;
   composer.hidden = false;
 }
 
@@ -155,14 +178,21 @@ function renderEntry(entry: TranscriptEntry): HTMLElement {
     item.append(el("div", "entry-label", "You"), el("div", "entry-text", entry.text));
     return item;
   }
-  return renderAgentEvent(entry.event);
+  return renderAgentEvent(entry.event, AGENT_CLI_NAMES[entry.agent_cli]);
 }
 
-function renderAgentEvent(event: AgentEvent): HTMLElement {
+function output(label: string, text: string): HTMLElement {
+  const details = el("details");
+  details.open = text.split("\n").length <= 8;
+  details.append(el("summary", "entry-label", label), el("pre", "", text));
+  return details;
+}
+
+function renderAgentEvent(event: AgentEvent, agentCli: string): HTMLElement {
   switch (event.type) {
     case "message": {
       const item = el("li", "entry agent");
-      item.append(el("div", "entry-label", "Agent"), el("div", "entry-text", event.text));
+      item.append(el("div", "entry-label", agentCli), el("div", "entry-text", event.text));
       return item;
     }
     case "tool_call": {
@@ -172,10 +202,14 @@ function renderAgentEvent(event: AgentEvent): HTMLElement {
     }
     case "tool_result": {
       const item = el("li", "entry tool-result");
-      const details = el("details");
-      details.open = event.output.split("\n").length <= 8;
-      details.append(el("summary", "entry-label", `Result · ${event.name}`), el("pre", "", event.output));
-      item.append(details);
+      item.append(output(`Result · ${event.name}`, event.output));
+      return item;
+    }
+    case "command_finished": {
+      const exit = event.exit_code === null ? "stopped" : `exit ${event.exit_code}`;
+      const item = el("li", "entry tool-result");
+      if (event.exit_code !== 0) item.classList.add("failed");
+      item.append(el("code", "", event.command), output(`Command · ${exit}`, event.output));
       return item;
     }
     case "approval_requested": {
@@ -190,6 +224,8 @@ function renderAgentEvent(event: AgentEvent): HTMLElement {
     }
     case "turn_ended":
       return el("li", "turn-ended", "Turn ended");
+    case "turn_interrupted":
+      return el("li", "turn-ended", "Turn interrupted");
     case "session_ended":
       return el("li", "entry notice", "The agent session ended.");
   }
@@ -205,21 +241,33 @@ async function send(): Promise<void> {
   const text = messageInput.value.trim();
   if (selectedChat === null || text === "") return;
   const chat = selectedChat;
-  const button = composer.querySelector("button");
   messageInput.disabled = true;
-  if (button) button.disabled = true;
+  sendButton.disabled = true;
   try {
     await act(async () => {
-      await service.sendMessage(chat, text);
+      // While a turn runs, a message waits for it to end.
+      if (selectedWorking) {
+        await service.queueMessage(chat, text);
+      } else {
+        await service.sendMessage(chat, text);
+      }
       messageInput.value = "";
       await refresh();
     });
   } finally {
     messageInput.disabled = false;
-    if (button) button.disabled = false;
+    sendButton.disabled = false;
     messageInput.focus();
   }
 }
+
+interruptButton.addEventListener("click", () =>
+  act(async () => {
+    if (selectedChat === null) return;
+    await service.interruptTurn(selectedChat);
+    await refresh();
+  }),
+);
 
 byId("add-repository").addEventListener("click", () =>
   act(async () => {

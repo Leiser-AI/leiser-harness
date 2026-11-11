@@ -11,7 +11,7 @@ const TURN_TIMEOUT: Duration = Duration::from_secs(10);
 /// Why [`collect_turn`] returned no turn.
 #[derive(Debug, thiserror::Error)]
 pub enum TurnError {
-    #[error("the turn did not end within {TURN_TIMEOUT:?}")]
+    #[error("no turn end or event came in time")]
     Timeout,
     #[error("the agent session ended before the turn did")]
     SessionEnded,
@@ -20,7 +20,9 @@ pub enum TurnError {
 }
 
 /// Collects the chat's agent events up to and including
-/// [`AgentEvent::TurnEnded`]. Events of other chats are skipped.
+/// [`AgentEvent::TurnEnded`] or [`AgentEvent::TurnInterrupted`]. Events of
+/// other chats, and events that do not come from the agent session, are
+/// skipped.
 ///
 /// # Errors
 ///
@@ -30,20 +32,58 @@ pub async fn collect_turn(
     events: &mut broadcast::Receiver<Event>,
     chat: ChatId,
 ) -> Result<Vec<AgentEvent>, TurnError> {
-    tokio::time::timeout(TURN_TIMEOUT, async {
+    collect_turn_within(events, chat, TURN_TIMEOUT).await
+}
+
+/// [`collect_turn`] with its own timeout, for real agent CLIs, which take
+/// longer than the fake one.
+///
+/// # Errors
+///
+/// As [`collect_turn`].
+pub async fn collect_turn_within(
+    events: &mut broadcast::Receiver<Event>,
+    chat: ChatId,
+    timeout: Duration,
+) -> Result<Vec<AgentEvent>, TurnError> {
+    tokio::time::timeout(timeout, async {
         let mut turn = Vec::new();
         loop {
-            let Event::Agent { chat: from, event } = events.recv().await?;
+            let Event::Agent { chat: from, event } = events.recv().await? else {
+                continue;
+            };
             if from != chat {
                 continue;
             }
             match event {
                 AgentEvent::SessionEnded => return Err(TurnError::SessionEnded),
-                AgentEvent::TurnEnded => {
+                AgentEvent::TurnEnded | AgentEvent::TurnInterrupted => {
                     turn.push(event);
                     return Ok(turn);
                 }
                 event => turn.push(event),
+            }
+        }
+    })
+    .await
+    .map_err(|_| TurnError::Timeout)?
+}
+
+/// The chat's next event of any kind. Events of other chats are skipped.
+///
+/// # Errors
+///
+/// Returns [`TurnError::Timeout`] when no event comes in time, or
+/// [`TurnError::Events`] when events were lost.
+pub async fn next_event(
+    events: &mut broadcast::Receiver<Event>,
+    chat: ChatId,
+) -> Result<Event, TurnError> {
+    tokio::time::timeout(TURN_TIMEOUT, async {
+        loop {
+            let event = events.recv().await?;
+            if event.chat() == chat {
+                return Ok(event);
             }
         }
     })

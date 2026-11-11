@@ -20,8 +20,11 @@
       <div id="error" class="error" role="alert" hidden></div>
       <ol id="transcript" class="transcript" aria-live="polite"></ol>
       <form id="composer" class="composer" hidden>
-        <textarea id="message" rows="3" placeholder="Message the agent (Enter sends, Shift+Enter adds a line)"></textarea>
-        <button type="submit">Send</button>
+        <textarea id="message" rows="3" placeholder="Message the agent (Enter sends or queues, Shift+Enter adds a line)"></textarea>
+        <div class="composer-actions">
+          <button id="send" type="submit">Send</button>
+          <button id="interrupt" type="button" hidden>Interrupt</button>
+        </div>
       </form>
     </main>
   </body>

@@ -6,9 +6,11 @@ own.
 
 For v1 the app's Rust side hosts the harness service in-process and
 forwards its local interface 1:1 (`execute` command, `service-event`
-events). Until the real drivers land (#26, #27), chats run on the testkit's
-fake agent CLI, which answers every message with a tool call, its result and
-an echo.
+events). The service keeps its data in the app's data directory (on macOS
+`~/Library/Application Support/ai.leiser.harness`).
+
+Chats start on the installed Claude Code (`claude` on `PATH`); Codex
+(`codex` on `PATH`) is configured as a second agent CLI.
 
 ## Run it
 
@@ -20,8 +22,14 @@ npm install
 npm run tauri dev
 ```
 
-`tauri dev` builds `fake-agent-cli` first and finds it next to the app
-binary. Set `LEISER_FAKE_AGENT_CLI` to use another path.
+To try the app without a subscription, run it on the testkit's fake agent
+CLI, which answers every message with a tool call, its result and an echo.
+Its chats are kept apart from real ones.
+
+```bash
+cargo build -p leiser-testkit --bin fake-agent-cli
+LEISER_FAKE_AGENT_CLI="$PWD/../../target/debug/fake-agent-cli" npm run tauri dev
+```
 
 ## Checks
 

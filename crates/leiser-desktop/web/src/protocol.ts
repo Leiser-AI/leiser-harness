@@ -4,47 +4,57 @@
 export type RepositoryId = number;
 export type ChatId = number;
 
+export type AgentCli = "claude_code" | "codex";
 export type Checkout = "main";
+export type ChatStatus = "idle" | "working";
+export type QueueReason = "requested" | "steer_unsupported";
 
 export type Command =
   | { type: "add_repository"; path: string }
   | { type: "start_chat"; repository: RepositoryId; checkout: Checkout }
   | { type: "send_message"; chat: ChatId; text: string }
+  | { type: "change_agent_cli"; chat: ChatId; agent_cli: AgentCli }
+  | { type: "queue_message"; chat: ChatId; text: string }
+  | { type: "steer_message"; chat: ChatId; text: string }
+  | { type: "interrupt_turn"; chat: ChatId }
   | { type: "list_repositories" }
-  | { type: "get_chat"; chat: ChatId };
+  | { type: "list_chats" }
+  | { type: "read_chat"; chat: ChatId };
 
 export type Response =
   | { type: "repository_added"; repository: RepositoryId }
   | { type: "chat_started"; chat: ChatId }
   | { type: "message_sent" }
-  | { type: "repositories"; repositories: RepositorySummary[] }
-  | { type: "chat"; chat: ChatView };
+  | { type: "message_queued"; reason: QueueReason }
+  | { type: "message_steered" }
+  | { type: "interrupt_requested" }
+  | { type: "agent_cli_changed" }
+  | { type: "repositories"; repositories: RepositoryOverview[] }
+  | { type: "chats"; chats: ChatOverview[] }
+  | { type: "chat"; status: ChatStatus; branch: Branch; transcript: TranscriptEntry[] };
 
 export type CommandError =
   | { type: "not_a_git_repository"; path: string }
-  | { type: "unknown_repository" }
-  | { type: "unknown_chat" }
+  | { type: "unknown_repository"; repository: RepositoryId }
+  | { type: "unknown_chat"; chat: ChatId }
+  | { type: "turn_running"; chat: ChatId }
+  | { type: "no_turn_running"; chat: ChatId }
+  | { type: "agent_cli_not_configured"; agent_cli: AgentCli }
   | { type: "agent_cli"; reason: string }
+  | { type: "storage"; reason: string }
   | { type: "service_stopped" };
 
-export interface RepositorySummary {
+export interface RepositoryOverview {
   repository: RepositoryId;
   name: string;
   path: string;
-  chats: ChatSummary[];
 }
 
-export interface ChatSummary {
-  chat: ChatId;
-  title: string | null;
-}
-
-export interface ChatView {
+export interface ChatOverview {
   chat: ChatId;
   repository: RepositoryId;
-  repository_name: string;
-  branch: Branch;
-  transcript: TranscriptEntry[];
+  title: string | null;
+  status: ChatStatus;
 }
 
 export type Branch =
@@ -54,15 +64,21 @@ export type Branch =
 
 export type TranscriptEntry =
   | { type: "user_message"; text: string }
-  | { type: "agent"; event: AgentEvent };
+  | { type: "agent"; agent_cli: AgentCli; event: AgentEvent };
 
 export type AgentEvent =
   | { type: "message"; text: string }
   | { type: "tool_call"; name: string; detail: string }
   | { type: "tool_result"; name: string; output: string }
+  | { type: "command_finished"; command: string; exit_code: number | null; output: string }
   | { type: "approval_requested"; request: string; description: string }
   | { type: "usage_limit_reached"; limit: string; resets_in_seconds: number | null }
   | { type: "turn_ended" }
+  | { type: "turn_interrupted" }
   | { type: "session_ended" };
 
-export type ServiceEvent = { type: "agent"; chat: ChatId; event: AgentEvent };
+export type ServiceEvent =
+  | { type: "agent"; chat: ChatId; event: AgentEvent }
+  | { type: "message_queued"; chat: ChatId; text: string; reason: QueueReason }
+  | { type: "message_steered"; chat: ChatId; text: string }
+  | { type: "queued_message_sent"; chat: ChatId; text: string };
