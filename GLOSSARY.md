@@ -96,7 +96,7 @@ _Avoid_: roadmap, plan, epic
 **Ticket**:
 One question or piece of work on a wayfinder map, with a type (research,
 prototype, grilling or task). It is closed, claimed (assigned to someone),
-blocked (by an open ticket) or on the frontier.
+blocked (by an open issue) or on the frontier.
 _Avoid_: card, node, step
 
 **Frontier**:

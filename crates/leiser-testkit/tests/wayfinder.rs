@@ -10,8 +10,8 @@ use std::path::Path;
 use std::time::Duration;
 
 use leiser_service::{
-    Command, CommitAuthor, Event, LoginOutcome, RepositoryId, Response, ServiceHandle, Ticket,
-    TicketKind, TicketState, WayfinderMap, WayfinderMaps,
+    Command, CommitAuthor, Event, IssueRef, LoginOutcome, RepositoryId, Response, ServiceHandle,
+    Ticket, TicketState, TicketType, WayfinderMap, WayfinderMaps,
 };
 use leiser_testkit::{FakePoll, Script, TestRepo, TestService};
 use tokio::sync::broadcast;
@@ -189,10 +189,10 @@ fn url(number: u64) -> String {
 fn chart(bound: &Bound) -> TestResult {
     let host = bound.harness.git_host();
     host.add_map(10, "Map: v2");
-    host.add_ticket(10, 11, "Find the store", Some(TicketKind::Research))?;
-    host.add_ticket(10, 12, "Agree on the API", Some(TicketKind::Grilling))?;
-    host.add_ticket(10, 13, "Sketch the screen", Some(TicketKind::Prototype))?;
-    host.add_ticket(10, 14, "Sign up for the service", Some(TicketKind::Task))?;
+    host.add_ticket(10, 11, "Find the store", Some(TicketType::Research))?;
+    host.add_ticket(10, 12, "Agree on the API", Some(TicketType::Grilling))?;
+    host.add_ticket(10, 13, "Sketch the screen", Some(TicketType::Prototype))?;
+    host.add_ticket(10, 14, "Sign up for the service", Some(TicketType::Task))?;
     host.add_ticket(10, 15, "Untyped question", None)?;
     host.block(12, 11)?;
     host.block(14, 12)?;
@@ -212,11 +212,11 @@ async fn reads_a_map_with_its_tickets_states_types_and_edges() -> TestResult {
         WayfinderMaps::NotRead => next_change(&bound, &mut events).await?,
         maps => maps,
     };
-    let ticket = |number: u64, title: &str, kind, state, blocked_by: Vec<u64>| Ticket {
+    let ticket = |number: u64, title: &str, ticket_type, state, blocked_by: Vec<u64>| Ticket {
         number,
         title: title.to_owned(),
         url: url(number),
-        kind,
+        ticket_type,
         state,
         blocked_by,
     };
@@ -231,21 +231,21 @@ async fn reads_a_map_with_its_tickets_states_types_and_edges() -> TestResult {
                     ticket(
                         11,
                         "Find the store",
-                        Some(TicketKind::Research),
+                        Some(TicketType::Research),
                         TicketState::Closed,
                         vec![]
                     ),
                     ticket(
                         12,
                         "Agree on the API",
-                        Some(TicketKind::Grilling),
+                        Some(TicketType::Grilling),
                         TicketState::Frontier,
                         vec![11]
                     ),
                     ticket(
                         13,
                         "Sketch the screen",
-                        Some(TicketKind::Prototype),
+                        Some(TicketType::Prototype),
                         TicketState::Claimed {
                             assignees: vec!["someone".to_owned()]
                         },
@@ -254,9 +254,12 @@ async fn reads_a_map_with_its_tickets_states_types_and_edges() -> TestResult {
                     ticket(
                         14,
                         "Sign up for the service",
-                        Some(TicketKind::Task),
+                        Some(TicketType::Task),
                         TicketState::Blocked {
-                            open_blockers: vec!["#12".to_owned(), "#13".to_owned()]
+                            open_blockers: vec![
+                                IssueRef::Here { number: 12 },
+                                IssueRef::Here { number: 13 }
+                            ]
                         },
                         vec![12, 13]
                     ),
@@ -265,7 +268,7 @@ async fn reads_a_map_with_its_tickets_states_types_and_edges() -> TestResult {
                         "Untyped question",
                         None,
                         TicketState::Blocked {
-                            open_blockers: vec!["#99".to_owned()]
+                            open_blockers: vec![IssueRef::Here { number: 99 }]
                         },
                         vec![]
                     ),
@@ -353,7 +356,7 @@ async fn several_open_maps_are_read_newest_first() -> TestResult {
     let host = bound.harness.git_host();
     host.add_map(1, "Map: older");
     host.add_map(7, "Map: newer");
-    host.add_ticket(7, 8, "A question", Some(TicketKind::Grilling))?;
+    host.add_ticket(7, 8, "A question", Some(TicketType::Grilling))?;
     let mut events = bound.service.subscribe();
     let maps = match read(&bound).await? {
         WayfinderMaps::NotRead => next_change(&bound, &mut events).await?,

@@ -9,7 +9,7 @@ use std::error::Error;
 
 use leiser_service::{
     Blocker, GhGitHost, GitHost, HostAccountAccess, IssueRef, PolledWayfinderMaps, TicketIssue,
-    TicketKind,
+    TicketType,
 };
 use leiser_testkit::{FakeGh, FakeGhRequest};
 use serde_json::{Value, json};
@@ -19,9 +19,9 @@ type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 const FAKE_GH: &str = env!("CARGO_BIN_EXE_fake-gh");
 const REMOTE: &str = "https://github.com/owner/repo.git";
 const REPO: &str = "repos/owner/repo";
-const MAPS: &str = "/issues?labels=wayfinder:map&state=open&per_page=100";
-const TICKETS: &str = "/issues/1/sub_issues?per_page=100";
-const BLOCKERS: &str = "/issues/3/dependencies/blocked_by?per_page=100";
+const MAPS: &str = "/issues?labels=wayfinder:map&state=open&per_page=100&page=1";
+const TICKETS: &str = "/issues/1/sub_issues?per_page=100&page=1";
+const BLOCKERS: &str = "/issues/3/dependencies/blocked_by?per_page=100&page=1";
 
 struct Fixture {
     _dir: tempfile::TempDir,
@@ -56,7 +56,7 @@ fn fixture() -> TestResult<Fixture> {
         &format!("{REPO}{BLOCKERS}"),
         "\"blockers-1\"",
         json!([
-            {"number": 2, "state": "closed", "repository_url": "https://api.github.com/repos/owner/repo"},
+            {"number": 2, "state": "closed", "repository_url": "https://api.github.com/repos/Owner/Repo"},
             {"number": 4, "state": "open", "repository_url": "https://api.github.com/repos/other/lib"},
         ]),
     )?;
@@ -129,7 +129,7 @@ async fn a_first_poll_reads_maps_tickets_and_the_blockers_of_blocked_tickets() -
                 number: 2,
                 title: "Ticket 2".to_owned(),
                 url: "https://github.com/owner/repo/issues/2".to_owned(),
-                kind: Some(TicketKind::Research),
+                ticket_type: Some(TicketType::Research),
                 open: false,
                 assignees: vec![],
                 blocked_by: vec![],
@@ -138,7 +138,7 @@ async fn a_first_poll_reads_maps_tickets_and_the_blockers_of_blocked_tickets() -
                 number: 3,
                 title: "Ticket 3".to_owned(),
                 url: "https://github.com/owner/repo/issues/3".to_owned(),
-                kind: Some(TicketKind::Grilling),
+                ticket_type: Some(TicketType::Grilling),
                 open: true,
                 assignees: vec!["someone".to_owned()],
                 blocked_by: vec![
@@ -235,5 +235,36 @@ async fn a_remote_on_another_git_host_is_refused() -> TestResult {
         .poll_wayfinder_maps(&fixture.access, "git@github.com:owner/repo.git", None)
         .await;
     assert!(refused.is_err(), "{refused:?}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_map_longer_than_a_page_is_read_page_by_page() -> TestResult {
+    let fixture = fixture()?;
+    let mut first_page: Vec<Value> = (100..200)
+        .map(|number| ticket(number, "open", "wayfinder:task", &[], 0))
+        .collect();
+    first_page[0] = ticket(100, "open", "bug", &[], 0);
+    fixture.gh.answer(
+        &format!("{REPO}{TICKETS}"),
+        "\"tickets-page-1\"",
+        Value::Array(first_page),
+    )?;
+    fixture.gh.answer(
+        &format!("{REPO}/issues/1/sub_issues?per_page=100&page=2"),
+        "\"tickets-page-2\"",
+        json!([ticket(200, "open", "wayfinder:research", &[], 0)]),
+    )?;
+
+    let polled = poll(&fixture, None).await?;
+
+    let tickets = &polled.maps[0].tickets;
+    assert_eq!(tickets.len(), 101);
+    assert_eq!(tickets[0].ticket_type, None, "a label of no ticket type");
+    assert_eq!(tickets[1].ticket_type, Some(TicketType::Task));
+    assert_eq!(
+        (tickets[100].number, tickets[100].ticket_type),
+        (200, Some(TicketType::Research))
+    );
     Ok(())
 }

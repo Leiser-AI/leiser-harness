@@ -17,18 +17,17 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
-use std::path::PathBuf;
 use std::time::Duration;
 
+use super::polls::PollError;
 use super::{Background, ChatPullRequest, Opening, Place, Setup, State, verify_and_push};
 use crate::git_host::{
-    CheckOutcome, CommitId, GitHostError, HostAccountAccess, Mergeable, PolledPullRequest,
-    PullRequestActivity, PullRequestComment,
+    CheckOutcome, CommitId, Mergeable, PolledPullRequest, PullRequestActivity, PullRequestComment,
 };
 use crate::store::{AttemptsV3, AutoFixV3, AwaitingPushV3, ConflictV3, TriedV3};
 use crate::{
-    AutoFix, AutoFixStop, AutoFixTrigger, ChatId, CommandError, Event, HostAccountBinding,
-    PullRequest, PullRequestState, Response, TranscriptEntry,
+    AutoFix, AutoFixStop, AutoFixTrigger, ChatId, CommandError, Event, PullRequest,
+    PullRequestState, Response, TranscriptEntry,
 };
 
 /// How often an open pull request is polled.
@@ -146,17 +145,6 @@ impl Problem {
             },
         }
     }
-}
-
-/// Why a poll could not ask the git host.
-#[derive(Debug, thiserror::Error)]
-pub(super) enum PollError {
-    #[error("the repository is bound to no host account the harness knows")]
-    NoHostAccount,
-    #[error("the repository has no remote `origin`")]
-    NoOrigin,
-    #[error(transparent)]
-    GitHost(#[from] GitHostError),
 }
 
 /// What became of a fix after its turn.
@@ -585,7 +573,11 @@ impl State {
             })
             .collect();
         for (id, number) in due {
-            let access = self.poll_access(id);
+            let target = self
+                .chats
+                .get(&id)
+                .ok_or(PollError::NoHostAccount)
+                .and_then(|chat| self.poll_target(chat.repository));
             let Some(chat) = self.chats.get_mut(&id) else {
                 continue;
             };
@@ -595,12 +587,10 @@ impl State {
             self.background_running += 1;
             tokio::spawn(async move {
                 let result = async {
-                    let (repository, access) = access?;
-                    let remote = crate::git::origin_url(&repository)
-                        .await
-                        .ok_or(PollError::NoOrigin)?;
+                    let target = target?;
+                    let remote = target.remote().await?;
                     Ok(git_host
-                        .poll_pull_request(&access, &remote, number, last.as_ref())
+                        .poll_pull_request(&target.access, &remote, number, last.as_ref())
                         .await?)
                 }
                 .await;
@@ -614,26 +604,6 @@ impl State {
                     .await;
             });
         }
-    }
-
-    /// The repository's path and its host account's access, for a poll.
-    /// Unlike a push, a poll leaves the repository's git config alone.
-    fn poll_access(&self, id: ChatId) -> Result<(PathBuf, HostAccountAccess), PollError> {
-        let repository = self
-            .chats
-            .get(&id)
-            .and_then(|chat| self.repositories.get(&chat.repository))
-            .ok_or(PollError::NoHostAccount)?
-            .clone();
-        let HostAccountBinding::Bound { host_account, .. } = self.host_account_binding(&repository)
-        else {
-            return Err(PollError::NoHostAccount);
-        };
-        let access = self
-            .host_accounts
-            .access(host_account)
-            .ok_or(PollError::NoHostAccount)?;
-        Ok((repository, access))
     }
 
     pub(super) async fn auto_fix_finished(&mut self, work: AutoFixWork) {

@@ -366,18 +366,23 @@ export interface Ticket {
   title: string;
   url: string;
   /** From its `wayfinder:<type>` label; `null` without one. */
-  kind: TicketKind | null;
+  ticket_type: TicketType | null;
   state: TicketState;
   /** The tickets of the same map that block this one, open or closed. */
   blocked_by: number[];
 }
 
-export type TicketKind = "research" | "prototype" | "grilling" | "task";
+export type TicketType = "research" | "prototype" | "grilling" | "task";
+
+/** An issue on the git host, in the repository or in another one. */
+export type IssueRef =
+  | { type: "here"; number: number }
+  | { type: "elsewhere"; repository: string; number: number };
 
 export type TicketState =
   | { type: "closed" }
   | { type: "claimed"; assignees: string[] }
-  | { type: "blocked"; open_blockers: string[] }
+  | { type: "blocked"; open_blockers: IssueRef[] }
   | { type: "frontier" };
 
 /** Whether the harness watches the chat's open pull request and fixes it. */

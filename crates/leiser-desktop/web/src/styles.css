@@ -1872,7 +1872,7 @@ body {
   height: 8px;
   margin-right: var(--space-1);
   border-radius: var(--radius-full);
-  background: var(--kind-color);
+  background: var(--type-color);
 }
 
 .wayfinder-scroller {
@@ -1887,24 +1887,29 @@ body {
   margin: 0 auto;
 }
 
-.wayfinder-edges {
+.wayfinder-arrows {
   position: absolute;
   inset: 0;
   overflow: visible;
 }
 
-.wayfinder-edge {
+.wayfinder-arrow {
   fill: none;
   stroke: var(--color-border-strong);
   stroke-width: 1.5;
 }
 
-.wayfinder-edge.blocking {
+.wayfinder-arrow.blocking {
   stroke: var(--color-text-muted);
 }
 
-.wayfinder-edge.cleared {
+.wayfinder-arrow.cleared {
   stroke-dasharray: 3 3;
+}
+
+.wayfinder-arrow.cycle {
+  stroke: var(--color-danger);
+  stroke-dasharray: 4 3;
 }
 
 .wayfinder-arrowhead {
@@ -1923,16 +1928,32 @@ body {
   background: var(--color-bg);
 }
 
-.kind-research { --kind-color: var(--color-kind-research); }
-.kind-prototype { --kind-color: var(--color-kind-prototype); }
-.kind-grilling { --kind-color: var(--color-kind-grilling); }
-.kind-task { --kind-color: var(--color-kind-task); }
-.kind-untyped { --kind-color: var(--color-kind-untyped); }
+.wayfinder-outside {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px dashed var(--color-border-strong);
+  border-radius: var(--radius-full);
+  background: var(--color-surface-sunken);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.type-research { --type-color: var(--color-type-research); }
+.type-prototype { --type-color: var(--color-type-prototype); }
+.type-grilling { --type-color: var(--color-type-grilling); }
+.type-task { --type-color: var(--color-type-task); }
+.type-untyped { --type-color: var(--color-type-untyped); }
 
 .wayfinder-ticket {
   position: absolute;
   display: flex;
-  border: 1.5px solid var(--kind-color);
+  border: 1.5px solid var(--type-color);
   border-radius: var(--radius-md);
   background: var(--color-surface);
   box-shadow: var(--shadow-sm);
@@ -1958,7 +1979,7 @@ body {
   background: var(--color-hover);
 }
 
-.wayfinder-kind {
+.wayfinder-type {
   display: flex;
   flex: none;
   align-items: center;
@@ -1966,8 +1987,8 @@ body {
   width: 24px;
   height: 24px;
   border-radius: var(--radius-sm);
-  color: var(--kind-color);
-  background: color-mix(in srgb, var(--kind-color) 12%, transparent);
+  color: var(--type-color);
+  background: color-mix(in srgb, var(--type-color) 12%, transparent);
 }
 
 .wayfinder-ticket-text {
@@ -1984,7 +2005,7 @@ body {
   text-overflow: ellipsis;
 }
 
-.wayfinder-ticket-meta {
+.wayfinder-ticket-facts {
   overflow: hidden;
   font-size: var(--text-xs);
   color: var(--color-text-muted);
@@ -1993,7 +2014,6 @@ body {
 }
 
 .wayfinder-ticket.state-closed {
-  border-style: solid;
   opacity: 0.55;
 }
 
@@ -2012,16 +2032,16 @@ body {
   box-shadow: none;
 }
 
-.wayfinder-ticket.state-claimed .wayfinder-ticket-meta {
+.wayfinder-ticket.state-claimed .wayfinder-ticket-facts {
   color: var(--color-accent);
 }
 
 .wayfinder-ticket.state-frontier {
   border-width: 2px;
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--kind-color) 18%, transparent), var(--shadow-md);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--type-color) 18%, transparent), var(--shadow-md);
 }
 
-.wayfinder-ticket.state-frontier .wayfinder-ticket-meta {
+.wayfinder-ticket.state-frontier .wayfinder-ticket-facts {
   color: var(--color-success);
   font-weight: var(--weight-medium);
 }
@@ -2049,4 +2069,3 @@ body {
   outline: none;
   box-shadow: inset 0 0 0 2px var(--color-accent);
 }
-

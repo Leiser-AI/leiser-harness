@@ -32,7 +32,7 @@ const REVIEW_COMMENTS: &str = "review-comments";
 const STATUS: &str = "status-";
 
 /// An answer to a conditional request.
-pub(super) enum Answer {
+enum Answer {
     NotModified,
     Fresh { tag: Option<String>, body: String },
 }
@@ -230,27 +230,28 @@ impl GhGitHost {
     ) -> Result<PolledPullRequest, GitHostError> {
         let repository = https_repository(remote, &access.git_host)?;
         let mut requests = Poll {
-            host: self,
-            access,
-            repository: &repository,
+            requests: Requests::new(self, access, &repository, last.map(|last| &last.memo)),
             last,
-            memo: PollMemo::default(),
         };
         let pull = match requests
             .part::<PullJson>(&format!("/pulls/{number}"))
             .await?
         {
             Part::Fresh(pull) => {
-                requests.memo.insert(COMMENTS, &pull.comments.to_string());
                 requests
-                    .memo
+                    .requests
+                    .memo_mut()
+                    .insert(COMMENTS, &pull.comments.to_string());
+                requests
+                    .requests
+                    .memo_mut()
                     .insert(REVIEW_COMMENTS, &pull.review_comments.to_string());
                 PullFields::from(pull)
             }
             Part::Unchanged(last) => {
                 for key in [COMMENTS, REVIEW_COMMENTS] {
                     if let Some(count) = last.memo.get(key) {
-                        requests.memo.insert(key, count);
+                        requests.requests.memo_mut().insert(key, count);
                     }
                 }
                 PullFields::from(&last.activity)
@@ -273,7 +274,8 @@ impl GhGitHost {
         }
         let last_page = |key: &str| {
             let count: u64 = requests
-                .memo
+                .requests
+                .memo()
                 .get(key)
                 .and_then(|count| count.parse().ok())
                 .unwrap_or(0);
@@ -321,7 +323,7 @@ impl GhGitHost {
                 checks,
                 comments,
             },
-            memo: requests.memo,
+            memo: requests.requests.finish(),
         })
     }
 
@@ -402,13 +404,11 @@ impl GhGitHost {
     }
 }
 
-/// One poll's requests, with the memo it builds for the next.
+/// One poll's requests, with the last poll they take unchanged parts
+/// from.
 struct Poll<'a> {
-    host: &'a GhGitHost,
-    access: &'a HostAccountAccess,
-    repository: &'a str,
+    requests: Requests<'a>,
     last: Option<&'a PolledPullRequest>,
-    memo: PollMemo,
 }
 
 /// A part of the pull request.
@@ -422,43 +422,106 @@ impl<'a> Poll<'a> {
     /// One part of the pull request: fresh from the git host, or the last
     /// poll's when the git host answers that it has not changed.
     async fn part<T: DeserializeOwned>(&mut self, path: &str) -> Result<Part<'a, T>, GitHostError> {
-        let known = self
-            .last
-            .and_then(|last| Some((last, last.memo.get(path)?)));
-        match self.conditional(path, known.map(|(_, tag)| tag)).await? {
+        match self.requests.fetch(path).await? {
+            Fetched::Unchanged => {
+                self.last
+                    .map(Part::Unchanged)
+                    .ok_or_else(|| GitHostError::UnexpectedAnswer {
+                        answer: format!("304 for {path} without a last poll"),
+                    })
+            }
+            Fetched::Fresh(body) => serde_json::from_str(&body)
+                .map(Part::Fresh)
+                .map_err(|error| GitHostError::UnexpectedAnswer {
+                    answer: format!("{path}: {error}"),
+                }),
+        }
+    }
+}
+
+/// The conditional requests of one poll, with the memo it builds for the
+/// next: the entity tag of each answer, under the request's path.
+pub(super) struct Requests<'a> {
+    host: &'a GhGitHost,
+    access: &'a HostAccountAccess,
+    repository: &'a str,
+    /// The last poll's memo.
+    last: Option<&'a PollMemo>,
+    memo: PollMemo,
+}
+
+/// The answer to one conditional request.
+pub(super) enum Fetched {
+    /// As the last poll got it.
+    Unchanged,
+    Fresh(String),
+}
+
+impl<'a> Requests<'a> {
+    pub(super) fn new(
+        host: &'a GhGitHost,
+        access: &'a HostAccountAccess,
+        repository: &'a str,
+        last: Option<&'a PollMemo>,
+    ) -> Self {
+        Self {
+            host,
+            access,
+            repository,
+            last,
+            memo: PollMemo::default(),
+        }
+    }
+
+    /// `path` with `If-None-Match` and the last poll's tag for it, if any.
+    pub(super) async fn fetch(&mut self, path: &str) -> Result<Fetched, GitHostError> {
+        let known = self.last.and_then(|last| last.get(path));
+        match self
+            .host
+            .conditional(self.access, self.repository, path, known)
+            .await?
+        {
             Answer::NotModified => {
-                let (last, tag) = known.ok_or_else(|| GitHostError::UnexpectedAnswer {
+                let tag = known.ok_or_else(|| GitHostError::UnexpectedAnswer {
                     answer: format!("304 for {path} without a tag"),
                 })?;
                 self.memo.insert(path, tag);
-                Ok(Part::Unchanged(last))
+                Ok(Fetched::Unchanged)
             }
             Answer::Fresh { tag, body } => {
                 if let Some(tag) = tag {
                     self.memo.insert(path, &tag);
                 }
-                serde_json::from_str(&body)
-                    .map(Part::Fresh)
-                    .map_err(|error| GitHostError::UnexpectedAnswer {
-                        answer: format!("{path}: {error}"),
-                    })
+                Ok(Fetched::Fresh(body))
             }
         }
     }
 
-    /// Runs `gh api --include` for `path`, with `If-None-Match` when there
-    /// is a tag.
-    async fn conditional(&self, path: &str, tag: Option<&str>) -> Result<Answer, GitHostError> {
-        self.host
-            .conditional(self.access, self.repository, path, tag)
-            .await
+    /// The last poll's memo.
+    pub(super) fn last(&self) -> Option<&'a PollMemo> {
+        self.last
+    }
+
+    /// The memo this poll has built so far.
+    pub(super) fn memo(&self) -> &PollMemo {
+        &self.memo
+    }
+
+    /// The memo this poll builds, to keep more in it.
+    pub(super) fn memo_mut(&mut self) -> &mut PollMemo {
+        &mut self.memo
+    }
+
+    /// The memo for the next poll.
+    pub(super) fn finish(self) -> PollMemo {
+        self.memo
     }
 }
 
 impl GhGitHost {
     /// Runs `gh api --include` for `path` in `repository`, with
     /// `If-None-Match` when there is a tag.
-    pub(super) async fn conditional(
+    async fn conditional(
         &self,
         access: &HostAccountAccess,
         repository: &str,

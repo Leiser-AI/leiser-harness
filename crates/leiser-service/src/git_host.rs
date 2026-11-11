@@ -28,7 +28,7 @@ use tokio::process::Command;
 use crate::installed::{self, Environment, Program};
 use serde::{Deserialize, Serialize};
 
-use crate::{CommentLocation, LoginProcess, PullRequestState, TicketKind};
+use crate::{CommentLocation, IssueRef, LoginProcess, PullRequestState, TicketType};
 
 mod github_poll;
 mod github_wayfinder;
@@ -173,6 +173,22 @@ impl PollMemo {
     pub fn insert(&mut self, key: &str, value: &str) {
         self.0.insert(key.to_owned(), value.to_owned());
     }
+
+    /// The answer kept for the request to `path`, apart from its tag.
+    #[must_use]
+    pub fn answer(&self, path: &str) -> Option<&str> {
+        self.get(&Self::answer_key(path))
+    }
+
+    /// Keeps `answer` as the answer to the request to `path`, apart from
+    /// its tag, for when the next poll's request gets `304 Not Modified`.
+    pub fn keep_answer(&mut self, path: &str, answer: &str) {
+        self.insert(&Self::answer_key(path), answer);
+    }
+
+    fn answer_key(path: &str) -> String {
+        format!("answer {path}")
+    }
 }
 
 /// A pull request as one poll found it, with what its next poll gets
@@ -209,7 +225,7 @@ pub struct TicketIssue {
     pub title: String,
     pub url: String,
     /// From its `wayfinder:<type>` label.
-    pub kind: Option<TicketKind>,
+    pub ticket_type: Option<TicketType>,
     pub open: bool,
     /// The logins it is assigned to.
     pub assignees: Vec<String>,
@@ -222,22 +238,6 @@ pub struct TicketIssue {
 pub struct Blocker {
     pub issue: IssueRef,
     pub open: bool,
-}
-
-/// An issue, in the polled repository or another one.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum IssueRef {
-    Here { number: u64 },
-    Elsewhere { repository: String, number: u64 },
-}
-
-impl std::fmt::Display for IssueRef {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Here { number } => write!(f, "#{number}"),
-            Self::Elsewhere { repository, number } => write!(f, "{repository}#{number}"),
-        }
-    }
 }
 
 /// Why the git host could not do what the harness service asked.

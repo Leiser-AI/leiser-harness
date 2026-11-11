@@ -973,8 +973,8 @@ pub struct WayfinderMap {
     pub tickets: Vec<Ticket>,
 }
 
-/// A ticket of a wayfinder map: one decision, investigation or piece of
-/// work, as one sub-issue of the map.
+/// A ticket of a wayfinder map: one question or piece of work, as one
+/// sub-issue of the map.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Ticket {
     /// The ticket's issue number on the git host.
@@ -983,7 +983,7 @@ pub struct Ticket {
     /// Where the git host shows the ticket.
     pub url: String,
     /// From its `wayfinder:<type>` label; `None` without one.
-    pub kind: Option<TicketKind>,
+    pub ticket_type: Option<TicketType>,
     pub state: TicketState,
     /// The tickets of the same map that block this one, open or closed:
     /// the map's edges, by issue number.
@@ -993,7 +993,7 @@ pub struct Ticket {
 /// What resolving a ticket takes, after its `wayfinder:<type>` label.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum TicketKind {
+pub enum TicketType {
     /// Reading documentation or sources for a fact a decision waits on.
     Research,
     /// A rough artifact to react to.
@@ -1015,13 +1015,35 @@ pub enum TicketState {
     Claimed {
         assignees: Vec<String>,
     },
-    /// Open blockers keep it from being taken, named as the git host
-    /// refers to them, such as `#12` or `owner/repo#12`.
+    /// Open issues block it: tickets of the map, or issues outside it.
     Blocked {
-        open_blockers: Vec<String>,
+        open_blockers: Vec<IssueRef>,
     },
     /// Open, unblocked and unclaimed: it can be taken now.
     Frontier,
+}
+
+/// An issue on the git host, in the repository or in another one.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum IssueRef {
+    Here {
+        number: u64,
+    },
+    Elsewhere {
+        /// `owner/name`.
+        repository: String,
+        number: u64,
+    },
+}
+
+impl std::fmt::Display for IssueRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Here { number } => write!(f, "#{number}"),
+            Self::Elsewhere { repository, number } => write!(f, "{repository}#{number}"),
+        }
+    }
 }
 
 /// Whether the harness watches a chat's open pull request and wakes the

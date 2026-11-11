@@ -55,18 +55,32 @@ import {
   type ChatView,
 } from "./service";
 
-let selectedChat: ChatId | null = null;
-// Shown instead of a chat when set.
-let selectedCheck: RepositoryId | null = null;
-// The repository whose CLI extensions panel is open instead of a chat.
-let selectedExtensions: RepositoryId | null = null;
-// The repository whose wayfinder map is shown instead of a chat.
-let selectedMap: RepositoryId | null = null;
+/** What the main area shows: a chat, or one of a repository's views instead of a chat. */
+type Selection =
+  | { type: "none" }
+  | { type: "chat"; chat: ChatId }
+  | { type: "repo_check"; repository: RepositoryId }
+  | { type: "wayfinder_map"; repository: RepositoryId }
+  | { type: "extensions"; repository: RepositoryId };
+
+let selected: Selection = { type: "none" };
+
+/** The selected chat, if a chat is selected. */
+function selectedChat(): ChatId | null {
+  return selected.type === "chat" ? selected.chat : null;
+}
+
+/** The repository whose `view` is selected, if it is. */
+function selectedRepository(view: "repo_check" | "wayfinder_map" | "extensions"): RepositoryId | null {
+  return selected.type === view ? selected.repository : null;
+}
+
 // The map the developer picked, by repository, when one has several.
 const pickedMaps = new Map<RepositoryId, number>();
-// What the wayfinder view shows now; it is built again only when this
-// changes, so other events keep the developer's focus and scroll position.
-let shownMap: string | null = null;
+// A fingerprint of what the wayfinder view shows now; the view is built
+// again only when it changes, so other events keep the developer's focus
+// and scroll position.
+let renderedMapFingerprint: string | null = null;
 // Drops answers to older reads that arrive after newer ones.
 let readCount = 0;
 
@@ -228,7 +242,7 @@ async function refresh(): Promise<void> {
     return;
   }
   const read = ++readCount;
-  const chat = selectedChat;
+  const chat = selectedChat();
   const [repositories, chats, subscriptions, hostAccounts, view, todos, updateWaiting] = await Promise.all([
     service.listRepositories(),
     service.listChats(),
@@ -268,8 +282,9 @@ async function refresh(): Promise<void> {
   renderSubscriptions(subscriptions);
   renderHostAccounts(hostAccounts);
   wayfinderView.hidden = true;
-  if (selectedExtensions !== null) {
-    const shown = repositories.find((overview) => overview.repository === selectedExtensions);
+  if (selected.type === "extensions") {
+    const shownRepository = selected.repository;
+    const shown = repositories.find((overview) => overview.repository === shownRepository);
     repoCheckView.hidden = true;
     diffPanel.hide();
     renderExtensionsTopBar(shown ?? null);
@@ -277,17 +292,20 @@ async function refresh(): Promise<void> {
     terminal.show(null);
     return;
   }
-  const mapped = repositories.find((overview) => overview.repository === selectedMap);
-  if (mapped) {
+  const mapRepository = repositories.find(
+    (overview) => overview.repository === selectedRepository("wayfinder_map"),
+  );
+  if (mapRepository) {
     diffPanel.hide();
     repoCheckView.hidden = true;
-    renderWayfinder(mapped, openMaps(maps.get(mapped.repository) ?? null));
+    renderWayfinder(mapRepository, openMaps(maps.get(mapRepository.repository) ?? null));
     renderTodos(null, null);
     terminal.show(null);
     return;
   }
-  const checked = repositories.find((overview) => overview.repository === selectedCheck);
-  const check = selectedCheck === null ? undefined : checks.get(selectedCheck);
+  const checkedRepository = selectedRepository("repo_check");
+  const checked = repositories.find((overview) => overview.repository === checkedRepository);
+  const check = checkedRepository === null ? undefined : checks.get(checkedRepository);
   if (checked && check) {
     diffPanel.hide();
     renderRepoCheck(checked, check);
@@ -365,9 +383,7 @@ const SCRIPT_NAMES: Record<RepositoryScript, string> = {
 /** Starts a chat, selects it and puts the cursor in the composer. */
 async function startAndSelect(repository: RepositoryId, checkout?: Checkout): Promise<void> {
   if (!leaveExtensions()) return;
-  selectedChat = await service.startChat(repository, checkout);
-  selectedCheck = null;
-  selectedMap = null;
+  selected = { type: "chat", chat: await service.startChat(repository, checkout) };
   await refresh();
   messageInput.focus();
 }
@@ -395,12 +411,12 @@ function renderServiceNotice(updateWaiting: boolean): void {
 
 /** Leaves the CLI extensions panel; refuses while it has unsaved changes. */
 function leaveExtensions(): boolean {
-  if (selectedExtensions === null) return true;
+  if (selected.type !== "extensions") return true;
   if (extensions.hasUnsavedChanges()) {
     showError("Save or discard your changes to the CLI extension first.");
     return false;
   }
-  selectedExtensions = null;
+  selected = { type: "none" };
   extensions.hide();
   transcript.hidden = false;
   return true;
@@ -435,17 +451,14 @@ function renderSidebar(
     );
     const showExtensions = iconButton("blocks", "CLI extensions", "secondary");
     showExtensions.title = `Skills, MCP servers, hooks and instruction files the agent CLIs load from ${repository.name}`;
-    if (repository.repository === selectedExtensions) {
+    if (repository.repository === selectedRepository("extensions")) {
       showExtensions.classList.add("selected");
       showExtensions.setAttribute("aria-current", "true");
     }
     showExtensions.addEventListener("click", () =>
       act(async () => {
-        if (selectedExtensions !== repository.repository && !leaveExtensions()) return;
-        selectedChat = null;
-        selectedCheck = null;
-        selectedMap = null;
-        selectedExtensions = repository.repository;
+        if (selectedRepository("extensions") !== repository.repository && !leaveExtensions()) return;
+        selected = { type: "extensions", repository: repository.repository };
         repoCheckView.hidden = true;
         transcript.hidden = true;
         composer.hidden = true;
@@ -468,16 +481,14 @@ function renderSidebar(
         el("span", "chat-title", "repo-check"),
         el("span", "chat-status", checkStatus(check)),
       );
-      if (repository.repository === selectedCheck) {
+      if (repository.repository === selectedRepository("repo_check")) {
         button.classList.add("selected");
         button.setAttribute("aria-current", "true");
       }
       button.addEventListener("click", () =>
         act(async () => {
           if (!leaveExtensions()) return;
-          selectedCheck = repository.repository;
-          selectedMap = null;
-          selectedChat = null;
+          selected = { type: "repo_check", repository: repository.repository };
           await refresh();
         }),
       );
@@ -490,23 +501,19 @@ function renderSidebar(
       const mapItem = el("li");
       const button = el("button", "chat-link wayfinder-link");
       button.type = "button";
-      const frontier = open.reduce((sum, map) => sum + wayfinder.frontierCount(map), 0);
       button.title = open.map((map) => map.title).join("\n");
       button.append(
         icon("map"),
         el("span", "chat-title", open.length === 1 ? "Wayfinder map" : `Wayfinder maps (${open.length})`),
-        el("span", "chat-status", `${frontier} to take`),
       );
-      if (repository.repository === selectedMap) {
+      if (repository.repository === selectedRepository("wayfinder_map")) {
         button.classList.add("selected");
         button.setAttribute("aria-current", "true");
       }
       button.addEventListener("click", () =>
         act(async () => {
           if (!leaveExtensions()) return;
-          selectedMap = repository.repository;
-          selectedCheck = null;
-          selectedChat = null;
+          selected = { type: "wayfinder_map", repository: repository.repository };
           await refresh();
         }),
       );
@@ -523,16 +530,14 @@ function renderSidebar(
         el("span", "chat-title", chat.title ?? "New chat"),
         el("span", `chat-status ${chat.status}`, STATUS_LABELS[chat.status]),
       );
-      if (chat.chat === selectedChat) {
+      if (chat.chat === selectedChat()) {
         button.classList.add("selected");
         button.setAttribute("aria-current", "true");
       }
       button.addEventListener("click", () =>
         act(async () => {
           if (!leaveExtensions()) return;
-          selectedChat = chat.chat;
-          selectedCheck = null;
-          selectedMap = null;
+          selected = { type: "chat", chat: chat.chat };
           await refresh();
         }),
       );
@@ -1029,7 +1034,7 @@ function renderWayfinder(repository: RepositoryOverview, maps: WayfinderMap[]): 
   const map = maps.find((candidate) => candidate.number === picked) ?? maps[0];
   if (map === undefined) {
     renderTopBar("Wayfinder map", [labelled("Repository", repository.name)]);
-    shownMap = null;
+    renderedMapFingerprint = null;
     wayfinderView.replaceChildren(el("p", "empty", "The repository has no open wayfinder map now."));
     return;
   }
@@ -1047,9 +1052,9 @@ function renderWayfinder(repository: RepositoryOverview, maps: WayfinderMap[]): 
     [openMap],
   );
 
-  const shown = JSON.stringify([repository.repository, maps.map((candidate) => candidate.number), map]);
-  if (shown === shownMap) return;
-  shownMap = shown;
+  const fingerprint = JSON.stringify([repository.repository, maps.map((candidate) => candidate.number), map]);
+  if (fingerprint === renderedMapFingerprint) return;
+  renderedMapFingerprint = fingerprint;
   const intro = el("div", "wayfinder-intro");
   if (maps.length > 1) {
     const picker = el("select", "wayfinder-picker");
@@ -1076,8 +1081,8 @@ function renderWayfinder(repository: RepositoryOverview, maps: WayfinderMap[]): 
     ),
   );
   const legend = el("ul", "wayfinder-legend");
-  for (const kind of ["research", "prototype", "grilling", "task"] as const) {
-    legend.append(el("li", `kind-${kind}`, wayfinder.KIND_NAMES[kind]));
+  for (const type of ["research", "prototype", "grilling", "task"] as const) {
+    legend.append(el("li", `type-${type}`, wayfinder.TYPE_NAMES[type]));
   }
   const scroller = el("div", "wayfinder-scroller");
   scroller.append(
@@ -1089,13 +1094,22 @@ function renderWayfinder(repository: RepositoryOverview, maps: WayfinderMap[]): 
   wayfinderView.replaceChildren(intro, legend, scroller);
 }
 
+/** How each agent CLI's prompt invokes a skill by name. */
+const SKILL_PREFIXES: Record<AgentCli, string> = {
+  claude_code: "/",
+  codex: "$",
+};
+
 /**
- * Starts a chat in a new worktree with the wayfinder skill's command for the
- * ticket in the composer; the developer picks the agent CLI and sends it.
+ * Starts a chat in a new worktree with the wayfinder skill invoked for the
+ * ticket in the composer, as the chat's agent CLI takes it; the developer
+ * sends it.
  */
 async function startChatOnTicket(repository: RepositoryId, map: WayfinderMap, ticket: Ticket): Promise<void> {
   await startAndSelect(repository);
-  messageInput.value = `/wayfinder ${map.url} ${ticket.url}`;
+  const chat = selectedChat();
+  const agentCli = chat === null ? "claude_code" : (await service.readChat(chat)).agentCli;
+  messageInput.value = `${SKILL_PREFIXES[agentCli]}wayfinder ${map.url} ${ticket.url}`;
   fitMessageInput();
   messageInput.focus();
 }
@@ -1247,9 +1261,10 @@ function subscriptionPicker(view: ChatView, subscriptions: SubscriptionOverview[
   select.addEventListener("change", () =>
     act(async () => {
       const choice = choices.get(select.value);
-      if (selectedChat === null || choice === undefined) return;
+      const chat = selectedChat();
+      if (chat === null || choice === undefined) return;
       try {
-        await service.changeSubscription(selectedChat, choice.provider, choice.subscription);
+        await service.changeSubscription(chat, choice.provider, choice.subscription);
       } finally {
         await refresh();
       }
@@ -1723,8 +1738,8 @@ function formatDuration(seconds: number): string {
 
 async function send(): Promise<void> {
   const text = messageInput.value.trim();
-  if (selectedChat === null || text === "") return;
-  const chat = selectedChat;
+  const chat = selectedChat();
+  if (chat === null || text === "") return;
   messageInput.disabled = true;
   sendButton.disabled = true;
   try {
@@ -1768,8 +1783,8 @@ new ResizeObserver(placeTranscript).observe(transcript);
 todoForm.addEventListener("submit", (event) => {
   event.preventDefault();
   const text = todoInput.value.trim();
-  if (selectedChat === null || text === "") return;
-  const chat = selectedChat;
+  const chat = selectedChat();
+  if (chat === null || text === "") return;
   void act(async () => {
     await service.addTodo(chat, text);
     todoInput.value = "";
@@ -1779,8 +1794,9 @@ todoForm.addEventListener("submit", (event) => {
 
 interruptButton.addEventListener("click", () =>
   act(async () => {
-    if (selectedChat === null) return;
-    await service.interruptTurn(selectedChat);
+    const chat = selectedChat();
+    if (chat === null) return;
+    await service.interruptTurn(chat);
     await refresh();
   }),
 );

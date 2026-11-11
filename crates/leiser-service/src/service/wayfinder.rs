@@ -9,12 +9,12 @@
 use std::collections::BTreeSet;
 use std::time::Duration;
 
-use super::auto_fix::PollError;
+use super::polls::PollError;
 use super::{Background, State};
-use crate::git_host::{IssueRef, MapIssue, PolledWayfinderMaps, TicketIssue};
+use crate::git_host::{MapIssue, PolledWayfinderMaps, TicketIssue};
 use crate::{
-    CommandError, Event, HostAccountBinding, RepositoryId, Response, Ticket, TicketState,
-    WayfinderMap, WayfinderMaps,
+    CommandError, Event, IssueRef, RepositoryId, Response, Ticket, TicketState, WayfinderMap,
+    WayfinderMaps,
 };
 
 /// How often a repository's wayfinder maps are polled.
@@ -53,8 +53,11 @@ impl State {
         if !self.repositories.contains_key(&repository) {
             return Err(CommandError::UnknownRepository { repository });
         }
-        let maps = self.wayfinder.entry(repository).or_default();
-        if maps.shown == WayfinderMaps::NotRead && !maps.polling {
+        let unread = self
+            .wayfinder
+            .get(&repository)
+            .is_none_or(|maps| maps.shown == WayfinderMaps::NotRead && !maps.polling);
+        if unread {
             self.poll_wayfinder(repository);
         }
         let maps = self
@@ -84,23 +87,17 @@ impl State {
     }
 
     fn poll_wayfinder(&mut self, repository: RepositoryId) {
-        let Some(path) = self.repositories.get(&repository).cloned() else {
-            return;
-        };
-        let access = match self.host_account_binding(&path) {
-            HostAccountBinding::Bound { host_account, .. } => {
-                self.host_accounts.access(host_account)
+        let target = match self.poll_target(repository) {
+            Ok(target) => target,
+            Err(error) => {
+                self.show_wayfinder(
+                    repository,
+                    WayfinderMaps::Unavailable {
+                        reason: error.to_string(),
+                    },
+                );
+                return;
             }
-            _ => None,
-        };
-        let Some(access) = access else {
-            self.show_wayfinder(
-                repository,
-                WayfinderMaps::Unavailable {
-                    reason: PollError::NoHostAccount.to_string(),
-                },
-            );
-            return;
         };
         let maps = self.wayfinder.entry(repository).or_default();
         maps.polling = true;
@@ -110,11 +107,9 @@ impl State {
         self.background_running += 1;
         tokio::spawn(async move {
             let result = async {
-                let remote = crate::git::origin_url(&path)
-                    .await
-                    .ok_or(PollError::NoOrigin)?;
+                let remote = target.remote().await?;
                 Ok(git_host
-                    .poll_wayfinder_maps(&access, &remote, last.as_ref())
+                    .poll_wayfinder_maps(&target.access, &remote, last.as_ref())
                     .await?)
             }
             .await;
@@ -134,7 +129,7 @@ impl State {
         let shown = match result {
             Ok(polled) => {
                 let shown = WayfinderMaps::Read {
-                    maps: polled.maps.iter().map(map).collect(),
+                    maps: polled.maps.iter().map(developer_map).collect(),
                 };
                 maps.last = Some(polled);
                 shown
@@ -165,7 +160,7 @@ impl State {
 
 /// A map as the developer sees it: its tickets' states, and the edges
 /// between its own tickets.
-fn map(issue: &MapIssue) -> WayfinderMap {
+fn developer_map(issue: &MapIssue) -> WayfinderMap {
     let in_map: BTreeSet<u64> = issue.tickets.iter().map(|ticket| ticket.number).collect();
     WayfinderMap {
         number: issue.number,
@@ -178,8 +173,8 @@ fn map(issue: &MapIssue) -> WayfinderMap {
                 number: ticket.number,
                 title: ticket.title.clone(),
                 url: ticket.url.clone(),
-                kind: ticket.kind,
-                state: state(ticket),
+                ticket_type: ticket.ticket_type,
+                state: ticket_state(ticket),
                 blocked_by: ticket
                     .blocked_by
                     .iter()
@@ -193,12 +188,14 @@ fn map(issue: &MapIssue) -> WayfinderMap {
     }
 }
 
-fn state(ticket: &TicketIssue) -> TicketState {
-    let open_blockers: Vec<String> = ticket
+/// Closed, else claimed when assigned, else blocked while a blocker is
+/// open, else on the frontier.
+fn ticket_state(ticket: &TicketIssue) -> TicketState {
+    let open_blockers: Vec<IssueRef> = ticket
         .blocked_by
         .iter()
         .filter(|blocker| blocker.open)
-        .map(|blocker| blocker.issue.to_string())
+        .map(|blocker| blocker.issue.clone())
         .collect();
     if !ticket.open {
         TicketState::Closed

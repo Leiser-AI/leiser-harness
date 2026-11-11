@@ -29,6 +29,7 @@ use crate::todos::{TodoChange, TodoError, TodoList};
 use crate::worktree::{self, WorktreeError};
 
 mod auto_fix;
+mod polls;
 mod pull_requests;
 mod wayfinder;
 

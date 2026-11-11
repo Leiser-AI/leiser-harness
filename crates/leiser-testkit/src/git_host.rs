@@ -17,7 +17,7 @@ use leiser_service::{
     Blocker, CheckOutcome, CommentLocation, CommitId, GitHost, GitHostError, GitHostFuture,
     HostAccountAccess, IssueRef, LoginOutcome, LoginProcess, MapIssue, Mergeable, NewPullRequest,
     OpenedPullRequest, PollMemo, PolledPullRequest, PolledWayfinderMaps, PullRequestActivity,
-    PullRequestCheck, PullRequestComment, PullRequestState, TicketIssue, TicketKind,
+    PullRequestCheck, PullRequestComment, PullRequestState, TicketIssue, TicketType,
 };
 use serde::Deserialize;
 use tokio::sync::{mpsc, oneshot};
@@ -41,9 +41,9 @@ pub const FAKE_GIT_HOST_ACTIVITY_FILE: &str = "fake-git-host-activity.json";
 /// which every poll of the maps reads after those kept in memory: for
 /// trying the wayfinder map in the desktop app. For example
 /// `{"maps": [{"number": 1, "title": "Map: v2", "tickets": [
-/// {"number": 2, "title": "Pick a store", "kind": "research"},
-/// {"number": 3, "title": "Sketch the UI", "kind": "prototype", "open": false},
-/// {"number": 4, "title": "Agree on the API", "kind": "grilling",
+/// {"number": 2, "title": "Pick a store", "type": "research"},
+/// {"number": 3, "title": "Sketch the UI", "type": "prototype", "open": false},
+/// {"number": 4, "title": "Agree on the API", "type": "grilling",
 /// "assignees": ["someone"], "blocked_by": [2]}]}]}`.
 pub const FAKE_GIT_HOST_WAYFINDER_FILE: &str = "fake-git-host-wayfinder.json";
 /// The memo key the fake git host keeps its one entity tag under.
@@ -86,8 +86,8 @@ struct FakeMap {
 struct FakeTicket {
     number: u64,
     title: String,
-    #[serde(default)]
-    kind: Option<TicketKind>,
+    #[serde(default, rename = "type")]
+    ticket_type: Option<TicketType>,
     #[serde(default = "open")]
     open: bool,
     #[serde(default)]
@@ -324,7 +324,7 @@ impl FakeGitHost {
         map: u64,
         number: u64,
         title: &str,
-        kind: Option<TicketKind>,
+        ticket_type: Option<TicketType>,
     ) -> Result<(), UnknownIssue> {
         let mut maps = self.lock_maps();
         let found = maps
@@ -335,7 +335,7 @@ impl FakeGitHost {
         found.tickets.push(FakeTicket {
             number,
             title: title.to_owned(),
-            kind,
+            ticket_type,
             open: true,
             assignees: Vec::new(),
             blocked_by: Vec::new(),
@@ -429,7 +429,7 @@ impl FakeGitHost {
                         number: ticket.number,
                         title: ticket.title.clone(),
                         url: url(ticket.number),
-                        kind: ticket.kind,
+                        ticket_type: ticket.ticket_type,
                         open: ticket.open,
                         assignees: ticket.assignees.clone(),
                         blocked_by: ticket

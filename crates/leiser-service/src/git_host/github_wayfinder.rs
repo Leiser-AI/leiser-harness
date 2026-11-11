@@ -5,29 +5,28 @@
 //! `304 Not Modified` answer and is taken from the last poll, whose memo
 //! keeps the part's answer, cut down to what the harness reads.
 //!
-//! Lists are read one page of [`PER_PAGE`]: a map with more tickets, or a
-//! ticket with more blockers, shows the first ones only. A ticket's
-//! blockers are asked for only when GitHub's summary of the ticket says it
-//! has any.
+//! Lists are read page by page of [`PER_PAGE`] until a page is not full. A
+//! ticket's blockers are asked for only when GitHub's summary of the
+//! ticket says it has any.
 
 use serde::de::DeserializeOwned;
+use serde::de::IntoDeserializer;
+use serde::de::value::{Error as ValueError, StrDeserializer};
 use serde::{Deserialize, Serialize};
 
-use super::github_poll::Answer;
+use super::github_poll::{Fetched, Requests};
 use super::{
-    Blocker, GhGitHost, GitHostError, HostAccountAccess, IssueRef, MapIssue, PollMemo,
-    PolledWayfinderMaps, TicketIssue, https_repository,
+    Blocker, GhGitHost, GitHostError, HostAccountAccess, MapIssue, PolledWayfinderMaps,
+    TicketIssue, https_repository,
 };
-use crate::TicketKind;
+use crate::{IssueRef, TicketType};
 
 /// The label of a map issue.
 const MAP_LABEL: &str = "wayfinder:map";
 /// The start of a ticket's type label, such as `wayfinder:research`.
-const KIND_LABEL: &str = "wayfinder:";
+const TYPE_LABEL: &str = "wayfinder:";
 /// The length of one page of a list.
-const PER_PAGE: u64 = 100;
-/// What the memo key of a part's kept answer adds to the part's path.
-const ANSWER: &str = " answer";
+const PER_PAGE: usize = 100;
 
 #[derive(Deserialize, Serialize)]
 struct MapJson {
@@ -97,26 +96,19 @@ impl GhGitHost {
         last: Option<&PolledWayfinderMaps>,
     ) -> Result<PolledWayfinderMaps, GitHostError> {
         let repository = https_repository(remote, &access.git_host)?;
-        let mut poll = MapsPoll {
-            host: self,
-            access,
-            repository: &repository,
-            last: last.map(|last| &last.memo),
-            memo: PollMemo::default(),
-        };
-        let listed: Vec<MapJson> = poll
-            .part(&format!(
-                "/issues?labels={MAP_LABEL}&state=open&per_page={PER_PAGE}"
-            ))
-            .await?;
+        let mut requests = Requests::new(self, access, &repository, last.map(|last| &last.memo));
+        let listed: Vec<MapJson> = all_pages(
+            &mut requests,
+            &format!("/issues?labels={MAP_LABEL}&state=open"),
+        )
+        .await?;
         let mut maps = Vec::new();
         for map in listed.into_iter().filter(|map| map.pull_request.is_none()) {
-            let tickets: Vec<TicketJson> = poll
-                .part(&format!(
-                    "/issues/{}/sub_issues?per_page={PER_PAGE}",
-                    map.number
-                ))
-                .await?;
+            let tickets: Vec<TicketJson> = all_pages(
+                &mut requests,
+                &format!("/issues/{}/sub_issues?", map.number),
+            )
+            .await?;
             let mut issues = Vec::new();
             for ticket in tickets {
                 let blocked = ticket
@@ -124,10 +116,10 @@ impl GhGitHost {
                     .as_ref()
                     .is_none_or(|summary| summary.total_blocked_by > 0);
                 let blocked_by = if blocked {
-                    poll.part::<Vec<BlockerJson>>(&format!(
-                        "/issues/{}/dependencies/blocked_by?per_page={PER_PAGE}",
-                        ticket.number
-                    ))
+                    all_pages::<BlockerJson>(
+                        &mut requests,
+                        &format!("/issues/{}/dependencies/blocked_by?", ticket.number),
+                    )
                     .await?
                     .into_iter()
                     .map(|blocker| blocker.read(&repository))
@@ -146,75 +138,67 @@ impl GhGitHost {
         }
         Ok(PolledWayfinderMaps {
             maps,
-            memo: poll.memo,
+            memo: requests.finish(),
         })
     }
 }
 
-/// One poll's requests, with the memo it builds for the next.
-struct MapsPoll<'a> {
-    host: &'a GhGitHost,
-    access: &'a HostAccountAccess,
-    repository: &'a str,
-    /// The last poll's memo.
-    last: Option<&'a PollMemo>,
-    memo: PollMemo,
-}
-
-impl MapsPoll<'_> {
-    /// One part of the maps: fresh from the git host, or the last poll's
-    /// answer when the git host answers that it has not changed.
-    async fn part<T: DeserializeOwned + Serialize>(
-        &mut self,
-        path: &str,
-    ) -> Result<T, GitHostError> {
-        let answer_key = format!("{path}{ANSWER}");
-        let known = self.last.and_then(|last| {
-            Some((
-                last.get(path)?.to_owned(),
-                last.get(&answer_key)?.to_owned(),
-            ))
-        });
-        let unexpected = |error: serde_json::Error| GitHostError::UnexpectedAnswer {
-            answer: format!("{path}: {error}"),
-        };
-        match self
-            .host
-            .conditional(
-                self.access,
-                self.repository,
-                path,
-                known.as_ref().map(|(tag, _)| tag.as_str()),
-            )
-            .await?
-        {
-            Answer::NotModified => {
-                let (tag, kept) = known.ok_or_else(|| GitHostError::UnexpectedAnswer {
-                    answer: format!("304 for {path} without a tag"),
-                })?;
-                self.memo.insert(path, &tag);
-                self.memo.insert(&answer_key, &kept);
-                serde_json::from_str(&kept).map_err(unexpected)
-            }
-            Answer::Fresh { tag, body } => {
-                let part: T = serde_json::from_str(&body).map_err(unexpected)?;
-                if let Some(tag) = tag {
-                    // Kept cut down to the fields above, not GitHub's whole
-                    // answer with every issue's body.
-                    let kept = serde_json::to_string(&part).map_err(unexpected)?;
-                    self.memo.insert(path, &tag);
-                    self.memo.insert(&answer_key, &kept);
-                }
-                Ok(part)
-            }
+/// Every item of the list at `query` (a path ending in its query string,
+/// or in `?`), page by page until a page is not full.
+async fn all_pages<T: DeserializeOwned + Serialize>(
+    requests: &mut Requests<'_>,
+    query: &str,
+) -> Result<Vec<T>, GitHostError> {
+    let separator = if query.ends_with('?') { "" } else { "&" };
+    let mut items = Vec::new();
+    for page in 1.. {
+        let path = format!("{query}{separator}per_page={PER_PAGE}&page={page}");
+        let found: Vec<T> = part(requests, &path).await?;
+        let full = found.len() == PER_PAGE;
+        items.extend(found);
+        if !full {
+            break;
         }
     }
+    Ok(items)
+}
+
+/// One part of the maps: fresh from the git host, or the last poll's
+/// answer when the git host answers that it has not changed.
+async fn part<T: DeserializeOwned + Serialize>(
+    requests: &mut Requests<'_>,
+    path: &str,
+) -> Result<T, GitHostError> {
+    let unexpected = |error: String| GitHostError::UnexpectedAnswer {
+        answer: format!("{path}: {error}"),
+    };
+    let kept = match requests.fetch(path).await? {
+        Fetched::Unchanged => requests
+            .last()
+            .and_then(|last| last.answer(path))
+            .ok_or_else(|| unexpected("304 without a kept answer".to_owned()))?
+            .to_owned(),
+        Fetched::Fresh(body) => {
+            let part: T =
+                serde_json::from_str(&body).map_err(|error| unexpected(error.to_string()))?;
+            // Kept cut down to the fields above, not GitHub's whole answer
+            // with every issue's body.
+            serde_json::to_string(&part).map_err(|error| unexpected(error.to_string()))?
+        }
+    };
+    if requests.memo().get(path).is_some() {
+        requests.memo_mut().keep_answer(path, &kept);
+    }
+    serde_json::from_str(&kept).map_err(|error| unexpected(error.to_string()))
 }
 
 impl TicketJson {
     fn read(self, blocked_by: Vec<Blocker>) -> TicketIssue {
         TicketIssue {
-            kind: self.labels.iter().find_map(|label| kind(&label.name)),
+            ticket_type: self
+                .labels
+                .iter()
+                .find_map(|label| ticket_type_of_label(&label.name)),
             number: self.number,
             title: self.title,
             url: self.html_url,
@@ -251,52 +235,9 @@ impl BlockerJson {
     }
 }
 
-/// The ticket type a label names, such as `wayfinder:research`.
-fn kind(label: &str) -> Option<TicketKind> {
-    match label.strip_prefix(KIND_LABEL)? {
-        "research" => Some(TicketKind::Research),
-        "prototype" => Some(TicketKind::Prototype),
-        "grilling" => Some(TicketKind::Grilling),
-        "task" => Some(TicketKind::Task),
-        _ => None,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{BlockerJson, IssueStateJson, kind};
-    use crate::TicketKind;
-    use crate::git_host::IssueRef;
-
-    #[test]
-    fn reads_the_ticket_type_from_its_label() {
-        assert_eq!(kind("wayfinder:research"), Some(TicketKind::Research));
-        assert_eq!(kind("wayfinder:task"), Some(TicketKind::Task));
-        assert_eq!(kind("wayfinder:map"), None);
-        assert_eq!(kind("research"), None);
-    }
-
-    #[test]
-    fn tells_blockers_of_other_repositories_apart() {
-        let blocker = |url: &str| BlockerJson {
-            number: 5,
-            state: IssueStateJson::Open,
-            repository_url: url.to_owned(),
-        };
-        assert_eq!(
-            blocker("https://api.github.com/repos/Owner/Repo")
-                .read("owner/repo")
-                .issue,
-            IssueRef::Here { number: 5 }
-        );
-        assert_eq!(
-            blocker("https://api.github.com/repos/other/lib")
-                .read("owner/repo")
-                .issue,
-            IssueRef::Elsewhere {
-                repository: "other/lib".to_owned(),
-                number: 5
-            }
-        );
-    }
+/// The ticket type a label such as `wayfinder:research` names, by the
+/// type's own name in the protocol.
+fn ticket_type_of_label(label: &str) -> Option<TicketType> {
+    let name: StrDeserializer<'_, ValueError> = label.strip_prefix(TYPE_LABEL)?.into_deserializer();
+    TicketType::deserialize(name).ok()
 }
