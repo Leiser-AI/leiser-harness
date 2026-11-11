@@ -629,13 +629,17 @@ function openPullRequestDialog(overview: ChatOverview, view: ChatView): void {
   pullRequestTitle.focus();
 }
 
+/** What the harness blocks whatever the permission mode. */
+const HARD_BLOCKS =
+  "In every mode, Full access included, the harness blocks a push to main or development, a force push, a push as the wrong host account and AI attribution in commits.";
+
 const PERMISSION_MODES: PermissionMode[] = ["supervised", "auto_accept_edits", "auto", "full_access"];
 
 function permissionModePicker(chat: ChatId, view: ChatView): HTMLElement {
   const item = el("label", "composer-option");
   const select = el("select", "permission-mode");
   select.setAttribute("aria-label", "Permission mode");
-  select.title = "Permission mode: how much the agent may do without your approval";
+  select.title = `Permission mode: how much the agent may do without your approval. ${HARD_BLOCKS}`;
   for (const mode of PERMISSION_MODES) {
     const option = el("option", "", PERMISSION_MODE_NAMES[mode]);
     option.value = mode;

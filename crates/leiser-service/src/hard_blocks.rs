@@ -1,0 +1,167 @@
+//! Hard blocks: the damage the harness blocks in every permission mode,
+//! Full access included. A push to `main` or `development`, a force push,
+//! a push as the wrong host account and AI attribution in commits.
+//!
+//! They hold in two layers. Every agent session gets them as deny rules in
+//! its agent CLI's own terms (the drivers build those from
+//! [`PROTECTED_BRANCHES`] and [`AI_NAMES`]), on top of the repository's
+//! own agent CLI settings. And the harness service checks them again
+//! before it pushes: [`check_branch`] and [`check_commits`] here, the host
+//! account in the service itself.
+
+use std::path::Path;
+
+use crate::CommandError;
+
+/// The branches nothing in the harness pushes to.
+pub(crate) const PROTECTED_BRANCHES: [&str; 2] = ["main", "development"];
+
+/// What an AI agent calls itself in commits, lower case: as a co-author's
+/// name and in "Generated with" lines.
+pub(crate) const AI_NAMES: [&str; 6] = [
+    "claude",
+    "codex",
+    "chatgpt",
+    "copilot",
+    "openai",
+    "anthropic",
+];
+
+/// Model names an AI co-author is named by, after "claude ", lower case:
+/// `Claude Opus 4.5 <noreply@anthropic.com>`.
+const CLAUDE_MODELS: [&str; 5] = ["code", "opus", "sonnet", "haiku", "fable"];
+
+/// Email domains of the companies behind the agent CLIs.
+const AI_EMAIL_DOMAINS: [&str; 2] = ["anthropic.com", "openai.com"];
+
+/// GitHub logins of AI agents, as in `<id>+<login>@users.noreply.github.com`.
+const AI_GITHUB_LOGINS: [&str; 6] = [
+    "claude",
+    "claude-code",
+    "codex",
+    "chatgpt-codex-connector",
+    "copilot",
+    "copilot-swe-agent",
+];
+
+/// Refuses a push of `branch` when it is protected.
+pub(crate) fn check_branch(branch: &str) -> Result<(), CommandError> {
+    if PROTECTED_BRANCHES.contains(&branch) {
+        return Err(CommandError::ProtectedBranch {
+            branch: branch.to_owned(),
+        });
+    }
+    Ok(())
+}
+
+/// Refuses a push of `branch` from `working_directory` to `origin` that
+/// would replace commits on `origin`'s branch (a force push), or that adds
+/// a commit with AI attribution. Asks `origin` for its branches, so the
+/// repository's credentials must already be in place.
+pub(crate) async fn check_commits(
+    working_directory: &Path,
+    branch: &str,
+) -> Result<(), CommandError> {
+    let heads = crate::git::run(working_directory, &["ls-remote", "--heads", "origin"])
+        .await
+        .map_err(|error| CommandError::PushFailed {
+            reason: error.to_string(),
+        })?;
+    let heads: Vec<(&str, &str)> = heads
+        .lines()
+        .filter_map(|line| line.split_once('\t'))
+        .collect();
+    let local = format!("refs/heads/{branch}");
+    if let Some((remote, _)) = heads.iter().find(|(_, name)| *name == local) {
+        // Fails as well when the remote's commit is unknown here: origin
+        // has commits this branch lacks.
+        crate::git::run(
+            working_directory,
+            &["merge-base", "--is-ancestor", remote, &local],
+        )
+        .await
+        .map_err(|_| CommandError::ForcePush {
+            branch: branch.to_owned(),
+        })?;
+    }
+    // The commits the push adds: on the branch, but on none of origin's
+    // branches, as far as this repository knows them.
+    let mut args = vec![
+        "log",
+        "--format=%H%x1f%an <%ae>%x1f%cn <%ce>%x1f%B%x1e",
+        &local,
+        "--not",
+        "--ignore-missing",
+        "--remotes=origin",
+    ];
+    args.extend(heads.iter().map(|(commit, _)| *commit));
+    let log = crate::git::run_raw(working_directory, &args)
+        .await
+        .map_err(|error| CommandError::PushFailed {
+            reason: error.to_string(),
+        })?;
+    for commit in log.split('\u{1e}') {
+        let mut fields = commit.trim_start().splitn(4, '\u{1f}');
+        let (Some(id), Some(author), Some(committer), Some(message)) =
+            (fields.next(), fields.next(), fields.next(), fields.next())
+        else {
+            continue;
+        };
+        if let Some(line) = ai_attribution(author, committer, message) {
+            return Err(CommandError::AiAttribution {
+                commit: id.chars().take(12).collect(),
+                line,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// The first sign of AI attribution in a commit: an AI as its author or
+/// committer, an AI co-author, or a "Generated with" line naming an AI.
+fn ai_attribution(author: &str, committer: &str, message: &str) -> Option<String> {
+    if is_ai(author) {
+        return Some(format!("author {author}"));
+    }
+    if is_ai(committer) {
+        return Some(format!("committer {committer}"));
+    }
+    message.lines().map(str::trim).find_map(|line| {
+        let lower = line.to_lowercase();
+        let attributed = match lower.strip_prefix("co-authored-by:") {
+            Some(co_author) => is_ai(co_author),
+            None => {
+                (lower.contains("generated with") || lower.contains("generated by"))
+                    && AI_NAMES.iter().any(|name| lower.contains(name))
+            }
+        };
+        attributed.then(|| line.to_owned())
+    })
+}
+
+/// Whether `identity`, as in `Name <email>`, is an AI agent's.
+fn is_ai(identity: &str) -> bool {
+    let identity = identity.trim().to_lowercase();
+    let (name, email) = match identity.split_once('<') {
+        Some((name, email)) => (name.trim(), email.trim_end_matches('>').trim()),
+        None => (identity.as_str(), ""),
+    };
+    let ai_name = AI_NAMES.contains(&name)
+        || name.strip_prefix("claude ").is_some_and(|rest| {
+            CLAUDE_MODELS
+                .iter()
+                .any(|model| rest.split_whitespace().next() == Some(model))
+        })
+        || name.starts_with("gpt-")
+        || name == "github copilot"
+        || name == "openai codex";
+    let (local, domain) = email.split_once('@').unwrap_or_default();
+    let ai_email = AI_EMAIL_DOMAINS
+        .iter()
+        .any(|ai| domain == *ai || domain.ends_with(&format!(".{ai}")))
+        || (domain == "users.noreply.github.com" && {
+            let login = local.rsplit('+').next().unwrap_or(local);
+            AI_GITHUB_LOGINS.contains(&login.trim_end_matches("[bot]"))
+        });
+    ai_name || ai_email
+}

@@ -153,6 +153,12 @@ function describe(error: CommandError): string {
       return "No branch is checked out to push.";
     case "push_failed":
       return `The push failed: ${error.reason}`;
+    case "protected_branch":
+      return `Push blocked: ${error.branch} is a protected branch. Work on a branch of its own and open a pull request.`;
+    case "force_push":
+      return `Push blocked: it would overwrite commits on origin's ${error.branch} that this branch does not have (a force push). Bring those commits into the branch first, for example with a merge.`;
+    case "ai_attribution":
+      return `Push blocked: commit ${error.commit} carries AI attribution (${error.line}). Reword the commit without it.`;
     case "pull_request_exists":
       return `This chat already has pull request #${error.number}. Push to update it.`;
     case "pull_request_opening":

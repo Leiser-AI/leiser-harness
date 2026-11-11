@@ -1262,6 +1262,27 @@ pub enum CommandError {
     NoBranch { chat: ChatId },
     #[error("the push failed: {reason}")]
     PushFailed { reason: String },
+    /// A hard block: the harness never pushes to `main` or `development`.
+    #[error(
+        "push blocked: `{branch}` is a protected branch; work on a branch of \
+         its own and open a pull request"
+    )]
+    ProtectedBranch { branch: String },
+    /// A hard block: the push would replace commits on `origin`'s branch
+    /// that the chat's branch does not have.
+    #[error(
+        "push blocked: it would overwrite commits on origin's `{branch}` that \
+         this branch does not have (a force push)"
+    )]
+    ForcePush { branch: String },
+    /// A hard block: a commit the push would add carries AI attribution,
+    /// such as a `Co-authored-by` trailer for an AI. `line` is what was
+    /// found.
+    #[error(
+        "push blocked: commit {commit} carries AI attribution ({line}); \
+         reword the commit without it"
+    )]
+    AiAttribution { commit: String, line: String },
     #[error("chat {chat:?} already has pull request #{number}; push to update it")]
     PullRequestExists { chat: ChatId, number: u64 },
     #[error("chat {chat:?} is opening its pull request")]

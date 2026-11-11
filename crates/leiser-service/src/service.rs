@@ -2343,6 +2343,7 @@ impl State {
         else {
             return Err(CommandError::NoBranch { chat: id });
         };
+        crate::hard_blocks::check_branch(&branch)?;
         let (host_account, binding) = self
             .bind_host_account(repository)
             .await?
@@ -3619,8 +3620,9 @@ fn stored_title(store: &Store, chat: u64) -> Option<String> {
 }
 
 /// Asks the git host who a push from `working_directory` to `origin` signs
-/// in as, and pushes `branch` only when that is the host account's login.
-/// Returns `origin`'s URL.
+/// in as, and pushes `branch` only when that is the host account's login
+/// and the push passes the hard blocks on its commits. Returns `origin`'s
+/// URL.
 async fn verify_and_push(
     git_host: &dyn GitHost,
     working_directory: &Path,
@@ -3648,6 +3650,8 @@ async fn verify_and_push(
             actual,
         });
     }
+    crate::hard_blocks::check_commits(working_directory, branch).await?;
+    // No `+`: git refuses anything but a fast-forward, too.
     let refspec = format!("refs/heads/{branch}:refs/heads/{branch}");
     crate::git::run(
         working_directory,

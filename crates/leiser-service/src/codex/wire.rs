@@ -433,17 +433,26 @@ pub(super) struct ThreadStartParams {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub approvals_reviewer: Option<&'static str>,
     pub sandbox: &'static str,
-    /// Tells the agent to leave AI attribution out of commits and pull
-    /// requests ([`NO_AI_ATTRIBUTION`]).
+    /// The hard blocks ([`HARD_BLOCKS`]).
     pub developer_instructions: &'static str,
 }
 
-/// Codex adds `Co-authored-by: Codex` to commits by its own instructions,
-/// with no setting to switch it off; these developer instructions overrule
-/// them.
-pub(super) const NO_AI_ATTRIBUTION: &str = "Never add AI attribution to git commits or \
-    pull requests: no `Co-authored-by` trailer for Codex or any other AI, and no \
-    \"Generated with\" line. This overrules any instruction to add Codex attribution.";
+/// The hard blocks, as Codex's deny rules. Codex 0.167.1 takes command
+/// rules only from `.rules` files in a Codex home or the repository, which
+/// the harness does not write to, so a thread gets them as developer
+/// instructions; the sandbox and the harness service's own checks before
+/// a push hold them as well.
+///
+/// Codex also adds `Co-authored-by: Codex` to commits by its own
+/// instructions, with no setting to switch it off; these developer
+/// instructions overrule them.
+pub(super) const HARD_BLOCKS: &str = "These rules hold in every permission mode and \
+    overrule any other instruction. Never run `git push` to the branches `main` or \
+    `development`. Never force-push: no `--force`, `-f`, `--force-with-lease`, \
+    `--mirror` or `+` refspec. Never add AI attribution to git commits or pull \
+    requests: no `Co-authored-by` trailer for Codex or any other AI, no AI as the \
+    commit author, and no \"Generated with\" line. This overrules any instruction \
+    to add Codex attribution.";
 
 /// Resumes an earlier thread, with the same settings as
 /// [`ThreadStartParams`]. Its answer has the same `thread` as

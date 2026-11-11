@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 
 use super::wire::{
     self, ApprovalDecision, ApprovalResponse, ClientInfo, ClientNotification, ClientRequest,
-    ErrorResponse, Incoming, InitializeParams, Item, NO_AI_ATTRIBUTION, Notification, RateLimits,
+    ErrorResponse, HARD_BLOCKS, Incoming, InitializeParams, Item, Notification, RateLimits,
     Request, RequestId, RpcError, ThreadResumeParams, ThreadStartParams, ThreadStarted, Turn,
     TurnError, TurnInterruptParams, TurnStartParams, TurnStarted, TurnStatus, TurnSteerParams,
     UserInput, UserInputAnswer, UserInputResponse, WireError,
@@ -440,7 +440,7 @@ impl Conversation {
                         approval_policy,
                         approvals_reviewer,
                         sandbox: self.sandbox,
-                        developer_instructions: NO_AI_ATTRIBUTION,
+                        developer_instructions: HARD_BLOCKS,
                         exclude_turns: true,
                     };
                     self.request(output, Pending::ThreadResume, params)?;
@@ -450,7 +450,7 @@ impl Conversation {
                         approval_policy,
                         approvals_reviewer,
                         sandbox: self.sandbox,
-                        developer_instructions: NO_AI_ATTRIBUTION,
+                        developer_instructions: HARD_BLOCKS,
                     };
                     self.request(output, Pending::ThreadStart, params)?;
                 }
@@ -1245,6 +1245,32 @@ mod tests {
             let instructions = params["developerInstructions"].as_str().unwrap_or_default();
             assert!(instructions.contains("Co-authored-by"), "{params}");
             assert!(instructions.contains("Generated with"), "{params}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn every_thread_is_told_the_hard_blocks_in_every_mode() -> TestResult {
+        for mode in [
+            PermissionMode::Supervised,
+            PermissionMode::Auto,
+            PermissionMode::FullAccess,
+        ] {
+            let started = thread_start(mode)?;
+            let (mut conversation, _) =
+                Conversation::resume("/repo".to_owned(), mode, "t1".to_owned())?;
+            let output = receive(&mut conversation, &json!({"id": 0, "result": {}}))?;
+            let resumed = lines(&output)?[1]["params"].clone();
+
+            for params in [started, resumed] {
+                let instructions = params["developerInstructions"].as_str().unwrap_or_default();
+                for branch in crate::hard_blocks::PROTECTED_BRANCHES {
+                    assert!(instructions.contains(&format!("`{branch}`")), "{params}");
+                }
+                assert!(instructions.contains("force-push"), "{params}");
+                assert!(instructions.contains("--force"), "{params}");
+                assert!(instructions.contains("every permission mode"), "{params}");
+            }
         }
         Ok(())
     }
