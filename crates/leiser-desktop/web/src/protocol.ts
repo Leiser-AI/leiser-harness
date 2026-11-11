@@ -29,6 +29,7 @@ export type Command =
   | { type: "list_repositories" }
   | { type: "list_chats" }
   | { type: "read_chat"; chat: ChatId }
+  | { type: "read_service_status" }
   | { type: "list_todos"; chat: ChatId }
   | { type: "add_todo"; chat: ChatId; text: string }
   | { type: "set_todo_done"; chat: ChatId; todo: TodoId; done: boolean }
@@ -65,6 +66,7 @@ export type Response =
       open_requests: string[];
       transcript: TranscriptEntry[];
     }
+  | { type: "service_status"; version: string; update_waiting: boolean }
   | { type: "todos"; todos: Todo[] }
   | { type: "todo_added"; todo: TodoId }
   | { type: "todo_updated" }
@@ -86,7 +88,6 @@ export type CommandError =
   | { type: "no_turn_running"; chat: ChatId }
   | { type: "unknown_request"; chat: ChatId; request: string }
   | { type: "answer_does_not_fit"; chat: ChatId; request: string }
-  | { type: "repository_config"; reason: string }
   | { type: "agent_cli_not_configured"; agent_cli: AgentCli }
   | { type: "agent_cli"; reason: string }
   | { type: "empty_todo" }
@@ -200,4 +201,11 @@ export type ServiceEvent =
     }
   | { type: "status_changed"; chat: ChatId; status: ChatStatus }
   | { type: "request_answered"; chat: ChatId; request: string; answer: Answer }
-  | { type: "todos_changed"; chat: ChatId; todos: Todo[] };
+  | { type: "todos_changed"; chat: ChatId; todos: Todo[] }
+  | { type: "service_update_waiting" };
+
+/** The app's connection to the harness service (not part of the service's protocol). */
+export type ServiceConnection =
+  | { state: "connecting" }
+  | { state: "connected"; service_version: string }
+  | { state: "unavailable"; reason: string };

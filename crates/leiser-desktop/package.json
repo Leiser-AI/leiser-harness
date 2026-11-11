@@ -9,6 +9,7 @@
     "build": "tsc --noEmit && vite build",
     "check": "tsc --noEmit",
     "tauri": "tauri",
+    "service": "cargo build -p leiser-harness-service",
     "fake-agent-cli": "cargo build -p leiser-testkit --bin fake-agent-cli"
   },
   "dependencies": {

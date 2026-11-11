@@ -19,6 +19,7 @@ import type {
   RepositoryId,
   RepositoryOverview,
   Response,
+  ServiceConnection,
   ServiceEvent,
   Todo,
   TodoId,
@@ -194,6 +195,17 @@ export async function readChat(chat: ChatId): Promise<ChatView> {
     : unexpected(response);
 }
 
+/** Whether an update of the harness service waits for running turns. */
+export async function serviceUpdateWaiting(): Promise<boolean> {
+  const response = await execute({ type: "read_service_status" });
+  return response.type === "service_status" ? response.update_waiting : unexpected(response);
+}
+
+/** The app's connection to the harness service right now. */
+export function serviceConnection(): Promise<ServiceConnection> {
+  return invoke<ServiceConnection>("service_connection");
+}
+
 export async function listTodos(chat: ChatId): Promise<Todo[]> {
   const response = await execute({ type: "list_todos", chat });
   return response.type === "todos" ? response.todos : unexpected(response);
@@ -248,15 +260,24 @@ export function pickFolder(): Promise<string | null> {
   return invoke<string | null>("pick_folder");
 }
 
-/** Calls `onEvent` for every service event, and `onLost` when some were lost. */
+/**
+ * Calls `onEvent` for every service event, `onLost` when some were lost,
+ * and `onConnection` when the connection to the service changes, such as
+ * while the service restarts after an update.
+ */
 export async function subscribe(
   onEvent: (event: ServiceEvent) => void,
   onLost: () => void,
+  onConnection: (connection: ServiceConnection) => void,
 ): Promise<UnlistenFn> {
   const events = await listen<ServiceEvent>("service-event", ({ payload }) => onEvent(payload));
   const lost = await listen("service-events-lost", onLost);
+  const connection = await listen<ServiceConnection>("service-connection", ({ payload }) =>
+    onConnection(payload),
+  );
   return () => {
     events();
     lost();
+    connection();
   };
 }
