@@ -324,7 +324,9 @@ async fn an_unreadable_repository_config_hides_nothing_and_says_why() -> TestRes
     let OptOuts::Unreadable { reason } = opt_outs else {
         return Err(format!("expected Unreadable, got {opt_outs:?}").into());
     };
-    assert!(reason.contains(".leiser/config.toml"), "{reason}");
+    // The reason names the file with the platform's separator.
+    let config = Path::new(".leiser").join("config.toml");
+    assert!(reason.contains(&config.display().to_string()), "{reason}");
     assert!(reason.contains("needs a reason"), "{reason}");
     Ok(())
 }
