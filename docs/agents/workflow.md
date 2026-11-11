@@ -9,9 +9,12 @@
   Write the body with `/pr` and put `Closes #<ticket>` in the body: a squash
   merge takes its message from the body, so a keyword only in a commit is
   lost.
+- Before you open a pull request, review your own diff with the
+  `code-review` skill against `origin/development` and fix every finding,
+  whatever its level. When a finding is one a tool can catch (a lint, a
+  test, a CI step), add that check instead of relying on review next time.
+  There is no review in CI: CI runs only deterministic checks.
 - Pull requests are squash-merged into `development`. Only the user merges.
-  Auto-merge is allowed only once the automated agent review is a required
-  check.
 - Turn on Auto-fix for every pull request you open, so conflicts and CI
   failures reach you without the user relaying them. Resolve a conflict by
   merging `origin/development` into your branch and pushing normally; never
