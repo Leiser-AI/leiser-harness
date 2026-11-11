@@ -18,7 +18,10 @@ service shows that an update waits, applies it once no turn runs and
 resumes every chat.
 
 Chats start on the installed Claude Code; Codex is configured as a second
-agent CLI. An app started from the Finder does not get the shell's `PATH`,
+agent CLI. The composer's subscription picker lists every agent CLI's
+default login and every subscription, grouped by provider; choosing one of
+the other provider moves the chat to that agent CLI between turns, with a
+handoff. An app started from the Finder does not get the shell's `PATH`,
 so the harness service asks the developer's login shell for it once when
 it starts, and the agent CLIs run with it; after a change to the shell
 profile, restart the app. The service also looks in common install
@@ -93,7 +96,7 @@ pkill -f leiser-harness-service
 ```
 
 To try the app without a subscription, run it on the testkit's fake agent
-CLI, which answers every message with a tool call, its result, an echo and
+CLI, which plays both Claude Code and Codex and answers every message with a tool call, its result, an echo and
 a todo it adds through the harness MCP server (refused unless the
 repository's `.leiser/config.toml` has `[agent_access] todo_list = true`).
 Its chats are kept apart from real ones (data directory

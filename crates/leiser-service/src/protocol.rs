@@ -339,13 +339,15 @@ pub enum Command {
         subscription: SubscriptionId,
         interchangeable: bool,
     },
-    /// Changes the subscription that the chat's next turns on `provider`
-    /// use; `None` is the agent CLI's own default login. A new chat starts
-    /// on its repository's default subscription per provider, set in its
+    /// Changes the subscription that the chat's next turns use to
+    /// `subscription` of `provider`; `None` is the agent CLI's own default
+    /// login. The chat moves to `provider`'s agent CLI, as
+    /// [`Command::ChangeAgentCli`] does. A new chat starts on its
+    /// repository's default subscription per provider, set in its
     /// `.leiser/config.toml`. Where the agent CLI can continue its agent
     /// session on the new subscription (Codex), it does; otherwise the next
     /// message goes to a new agent session with a handoff. Fails while a
-    /// turn runs.
+    /// turn runs, and when the service has no driver for that agent CLI.
     ChangeSubscription {
         chat: ChatId,
         provider: Provider,

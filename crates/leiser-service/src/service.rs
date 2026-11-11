@@ -1977,8 +1977,21 @@ impl State {
         if chat.turn_running() {
             return Err(CommandError::TurnRunning { chat: id });
         }
+        self.move_to_agent_cli(id, agent_cli)?;
+        Ok(Response::AgentCliChanged)
+    }
+
+    /// Moves the chat, which no turn uses now, to `agent_cli`: the next
+    /// message goes to that agent CLI's earlier agent session with a
+    /// handoff of what it missed, or to a new agent session with a
+    /// handoff of the chat so far.
+    fn move_to_agent_cli(&mut self, id: ChatId, agent_cli: AgentCli) -> Result<(), CommandError> {
+        let chat = self
+            .chats
+            .get(&id)
+            .ok_or(CommandError::UnknownChat { chat: id })?;
         if chat.agent_cli == agent_cli {
-            return Ok(Response::AgentCliChanged);
+            return Ok(());
         }
         let entries = self.store.transcript(id.0)?.len();
         let Some(chat) = self.chats.get_mut(&id) else {
@@ -2000,8 +2013,7 @@ impl State {
             }),
             None => (entries > 0).then_some(Handoff::NewSession),
         };
-        self.save()?;
-        Ok(Response::AgentCliChanged)
+        self.save()
     }
 
     fn add_subscription(
@@ -2396,10 +2408,10 @@ impl State {
     }
 
     /// Changes the subscription the chat's agent CLI of `provider` runs
-    /// on. The running agent session there ends, so the next message runs
-    /// on the new subscription. An agent session the new subscription
-    /// cannot continue is forgotten: the next message goes to a new agent
-    /// session with a handoff.
+    /// on, and moves the chat to that agent CLI. The running agent session
+    /// there ends, so the next message runs on the new subscription. An
+    /// agent session the new subscription cannot continue is forgotten:
+    /// the next message goes to a new agent session with a handoff.
     fn change_subscription(
         &mut self,
         id: ChatId,
@@ -2411,10 +2423,15 @@ impl State {
             .get(&id)
             .ok_or(CommandError::UnknownChat { chat: id })?;
         self.check_subscription(provider, subscription)?;
+        let agent_cli = provider.agent_cli();
+        if !self.drivers.contains_key(&agent_cli) {
+            return Err(CommandError::AgentCliNotConfigured { agent_cli });
+        }
         if chat.status() == ChatStatus::Working {
             return Err(CommandError::TurnRunning { chat: id });
         }
         self.switch_subscription(id, provider, subscription)?;
+        self.move_to_agent_cli(id, agent_cli)?;
         Ok(Response::SubscriptionChanged)
     }
 
