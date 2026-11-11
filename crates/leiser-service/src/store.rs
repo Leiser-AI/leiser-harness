@@ -37,8 +37,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::repo_check::Outcome;
 use crate::{
-    AgentCli, AgentEvent, PermissionMode, Provider, SubscriptionKind, TranscriptEntry,
-    TurnCheckpoints,
+    AgentCli, AgentEvent, PermissionMode, Provider, PullRequestState, SubscriptionKind,
+    TranscriptEntry, TurnCheckpoints,
 };
 
 /// The storage version this harness service writes.
@@ -175,6 +175,22 @@ pub(crate) struct ChatV3 {
     /// chat's next turn.
     #[serde(default)]
     pub held: Vec<String>,
+    /// Whether the harness removed the chat's worktree after its pull
+    /// request was merged.
+    #[serde(default)]
+    pub worktree_removed: bool,
+    /// The chat's pull request, once it is open.
+    #[serde(default)]
+    pub pull_request: Option<PullRequestV3>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct PullRequestV3 {
+    pub number: u64,
+    pub url: String,
+    pub head: String,
+    pub base: String,
+    pub state: PullRequestState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -435,6 +451,8 @@ impl Store {
                     subscriptions: Vec::new(),
                     usage_limit: None,
                     held: Vec::new(),
+                    worktree_removed: false,
+                    pull_request: None,
                 })
                 .collect(),
         };

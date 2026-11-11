@@ -380,6 +380,30 @@ pub enum Command {
     /// ([`CommandError::HostAccountMismatch`]). Answers once the push is
     /// done.
     Push { chat: ChatId },
+    /// Pushes the chat's branch as [`Command::Push`] does, after the same
+    /// host account check, and opens a pull request from it into the
+    /// repository's base branch (its `base_branch`, else `origin`'s default
+    /// branch) with the host account's credentials. A chat leads to at
+    /// most one pull request: later pushes update it, and a second one is
+    /// refused ([`CommandError::PullRequestExists`]). Answers once the pull
+    /// request is open; [`Event::PullRequestChanged`] follows.
+    OpenPullRequest {
+        chat: ChatId,
+        title: String,
+        body: String,
+    },
+    /// Asks the git host for the state of the chat's pull request and
+    /// keeps it; a change is reported as [`Event::PullRequestChanged`].
+    /// Once it is merged, the developer can remove the chat's worktree
+    /// ([`Command::RemoveWorktree`]).
+    CheckPullRequest { chat: ChatId },
+    /// Removes the chat's worktree and its local branch, after the chat's
+    /// pull request was merged (as the last [`Command::CheckPullRequest`]
+    /// saw). Refuses while a turn runs there, and while the worktree has
+    /// uncommitted changes or commits that were never pushed. Every chat in
+    /// the worktree is marked done and stays readable, but takes no more
+    /// messages.
+    RemoveWorktree { chat: ChatId },
     /// After the chat's last turn stopped at a usage limit: changes the
     /// subscription of the chat's agent CLI to `subscription`, as
     /// [`Command::ChangeSubscription`] does, and continues the chat there in
@@ -614,6 +638,11 @@ pub enum Response {
         /// The usage limit the chat's last turn stopped at, until the next
         /// turn starts. See [`Command::ContinueOnSubscription`].
         usage_limit: Option<UsageLimit>,
+        /// Where the chat works.
+        place: ChatPlace,
+        /// The chat's pull request, as the harness last saw it. Boxed to
+        /// keep [`Response`] small.
+        pull_request: Option<Box<PullRequest>>,
         transcript: Vec<TranscriptEntry>,
     },
     SubscriptionAdded {
@@ -643,6 +672,16 @@ pub enum Response {
     Pushed {
         branch: String,
     },
+    /// The chat's branch is on `origin` and the pull request is open.
+    PullRequestOpened {
+        pull_request: PullRequest,
+    },
+    /// The chat's pull request as the git host reports it now.
+    PullRequest {
+        pull_request: PullRequest,
+    },
+    /// The chat's worktree and local branch are gone.
+    WorktreeRemoved,
     InterchangeableSet,
     /// The chat continues on the new subscription in a new turn.
     ContinuedOnSubscription,
@@ -841,6 +880,43 @@ pub struct ChatOverview {
     pub status: ChatStatus,
     /// The worktree the chat works in; `None` in the main checkout.
     pub worktree: Option<PathBuf>,
+}
+
+/// Where a chat works.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatPlace {
+    /// The repository's main checkout.
+    MainCheckout,
+    /// A worktree the harness created.
+    Worktree,
+    /// A worktree the harness created and has removed since, after the
+    /// chat's pull request was merged. The chat stays readable.
+    RemovedWorktree,
+}
+
+/// A chat's pull request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PullRequest {
+    /// The pull request's number on the git host.
+    pub number: u64,
+    /// Where the git host shows it.
+    pub url: String,
+    /// The chat's branch.
+    pub head: String,
+    /// The branch it is to be merged into.
+    pub base: String,
+    pub state: PullRequestState,
+}
+
+/// Where a pull request stands on the git host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PullRequestState {
+    Open,
+    Merged,
+    /// Closed without a merge.
+    Closed,
 }
 
 /// What is checked out in a working directory.
@@ -1186,6 +1262,35 @@ pub enum CommandError {
     NoBranch { chat: ChatId },
     #[error("the push failed: {reason}")]
     PushFailed { reason: String },
+    #[error("chat {chat:?} already has pull request #{number}; push to update it")]
+    PullRequestExists { chat: ChatId, number: u64 },
+    #[error("chat {chat:?} is opening its pull request")]
+    PullRequestOpening { chat: ChatId },
+    #[error("a pull request needs a title")]
+    EmptyPullRequestTitle,
+    #[error("chat {chat:?} has no pull request")]
+    NoPullRequest { chat: ChatId },
+    #[error(
+        "pull request #{number} of chat {chat:?} is not merged; check it again \
+         once it is"
+    )]
+    PullRequestNotMerged { chat: ChatId, number: u64 },
+    #[error("the pull request failed: {reason}")]
+    PullRequestFailed { reason: String },
+    #[error(
+        "the repository has no base branch for a pull request: set \
+         `base_branch` in .leiser/config.toml or `origin`'s default branch"
+    )]
+    NoBaseBranch,
+    #[error("the worktree of chat {chat:?} was removed; the chat is read-only")]
+    WorktreeRemoved { chat: ChatId },
+    #[error("the worktree of chat {chat:?} has uncommitted changes; commit or discard them first")]
+    WorktreeHasChanges { chat: ChatId },
+    #[error(
+        "the worktree of chat {chat:?} has commits that were never pushed; \
+         push them or remove the worktree yourself"
+    )]
+    WorktreeHasUnpushedCommits { chat: ChatId },
     #[error("chat {chat:?} has no checkpoint {moment} turn {turn}")]
     UnknownCheckpoint {
         chat: ChatId,
@@ -1283,6 +1388,15 @@ pub enum Event {
         turn: u64,
         moment: CheckpointMoment,
     },
+    /// The chat's pull request was opened, or its state on the git host
+    /// changed.
+    PullRequestChanged {
+        chat: ChatId,
+        pull_request: PullRequest,
+    },
+    /// The chat's worktree and local branch were removed
+    /// ([`Command::RemoveWorktree`]).
+    WorktreeRemoved { chat: ChatId },
     /// An update of the harness service waits until no turn runs. Then the
     /// service restarts on the new version and resumes every agent session.
     ServiceUpdateWaiting,
@@ -1304,7 +1418,9 @@ impl Event {
             | Self::StatusChanged { chat, .. }
             | Self::ContinuedOnSubscription { chat, .. }
             | Self::TodosChanged { chat, .. }
-            | Self::CheckpointRestored { chat, .. } => Some(*chat),
+            | Self::CheckpointRestored { chat, .. }
+            | Self::PullRequestChanged { chat, .. }
+            | Self::WorktreeRemoved { chat } => Some(*chat),
             Self::LoginOutput { .. }
             | Self::LoginFinished { .. }
             | Self::HostAccountLoginOutput { .. }

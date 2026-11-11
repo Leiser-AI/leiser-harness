@@ -151,5 +151,29 @@
         git config only, and checks the account before every push.
       </p>
     </dialog>
+    <dialog id="pull-request-dialog" class="subscriptions-dialog" aria-labelledby="pull-request-title">
+      <header class="dialog-header">
+        <h2 id="pull-request-title">Open a pull request</h2>
+        <button id="close-pull-request" type="button">Cancel</button>
+      </header>
+      <div id="pull-request-error" class="error" role="alert" hidden></div>
+      <form id="pull-request-form" class="add-subscription">
+        <p id="pull-request-target" class="muted"></p>
+        <label>
+          Title
+          <input id="pull-request-title-input" type="text" autocomplete="off" required />
+        </label>
+        <label>
+          Description
+          <textarea id="pull-request-body" rows="8"></textarea>
+        </label>
+        <button id="pull-request-submit" type="submit" class="primary">Push and open</button>
+      </form>
+      <p class="muted dialog-note">
+        The harness checks the repository's host account, pushes the chat's
+        branch and opens the pull request with that account. A chat has at
+        most one pull request; later pushes update it.
+      </p>
+    </dialog>
   </body>
 </html>

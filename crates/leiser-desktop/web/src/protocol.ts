@@ -61,6 +61,9 @@ export type Command =
   | { type: "log_in_host_account"; host_account: HostAccountId }
   | { type: "list_host_accounts" }
   | { type: "push"; chat: ChatId }
+  | { type: "open_pull_request"; chat: ChatId; title: string; body: string }
+  | { type: "check_pull_request"; chat: ChatId }
+  | { type: "remove_worktree"; chat: ChatId }
   | { type: "run_repo_check"; repository: RepositoryId }
   | { type: "read_repo_check"; repository: RepositoryId }
   | { type: "read_service_status" }
@@ -146,6 +149,9 @@ export type Response =
       host_account: HostAccountBinding;
       commit_author: CommitAuthor | null;
       usage_limit: UsageLimit | null;
+      /** Missing from services older than pull requests. */
+      place?: ChatPlace;
+      pull_request?: PullRequest | null;
       transcript: TranscriptEntry[];
     }
   | { type: "subscription_added"; subscription: SubscriptionId }
@@ -160,6 +166,9 @@ export type Response =
   | { type: "host_account_login_started" }
   | { type: "host_accounts"; host_accounts: HostAccountOverview[] }
   | { type: "pushed"; branch: string }
+  | { type: "pull_request_opened"; pull_request: PullRequest }
+  | { type: "pull_request"; pull_request: PullRequest }
+  | { type: "worktree_removed" }
   | { type: "interchangeable_set" }
   | { type: "continued_on_subscription" }
   | { type: "repo_check_started" }
@@ -215,6 +224,16 @@ export type CommandError =
   | { type: "host_account_unverified"; name: string; reason: string }
   | { type: "no_branch"; chat: ChatId }
   | { type: "push_failed"; reason: string }
+  | { type: "pull_request_exists"; chat: ChatId; number: number }
+  | { type: "pull_request_opening"; chat: ChatId }
+  | { type: "empty_pull_request_title" }
+  | { type: "no_pull_request"; chat: ChatId }
+  | { type: "pull_request_not_merged"; chat: ChatId; number: number }
+  | { type: "pull_request_failed"; reason: string }
+  | { type: "no_base_branch" }
+  | { type: "worktree_removed"; chat: ChatId }
+  | { type: "worktree_has_changes"; chat: ChatId }
+  | { type: "worktree_has_unpushed_commits"; chat: ChatId }
   | { type: "repo_check_not_configured" }
   | { type: "repo_check_running"; repository: RepositoryId }
   | { type: "not_a_cli_extension_file"; file: string }
@@ -303,6 +322,19 @@ export interface UsageLimit {
   /** `null`: the agent CLI's own default login. */
   subscription: SubscriptionId | null;
   resets_in_seconds: number | null;
+}
+
+/** Where a chat works. */
+export type ChatPlace = "main_checkout" | "worktree" | "removed_worktree";
+
+export type PullRequestState = "open" | "merged" | "closed";
+
+export interface PullRequest {
+  number: number;
+  url: string;
+  head: string;
+  base: string;
+  state: PullRequestState;
 }
 
 export interface ChatOverview {
@@ -422,6 +454,8 @@ export type ServiceEvent =
   | { type: "repo_check_finished"; repository: RepositoryId }
   | { type: "todos_changed"; chat: ChatId; todos: Todo[] }
   | { type: "checkpoint_restored"; chat: ChatId; turn: number; moment: CheckpointMoment }
+  | { type: "pull_request_changed"; chat: ChatId; pull_request: PullRequest }
+  | { type: "worktree_removed"; chat: ChatId }
   | { type: "service_update_waiting" };
 
 /** The app's connection to the harness service (not part of the service's protocol). */
