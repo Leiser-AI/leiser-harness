@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -19,7 +20,7 @@ use crate::repo_check::{self, Outcome};
 use crate::repo_config::RepositoryConfig;
 use crate::store::{
     AgentSessionV2, ChatSubscriptionV3, ChatV3, CheckpointsV1, HandoffV2, RepositoryV1, StateV3,
-    StorageError, Store, TurnCheckpointsV1,
+    StorageError, Store, TurnCheckpointsV1, UsageLimitV3,
 };
 use crate::subscriptions::{SubscriptionError, Subscriptions};
 use crate::todos::{TodoChange, TodoError, TodoList};
@@ -30,7 +31,7 @@ use crate::{
     LoginAnswer, LoginOutcome, LoginProcess, OptOuts, OsKeychain, PermissionMode, Provider,
     QueueReason, RepoCheck, RepositoryId, RepositoryOverview, RepositoryScript, Response,
     SessionInput, SessionSpec, SignIn, SubscriptionAccess, SubscriptionId, SubscriptionKind,
-    TodoId, TranscriptEntry, TurnCheckpoints, script,
+    TodoId, TranscriptEntry, TurnCheckpoints, UsageLimit, script,
 };
 
 /// Commands waiting for the command loop. Small, so callers feel back
@@ -47,6 +48,10 @@ const CALL_BUFFER: usize = 64;
 const BACKGROUND_BUFFER: usize = 64;
 /// The directory in the data directory that holds chats' worktrees.
 const WORKTREES_DIR: &str = "worktrees";
+/// What a chat's agent gets when the chat continues on another
+/// subscription after a usage limit.
+const CONTINUE_NOTE: &str = "[leiser harness] Your last turn stopped at a usage limit of \
+     the subscription. The chat now runs on another subscription: continue where you stopped.";
 
 /// What the harness service is started with: one driver per agent CLI, a
 /// data directory, where chats' worktrees go, the keychain for API keys,
@@ -292,6 +297,41 @@ struct Chat {
     /// The running agent session, if any.
     session: Option<Session>,
     todos: TodoList,
+    /// The usage limit the chat's last turn stopped at, until the next
+    /// turn starts.
+    usage_limit: Option<LimitHit>,
+    /// Messages queued when the usage limit was hit, held back so they do
+    /// not hit it too. The chat's next turn queues them.
+    held: VecDeque<String>,
+}
+
+/// A usage limit an agent session reported.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LimitHit {
+    limit: String,
+    /// The subscription that hit it; `None` is the default login.
+    subscription: Option<SubscriptionId>,
+    /// When it resets, in seconds since the Unix epoch.
+    resets_at: Option<u64>,
+}
+
+impl LimitHit {
+    fn shown(&self) -> UsageLimit {
+        UsageLimit {
+            limit: self.limit.clone(),
+            subscription: self.subscription,
+            resets_in_seconds: self.resets_at.map(|at| at.saturating_sub(unix_now())),
+        }
+    }
+}
+
+/// How a turn starts.
+enum Opening {
+    /// With the developer's message.
+    Message(String),
+    /// After a usage limit, on another subscription, with
+    /// [`CONTINUE_NOTE`].
+    Continue,
 }
 
 /// A chat's checkpoints.
@@ -379,6 +419,8 @@ struct Session {
     /// Approval requests and questions waiting for the developer, oldest
     /// first. They close when the turn ends.
     open: Vec<OpenRequest>,
+    /// The usage limit the running turn hit; the turn stops at it.
+    limit: Option<LimitHit>,
 }
 
 /// An approval request or a question the agent waits for an answer to.
@@ -551,6 +593,9 @@ struct State {
     chats: BTreeMap<ChatId, Chat>,
     checkpoints: BTreeMap<ChatId, ChatCheckpoints>,
     subscriptions: Subscriptions,
+    /// Subscriptions whose last turn stopped at a usage limit, with when it
+    /// resets, if known. A chat does not move to one by itself before then.
+    limited: BTreeMap<SubscriptionId, Option<u64>>,
     logins: BTreeMap<SubscriptionId, Login>,
     next_id: u64,
     generation: u64,
@@ -580,69 +625,7 @@ impl State {
         let chats: BTreeMap<ChatId, Chat> = stored
             .chats
             .into_iter()
-            .map(|chat| {
-                // A todo list that cannot be read stops the start: an empty
-                // one would overwrite it on the next change.
-                let todos = TodoList::from_stored(store.todos(chat.id)?);
-                Ok((
-                    ChatId(chat.id),
-                    Chat {
-                        repository: RepositoryId(chat.repository),
-                        working_directory: chat.working_directory,
-                        place: if chat.worktree {
-                            Place::Worktree
-                        } else {
-                            Place::MainCheckout
-                        },
-                        done: chat.done,
-                        // A setup cut short by a restart is not run again.
-                        setup: Setup::Done,
-                        // No turn runs after a restart.
-                        shown: (
-                            if chat.done {
-                                ChatStatus::Done
-                            } else {
-                                ChatStatus::WaitingForYou
-                            },
-                            // Older data: newer chats first.
-                            if chat.status_changed == 0 {
-                                chat.id
-                            } else {
-                                chat.status_changed
-                            },
-                        ),
-                        title: stored_title(&store, chat.id),
-                        agent_cli: chat.agent_cli,
-                        agent_sessions: chat
-                            .agent_sessions
-                            .into_iter()
-                            .map(|session| {
-                                (
-                                    session.agent_cli,
-                                    Resumable {
-                                        id: AgentSessionId::new(session.id),
-                                        known: session.known,
-                                    },
-                                )
-                            })
-                            .collect(),
-                        handoff: chat.handoff.map(|handoff| match handoff {
-                            HandoffV2::NewSession => Handoff::NewSession,
-                            HandoffV2::Resume { known } => Handoff::Resume { known },
-                        }),
-                        permission_mode: chat.permission_mode,
-                        subscriptions: chat
-                            .subscriptions
-                            .into_iter()
-                            .map(|chosen| (chosen.provider, SubscriptionId(chosen.subscription)))
-                            .collect(),
-                        // Agent sessions did not survive the restart, so no
-                        // turn runs; resumed ones wait for the next message.
-                        session: None,
-                        todos,
-                    },
-                ))
-            })
+            .map(|chat| stored_chat(&store, chat))
             .collect::<Result<_, StorageError>>()?;
         let subscriptions = Subscriptions::load(
             stored.subscriptions,
@@ -670,6 +653,7 @@ impl State {
             chats,
             checkpoints,
             subscriptions,
+            limited: BTreeMap::new(),
             logins: BTreeMap::new(),
             next_id: stored.next_id,
             generation: 0,
@@ -795,6 +779,13 @@ impl State {
                 answer,
             } => self.answer_login(subscription, &answer).await,
             Command::ListSubscriptions => Ok(self.list_subscriptions()),
+            Command::SetInterchangeable {
+                subscription,
+                interchangeable,
+            } => self.set_interchangeable(subscription, interchangeable),
+            Command::ContinueOnSubscription { chat, subscription } => {
+                self.continue_on_subscription(chat, subscription).await
+            }
             Command::ChangeSubscription {
                 chat,
                 provider,
@@ -804,16 +795,8 @@ impl State {
                 .start_repo_check(repository)
                 .map(|()| Response::RepoCheckStarted),
             Command::ReadRepoCheck { repository } => self.read_repo_check(repository),
-            Command::ListTodos { chat } => self.todo_list(chat).map(|todos| Response::Todos {
-                todos: todos.todos().to_vec(),
-            }),
-            Command::AddTodo { chat, text } => self
-                .change_todos(chat, TodoChange::Add { text })
-                .and_then(|added| {
-                    added
-                        .map(|todo| Response::TodoAdded { todo })
-                        .ok_or(CommandError::EmptyTodo)
-                }),
+            Command::ListTodos { chat } => self.list_todos(chat),
+            Command::AddTodo { chat, text } => self.add_todo(chat, text),
             Command::SetTodoDone { chat, todo, done } => self
                 .change_todos(chat, TodoChange::SetDone { todo, done })
                 .map(|_| Response::TodoUpdated),
@@ -842,13 +825,6 @@ impl State {
         };
         // The caller may have stopped waiting; nothing to do then.
         let _ = reply.send(result);
-    }
-
-    fn service_status(&self) -> Response {
-        Response::ServiceStatus {
-            version: env!("CARGO_PKG_VERSION").to_owned(),
-            update_waiting: self.update_waiting,
-        }
     }
 
     fn next_id(&mut self) -> u64 {
@@ -1102,6 +1078,8 @@ impl State {
             subscriptions: defaults.subscriptions,
             session: None,
             todos: TodoList::default(),
+            usage_limit: None,
+            held: VecDeque::new(),
         };
         self.chats.insert(chat, new);
         if let Err(error) = self.save() {
@@ -1405,25 +1383,36 @@ impl State {
         if chat.turn_running() {
             return Err(CommandError::TurnRunning { chat: id });
         }
-        // Before the agent session opens: an agent CLI may start working,
-        // or end, as soon as it runs.
-        self.checkpoint_before(id, &text).await;
-        let started = self.start_turn(id, text).await;
+        self.start_turn(id, Opening::Message(text)).await?;
+        Ok(Response::MessageSent)
+    }
+
+    /// Starts a turn of the chat, which runs none and is set up, with a
+    /// checkpoint before it. The checkpoint comes before the agent session
+    /// opens: an agent CLI may start working, or end, as soon as it runs.
+    async fn start_turn(&mut self, id: ChatId, opening: Opening) -> Result<(), CommandError> {
+        let title = match &opening {
+            Opening::Message(text) => text.clone(),
+            Opening::Continue => "Continue after a usage limit".to_owned(),
+        };
+        self.checkpoint_before(id, &title).await;
+        let started = self.open_turn(id, opening).await;
         if started.is_err() {
             self.forget_open_checkpoint(id);
         }
         started
     }
 
-    /// Sends the developer's message to the chat's agent session, which
-    /// starts a turn; opens the agent session first if needed.
-    async fn start_turn(&mut self, id: ChatId, text: String) -> Result<Response, CommandError> {
+    /// Starts a turn: with the developer's message, or continuing after a
+    /// usage limit. Messages held back at the limit are queued behind it.
+    async fn open_turn(&mut self, id: ChatId, opening: Opening) -> Result<(), CommandError> {
         let chat = self
             .chats
             .get(&id)
             .ok_or(CommandError::UnknownChat { chat: id })?;
         let pending = chat.handoff;
         let was_done = chat.done;
+        let stopped_at_limit = chat.usage_limit.is_some();
         let in_worktree = chat.place == Place::Worktree;
         let mode_changed = self.chats.get(&id).is_some_and(|chat| {
             chat.session
@@ -1447,13 +1436,20 @@ impl State {
         let first_message = !transcript
             .iter()
             .any(|entry| matches!(entry, TranscriptEntry::UserMessage { .. }));
-        let branch_note = if in_worktree && first_message {
-            self.branch_note(id).await
-        } else {
-            None
+        let branch_note = match &opening {
+            Opening::Message(_) if in_worktree && first_message => self.branch_note(id).await,
+            Opening::Message(_) | Opening::Continue => None,
         };
         // Quotes the chat up to, not including, this message.
         let handoff = pending.and_then(|pending| handoff::render(&transcript, pending));
+        let text = match opening {
+            Opening::Message(text) => {
+                // Recorded first, so the developer's text is never lost.
+                self.append_user_message(id, &text)?;
+                text
+            }
+            Opening::Continue => CONTINUE_NOTE.to_owned(),
+        };
         let restore_note = self
             .checkpoints
             .get_mut(&id)
@@ -1464,18 +1460,21 @@ impl State {
             .flatten()
             .collect::<Vec<_>>()
             .join("\n\n");
-        // Recorded first, so the developer's text is never lost.
-        self.append_user_message(id, &text)?;
         let Some(Chat {
             session: Some(session),
             handoff,
             done,
+            usage_limit,
+            held,
             ..
         }) = self.chats.get_mut(&id)
         else {
             return Err(CommandError::UnknownChat { chat: id });
         };
-        session.turn = Turn::running();
+        session.turn = Turn::Running {
+            queued: std::mem::take(held),
+        };
+        let limit = usage_limit.take();
         // A message takes a done chat up again.
         *done = false;
         if let Resume::Untried = session.resume {
@@ -1486,17 +1485,27 @@ impl State {
         }
         let input = session.input.clone();
         if let Err(error) = send_input(&input, SessionInput::UserMessage { text: message }).await {
-            self.end_session(id);
+            // Ends the agent session; what the limit held back waits on.
+            if let Some(chat) = self.chats.get_mut(&id) {
+                if let Some(Session {
+                    turn: Turn::Running { queued },
+                    ..
+                }) = chat.session.take()
+                {
+                    chat.held = queued;
+                }
+                chat.usage_limit = limit;
+            }
             return Err(error);
         }
-        if (handoff.take().is_some() || was_done)
+        if (handoff.take().is_some() || was_done || stopped_at_limit)
             && let Err(error) = self.save()
         {
             // The next restart may send the handoff again or show the chat
-            // as done; nothing is lost.
+            // as done or limited; nothing is lost.
             tracing::error!(chat = ?id, %error, "could not store that a message was sent");
         }
-        Ok(Response::MessageSent)
+        Ok(())
     }
 
     /// For the first message of a chat in a worktree that is still on its
@@ -1694,6 +1703,7 @@ impl State {
                 .flat_map(|session| &session.open)
                 .map(|request| request.id.clone())
                 .collect(),
+            usage_limit: chat.usage_limit.as_ref().map(LimitHit::shown),
             transcript,
         })
     }
@@ -2009,24 +2019,51 @@ impl State {
             .chats
             .get(&id)
             .ok_or(CommandError::UnknownChat { chat: id })?;
-        if let Some(subscription) = subscription {
-            match self.subscriptions.provider(subscription) {
-                None => return Err(CommandError::UnknownSubscription { subscription }),
-                Some(found) if found != provider => {
-                    return Err(CommandError::WrongProvider {
-                        subscription,
-                        provider,
-                    });
-                }
-                Some(_) => {}
-            }
-        }
+        self.check_subscription(provider, subscription)?;
         if chat.status() == ChatStatus::Working {
             return Err(CommandError::TurnRunning { chat: id });
         }
-        let current = chat.subscriptions.get(&provider).copied();
+        self.switch_subscription(id, provider, subscription)?;
+        Ok(Response::SubscriptionChanged)
+    }
+
+    /// Fails unless `subscription` is a registered subscription of
+    /// `provider` or the default login.
+    fn check_subscription(
+        &self,
+        provider: Provider,
+        subscription: Option<SubscriptionId>,
+    ) -> Result<(), CommandError> {
+        let Some(subscription) = subscription else {
+            return Ok(());
+        };
+        match self.subscriptions.provider(subscription) {
+            None => Err(CommandError::UnknownSubscription { subscription }),
+            Some(found) if found != provider => Err(CommandError::WrongProvider {
+                subscription,
+                provider,
+            }),
+            Some(_) => Ok(()),
+        }
+    }
+
+    /// Changes the chat's subscription of `provider`, which no turn uses
+    /// now; see [`State::change_subscription`].
+    fn switch_subscription(
+        &mut self,
+        id: ChatId,
+        provider: Provider,
+        subscription: Option<SubscriptionId>,
+    ) -> Result<(), CommandError> {
+        let current = self
+            .chats
+            .get(&id)
+            .ok_or(CommandError::UnknownChat { chat: id })?
+            .subscriptions
+            .get(&provider)
+            .copied();
         if current == subscription {
-            return Ok(Response::SubscriptionChanged);
+            return Ok(());
         }
         let entries = self.store.transcript(id.0)?.len();
         let Some(chat) = self.chats.get_mut(&id) else {
@@ -2048,8 +2085,114 @@ impl State {
                 chat.handoff = (entries > 0).then_some(Handoff::NewSession);
             }
         }
+        self.save()
+    }
+
+    fn set_interchangeable(
+        &mut self,
+        subscription: SubscriptionId,
+        interchangeable: bool,
+    ) -> Result<Response, CommandError> {
+        if !self.subscriptions.contains(subscription) {
+            return Err(CommandError::UnknownSubscription { subscription });
+        }
+        self.subscriptions
+            .set_interchangeable(subscription, interchangeable);
         self.save()?;
-        Ok(Response::SubscriptionChanged)
+        Ok(Response::InterchangeableSet)
+    }
+
+    /// The developer's one click after a usage limit.
+    async fn continue_on_subscription(
+        &mut self,
+        id: ChatId,
+        subscription: Option<SubscriptionId>,
+    ) -> Result<Response, CommandError> {
+        let chat = self
+            .chats
+            .get(&id)
+            .ok_or(CommandError::UnknownChat { chat: id })?;
+        let provider = chat.agent_cli.provider();
+        if chat.status() == ChatStatus::Working {
+            return Err(CommandError::TurnRunning { chat: id });
+        }
+        if chat.usage_limit.is_none() {
+            return Err(CommandError::NoUsageLimit { chat: id });
+        }
+        self.check_subscription(provider, subscription)?;
+        self.continue_turn(id, subscription, false).await?;
+        Ok(Response::ContinuedOnSubscription)
+    }
+
+    /// Moves the chat, whose last turn stopped at a usage limit, to
+    /// `subscription` of its agent CLI's provider and continues it there.
+    async fn continue_turn(
+        &mut self,
+        id: ChatId,
+        subscription: Option<SubscriptionId>,
+        automatic: bool,
+    ) -> Result<(), CommandError> {
+        let provider = self
+            .chats
+            .get(&id)
+            .ok_or(CommandError::UnknownChat { chat: id })?
+            .agent_cli
+            .provider();
+        self.switch_subscription(id, provider, subscription)?;
+        self.store.append(
+            id.0,
+            &TranscriptEntry::ContinuedOnSubscription {
+                provider,
+                subscription,
+                automatic,
+            },
+        )?;
+        self.emit(Event::ContinuedOnSubscription {
+            chat: id,
+            provider,
+            subscription,
+            automatic,
+        });
+        self.start_turn(id, Opening::Continue).await
+    }
+
+    /// The subscription a chat on `from` moves to by itself at a usage
+    /// limit: another interchangeable subscription of the provider that is
+    /// not known to be at its limit, the oldest first. Only from an
+    /// interchangeable subscription.
+    fn interchangeable_after(
+        &self,
+        provider: Provider,
+        from: Option<SubscriptionId>,
+    ) -> Option<SubscriptionId> {
+        let from = from.filter(|from| self.subscriptions.interchangeable(*from))?;
+        let now = unix_now();
+        self.subscriptions
+            .interchangeable_of(provider)
+            .filter(|candidate| *candidate != from)
+            .find(|candidate| match self.limited.get(candidate) {
+                None => true,
+                Some(resets_at) => resets_at.is_some_and(|at| at <= now),
+            })
+    }
+
+    fn add_todo(&mut self, id: ChatId, text: String) -> Result<Response, CommandError> {
+        self.change_todos(id, TodoChange::Add { text })?
+            .map(|todo| Response::TodoAdded { todo })
+            .ok_or(CommandError::EmptyTodo)
+    }
+
+    fn service_status(&self) -> Response {
+        Response::ServiceStatus {
+            version: env!("CARGO_PKG_VERSION").to_owned(),
+            update_waiting: self.update_waiting,
+        }
+    }
+
+    fn list_todos(&self, id: ChatId) -> Result<Response, CommandError> {
+        self.todo_list(id).map(|todos| Response::Todos {
+            todos: todos.todos().to_vec(),
+        })
     }
 
     fn todo_list(&self, id: ChatId) -> Result<&TodoList, CommandError> {
@@ -2230,6 +2373,7 @@ impl State {
             resume,
             permission_mode,
             open: Vec::new(),
+            limit: None,
         });
         Ok(())
     }
@@ -2298,6 +2442,21 @@ impl State {
                 Resume::Proven | Resume::Trying(_) => {}
             }
         }
+        if let AgentEvent::UsageLimitReached {
+            limit,
+            resets_in_seconds,
+        } = &event
+            && let Some(chat) = self.chats.get_mut(&id)
+        {
+            let subscription = chat.subscription();
+            if let Some(session) = &mut chat.session {
+                session.limit = Some(LimitHit {
+                    limit: limit.clone(),
+                    subscription,
+                    resets_at: resets_in_seconds.map(|seconds| unix_now().saturating_add(seconds)),
+                });
+            }
+        }
         let entry = TranscriptEntry::Agent {
             agent_cli,
             event: event.clone(),
@@ -2317,6 +2476,7 @@ impl State {
             // the turn's changes.
             self.checkpoint_after(id).await;
         }
+        let completed = event == AgentEvent::TurnEnded;
         if session_ended == Some(false)
             && let Some(Chat {
                 session: Some(session),
@@ -2331,7 +2491,48 @@ impl State {
             None => {}
             // Queued messages of the ended agent session are dropped with it.
             Some(true) => self.end_session(id),
-            Some(false) => self.send_next_queued(id).await,
+            Some(false) => self.turn_ended(id, completed).await,
+        }
+    }
+
+    /// After a turn of the chat ended: sends the next queued message or,
+    /// when the turn stopped at a usage limit, holds the queued messages
+    /// back and moves the chat to an interchangeable subscription, if it
+    /// has one, or waits for the developer.
+    async fn turn_ended(&mut self, id: ChatId, completed: bool) {
+        let Some(chat) = self.chats.get_mut(&id) else {
+            return;
+        };
+        let current = chat.subscription();
+        let provider = chat.agent_cli.provider();
+        let Some(session) = &mut chat.session else {
+            return;
+        };
+        let Some(limit) = session.limit.take() else {
+            if completed && let Some(subscription) = current {
+                // A turn ran to its end: the subscription is not limited.
+                self.limited.remove(&subscription);
+            }
+            self.send_next_queued(id).await;
+            return;
+        };
+        if let Turn::Running { queued } = std::mem::replace(&mut session.turn, Turn::Idle) {
+            chat.held.extend(queued);
+        }
+        if let Some(subscription) = limit.subscription {
+            self.limited.insert(subscription, limit.resets_at);
+        }
+        chat.usage_limit = Some(limit);
+        if let Err(error) = self.save() {
+            tracing::error!(chat = ?id, %error, "could not store a usage limit");
+        }
+        let Some(next) = self.interchangeable_after(provider, current) else {
+            return;
+        };
+        tracing::info!(chat = ?id, ?next, "usage limit; continuing on an interchangeable subscription");
+        if let Err(error) = self.continue_turn(id, Some(next), true).await {
+            // The developer can still continue by hand.
+            tracing::warn!(chat = ?id, %error, "could not continue on an interchangeable subscription");
         }
     }
 
@@ -2755,6 +2956,12 @@ impl State {
                     worktree: chat.place == Place::Worktree,
                     done: chat.done,
                     status_changed: chat.shown.1,
+                    usage_limit: chat.usage_limit.as_ref().map(|limit| UsageLimitV3 {
+                        limit: limit.limit.clone(),
+                        subscription: limit.subscription.map(|subscription| subscription.0),
+                        resets_at: limit.resets_at,
+                    }),
+                    held: chat.held.iter().cloned().collect(),
                 })
                 .collect(),
         }
@@ -2819,6 +3026,13 @@ impl From<KeychainError> for CommandError {
 }
 
 /// The developer's Codex home, as Codex itself finds it.
+/// Seconds since the Unix epoch.
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs())
+}
+
 fn default_codex_home() -> Option<PathBuf> {
     std::env::var_os("CODEX_HOME")
         .filter(|home| !home.is_empty())
@@ -2940,6 +3154,77 @@ fn stored_checkpoints<'a>(
         .collect()
 }
 
+/// A chat as stored, with its todo list.
+fn stored_chat(store: &Store, chat: ChatV3) -> Result<(ChatId, Chat), StorageError> {
+    // A todo list that cannot be read stops the start: an empty
+    // one would overwrite it on the next change.
+    let todos = TodoList::from_stored(store.todos(chat.id)?);
+    Ok((
+        ChatId(chat.id),
+        Chat {
+            repository: RepositoryId(chat.repository),
+            working_directory: chat.working_directory,
+            place: if chat.worktree {
+                Place::Worktree
+            } else {
+                Place::MainCheckout
+            },
+            done: chat.done,
+            // A setup cut short by a restart is not run again.
+            setup: Setup::Done,
+            // No turn runs after a restart.
+            shown: (
+                if chat.done {
+                    ChatStatus::Done
+                } else {
+                    ChatStatus::WaitingForYou
+                },
+                // Older data: newer chats first.
+                if chat.status_changed == 0 {
+                    chat.id
+                } else {
+                    chat.status_changed
+                },
+            ),
+            title: stored_title(store, chat.id),
+            agent_cli: chat.agent_cli,
+            agent_sessions: chat
+                .agent_sessions
+                .into_iter()
+                .map(|session| {
+                    (
+                        session.agent_cli,
+                        Resumable {
+                            id: AgentSessionId::new(session.id),
+                            known: session.known,
+                        },
+                    )
+                })
+                .collect(),
+            handoff: chat.handoff.map(|handoff| match handoff {
+                HandoffV2::NewSession => Handoff::NewSession,
+                HandoffV2::Resume { known } => Handoff::Resume { known },
+            }),
+            permission_mode: chat.permission_mode,
+            subscriptions: chat
+                .subscriptions
+                .into_iter()
+                .map(|chosen| (chosen.provider, SubscriptionId(chosen.subscription)))
+                .collect(),
+            // Agent sessions did not survive the restart, so no
+            // turn runs; resumed ones wait for the next message.
+            session: None,
+            todos,
+            usage_limit: chat.usage_limit.map(|limit| LimitHit {
+                limit: limit.limit,
+                subscription: limit.subscription.map(SubscriptionId),
+                resets_at: limit.resets_at,
+            }),
+            held: chat.held.into(),
+        },
+    ))
+}
+
 fn stored_title(store: &Store, chat: u64) -> Option<String> {
     let transcript = match store.transcript(chat) {
         Ok(transcript) => transcript,
@@ -2952,7 +3237,8 @@ fn stored_title(store: &Store, chat: u64) -> Option<String> {
         TranscriptEntry::UserMessage { text } => title(text),
         TranscriptEntry::Agent { .. }
         | TranscriptEntry::ScriptFinished { .. }
-        | TranscriptEntry::Answer { .. } => None,
+        | TranscriptEntry::Answer { .. }
+        | TranscriptEntry::ContinuedOnSubscription { .. } => None,
     })
 }
 
