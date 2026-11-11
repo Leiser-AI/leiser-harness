@@ -36,6 +36,14 @@ credentials in the repository's local git config only and checks the
 account before every push. On the fake agent CLI, host accounts sign in
 to a fake git host instead.
 
+The top bar's Terminal button opens a terminal panel on the right with a
+shell in the chat's checkout (its worktree, or the main checkout): the login
+shell on macOS, PowerShell on Windows. Each chat keeps its own shell while
+another chat is selected or the panel is hidden. The shells run in the app,
+not in the harness service (ADR 0008): they end with "End shell", when the
+shell exits, and when the app quits. The PTY code is in
+`crates/leiser-terminal`; the screen is xterm.js.
+
 ## Run it
 
 Needs Node.js (LTS) and, on Linux, WebKitGTK (see `.github/workflows/ci.yml`).

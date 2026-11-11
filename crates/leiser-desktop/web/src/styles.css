@@ -10,6 +10,8 @@
   --user: #e8eefc;
   --warn: #fff4e0;
   --error: #fde8e8;
+  --terminal-bg: #fbfbfc;
+  --terminal-fg: #1d1f23;
   font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
 }
 
@@ -25,6 +27,8 @@
     --user: #26324f;
     --warn: #3d3220;
     --error: #4a2525;
+    --terminal-bg: #16181b;
+    --terminal-fg: #e6e8eb;
   }
 }
 
@@ -36,9 +40,9 @@ body {
   margin: 0;
   height: 100vh;
   display: grid;
-  grid-template-columns: 260px 1fr 260px;
+  grid-template-columns: 260px minmax(0, 1fr) auto;
   grid-template-rows: auto 1fr;
-  grid-template-areas: "side top todos" "side chat todos";
+  grid-template-areas: "side top panels" "side chat panels";
   background: var(--bg);
   color: var(--text);
 }
@@ -487,23 +491,85 @@ button:disabled {
   font-size: 13px;
 }
 
-.todos {
-  grid-area: todos;
+/* The panels on the right: todos, and the terminal below them. */
+.side-panels {
+  grid-area: panels;
+  width: 260px;
+  min-height: 0;
   display: flex;
   flex-direction: column;
-  min-height: 0;
   border-left: 1px solid var(--border);
   background: var(--bg-side);
 }
 
-/* Without a selected chat the chat column takes the panel's place. */
-.todos[hidden] {
+/* Without a panel to show the chat column takes their place. */
+.side-panels:not(:has(> :not([hidden]))) {
   display: none;
 }
 
-body:has(.todos[hidden]) {
-  grid-template-columns: 260px 1fr;
-  grid-template-areas: "side top" "side chat";
+.side-panels:has(> .terminal-panel:not([hidden])) {
+  width: clamp(380px, 42vw, 760px);
+}
+
+.todos {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.side-panels:has(> .terminal-panel:not([hidden])) .todos {
+  flex: 0 1 auto;
+  max-height: 35%;
+  border-bottom: 1px solid var(--border);
+}
+
+.terminal-panel {
+  flex: 1 1 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.terminal-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.terminal-header h2 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.terminal-directory {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;
+  text-align: left;
+  font-size: 12px;
+}
+
+.terminal-header button {
+  padding: 2px 8px;
+  font-size: 12px;
+}
+
+.terminal-screens {
+  flex: 1;
+  min-height: 0;
+  padding: 6px 0 0 8px;
+  background: var(--terminal-bg);
+}
+
+.terminal-screen {
+  height: 100%;
 }
 
 .todos-header {

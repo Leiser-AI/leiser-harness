@@ -12,23 +12,29 @@
 //! When a chat starts waiting for the developer (an approval request or a
 //! question) while the app is not in front, the app sends an OS
 //! notification.
+//!
+//! The terminal panel's shells run in the app itself (`terminals.rs`), in
+//! the chat's checkout, and end when the app quits.
 
 // Release builds on Windows open no console window next to the app.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod connection;
+mod terminals;
 
 use std::path::PathBuf;
 
 use connection::{ConnectionState, ServiceConnection};
 use leiser_service::{Command, CommandError, Response};
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Manager, RunEvent, State};
 use tauri_plugin_dialog::DialogExt;
+use terminals::Terminals;
 
 fn main() -> Result<(), tauri::Error> {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
+        .manage(Terminals::default())
         .setup(|app| {
             // Not in the app data directory: its path has a space on macOS,
             // which some build tools in a worktree trip over.
@@ -46,9 +52,21 @@ fn main() -> Result<(), tauri::Error> {
         .invoke_handler(tauri::generate_handler![
             execute,
             service_connection,
-            pick_folder
+            pick_folder,
+            terminals::open_terminal,
+            terminals::write_terminal,
+            terminals::resize_terminal,
+            terminals::close_terminal,
+            terminals::close_all_terminals,
         ])
-        .run(tauri::generate_context!())
+        .build(tauri::generate_context!())?
+        .run(|app, event| {
+            // No shell outlives the app.
+            if let RunEvent::Exit = event {
+                app.state::<Terminals>().close_all();
+            }
+        });
+    Ok(())
 }
 
 /// Runs a command in the harness service.

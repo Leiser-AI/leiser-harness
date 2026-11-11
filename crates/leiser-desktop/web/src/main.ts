@@ -33,6 +33,7 @@ import type {
 } from "./protocol";
 import * as extensions from "./extensions";
 import * as service from "./service";
+import * as terminal from "./terminal";
 import {
   AGENT_CLI_NAMES,
   AGENT_CLI_PROVIDERS,
@@ -187,6 +188,7 @@ async function refresh(): Promise<void> {
     repoCheckView.hidden = true;
     renderExtensionsTopBar(shown ?? null);
     renderTodos(null, null);
+    terminal.show(null);
     return;
   }
   const checked = repositories.find((overview) => overview.repository === selectedCheck);
@@ -194,6 +196,7 @@ async function refresh(): Promise<void> {
   if (checked && check) {
     renderRepoCheck(checked, check);
     renderTodos(null, null);
+    terminal.show(null);
     return;
   }
   repoCheckView.hidden = true;
@@ -415,6 +418,7 @@ function renderChat(
   subscriptions: SubscriptionOverview[],
 ): void {
   if (view === null || overview === null) {
+    terminal.show(null);
     selectedWorking = false;
     selectedOpenRequests = [];
     topBar.replaceChildren(el("span", "muted", "No chat selected"));
@@ -423,6 +427,8 @@ function renderChat(
     return;
   }
   const chat = overview.chat;
+  // The terminal panel's shell runs here.
+  const checkout = overview.worktree ?? repository?.path;
   topBar.replaceChildren(
     labelled("Repository", repository?.name ?? "unknown"),
     labelled("Branch", branchName(view.branch)),
@@ -432,8 +438,9 @@ function renderChat(
     labelled("Agent CLI", AGENT_CLI_NAMES[view.agentCli]),
     subscriptionPicker(view, subscriptions),
     permissionModePicker(overview.chat, view),
-    ...chatActions(overview),
+    ...chatActions(overview, checkout),
   );
+  terminal.show(chat, checkout);
   const context: ChatContext = {
     chat,
     open: new Set(view.openRequests),
@@ -533,7 +540,7 @@ function hostAccountItem(binding: HostAccountBinding): HTMLElement {
 }
 
 /** The top bar's buttons for the selected chat. */
-function chatActions(overview: ChatOverview): HTMLElement[] {
+function chatActions(overview: ChatOverview, checkout: string | undefined): HTMLElement[] {
   const actions: HTMLElement[] = [];
   const push = el("button", "top-bar-action", "Push");
   push.type = "button";
@@ -554,6 +561,16 @@ function chatActions(overview: ChatOverview): HTMLElement[] {
   if (lastPush !== null && lastPush.chat === overview.chat) {
     actions.push(el("span", "top-bar-value muted", `pushed ${lastPush.branch}`));
   }
+  const toggleTerminal = el(
+    "button",
+    "top-bar-action",
+    terminal.isOpen() ? "Hide terminal" : "Terminal",
+  );
+  toggleTerminal.type = "button";
+  toggleTerminal.title = "A shell in the chat's checkout";
+  toggleTerminal.setAttribute("aria-pressed", String(terminal.isOpen()));
+  toggleTerminal.addEventListener("click", () => terminal.toggle(overview.chat, checkout));
+  actions.push(toggleTerminal);
   if (overview.worktree !== null) {
     const sameWorktree = el("button", "top-bar-action", "New chat in this worktree");
     sameWorktree.type = "button";
@@ -1283,6 +1300,9 @@ addSubscriptionForm.addEventListener("submit", (event) => {
     await refresh();
   });
 });
+
+// The top bar's terminal button follows the panel.
+terminal.init(() => void refresh().catch(showError));
 
 void act(async () => {
   await service.subscribe(
