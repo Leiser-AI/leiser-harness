@@ -292,7 +292,18 @@ async fn a_pull_request_pushes_the_branch_and_opens_it_into_the_base_branch_as_t
         read_chat(&bound.service, bound.chat).await?.pull_request,
         Some(pull_request.clone())
     );
-    let event = tokio::time::timeout(Duration::from_secs(5), events.recv()).await??;
+    // Other events may come first, such as the repository's wayfinder maps
+    // being read.
+    let event = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match events.recv().await {
+                Ok(event @ Event::PullRequestChanged { .. }) => return Ok(event),
+                Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                Err(error) => return Err(error),
+            }
+        }
+    })
+    .await??;
     assert_eq!(
         event,
         Event::PullRequestChanged {
