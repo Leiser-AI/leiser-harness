@@ -12,7 +12,9 @@ a random token to `local-interface.json` in its data directory, readable by
 the developer only; a client must send the token first. Both sides send
 their local interface version in a hello. The version changes only when an
 existing frame, command, response or event changes shape; new ones keep it,
-and a client skips frames it cannot read.
+and a client skips frames it cannot read. The service answers a command it
+cannot read with an error, so a newer desktop app does not wait on an older
+service.
 
 An update replaces the service's program file, for example with the desktop
 app's bundle. The service checks its program file every second. When it

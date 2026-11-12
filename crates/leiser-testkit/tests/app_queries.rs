@@ -256,6 +256,7 @@ fn every_command_error_reaches_the_app() -> TestResult {
             reason: "disk full".to_owned(),
         },
         CommandError::ServiceStopped,
+        CommandError::UnreadableCommand,
     ];
 
     for error in errors {

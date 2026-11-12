@@ -20,21 +20,23 @@
 //!
 //! # What a client may rely on
 //!
-//! The service answers every `execute` frame that has an id with exactly
-//! one `reply` for that id. When it cannot read the frame's command, the
-//! reply is the error [`CommandError::UnknownCommand`]. That is the case
-//! for a command newer than the service: a desktop app is newer than the
-//! service it talks to for as long as a service update waits. So a client
-//! may send a command the service might not know yet, and do without its
-//! answer when it fails this way.
+//! After the hellos and for as long as the connection lasts, the service
+//! answers every `execute` frame whose id is a non-negative integer with
+//! exactly one `reply` for that id. When it cannot read the frame's
+//! command, the reply is the error [`CommandError::UnreadableCommand`]. A
+//! command newer than the service is such a command, and a desktop app is
+//! newer than the service it talks to for as long as a service update
+//! waits. So a client may send a command the service might not know yet,
+//! and do without its answer when it fails this way.
 //!
-//! The service skips every other line it cannot read and keeps the
-//! connection: a frame of a type it does not know, an `execute` frame
-//! without an id, a line that is not JSON. Nothing answers those.
+//! The service skips every other line of text and keeps the connection: a
+//! frame of a type it does not know, an `execute` frame without such an
+//! id, a second hello, text that is not JSON. Nothing answers those. A
+//! line that is not UTF-8 ends the connection.
 //!
-//! A harness service built before `UnknownCommand` existed skips an
-//! `execute` frame it cannot read as well, so its client waits for that
-//! reply until the connection closes.
+//! A harness service built before `UnreadableCommand` existed skips an
+//! `execute` frame whose command it cannot read as well, so its client
+//! waits for that reply until the connection closes.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -81,20 +83,17 @@ enum ClientFrame {
     Execute { id: u64, command: Command },
 }
 
-/// What the service still reads of an `execute` frame whose command it
-/// cannot read: enough to answer it.
+/// A [`ClientFrame`] after the hello, as the service reads it: the command
+/// stays unread, so that a frame whose command the service cannot read
+/// still tells which id to answer.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-enum UnreadFrame {
-    Execute { id: u64 },
-}
-
-/// What a client asks for after its hello.
-#[derive(Debug)]
 enum Request {
-    Execute { id: u64, command: Command },
-    /// An `execute` frame whose command the service cannot read.
-    UnknownCommand { id: u64 },
+    Execute {
+        id: u64,
+        #[serde(default)]
+        command: serde_json::Value,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -318,12 +317,12 @@ async fn read_requests(
     let mut running = JoinSet::new();
     loop {
         tokio::select! {
-            request = next_request(&mut lines) => match request {
+            request = next_frame::<Request>(&mut lines) => match request {
                 Some(Request::Execute { id, command }) => {
                     let service = service.clone();
                     let frames = frames.clone();
                     running.spawn(async move {
-                        let result = match service.execute(command).await {
+                        let result = match run(&service, command).await {
                             Ok(response) => Outcome::Ok(Box::new(response)),
                             Err(error) => Outcome::Err(error),
                         };
@@ -335,15 +334,6 @@ async fn read_requests(
                             .await;
                     });
                 }
-                Some(Request::UnknownCommand { id }) => {
-                    let reply = ServiceFrame::Reply {
-                        id,
-                        result: Outcome::Err(CommandError::UnknownCommand),
-                    };
-                    if frames.send(reply).await.is_err() {
-                        return;
-                    }
-                }
                 None => return,
             },
             Some(_) = running.join_next() => {}
@@ -351,26 +341,15 @@ async fn read_requests(
     }
 }
 
-/// The next request of a client; `None` once the connection is closed.
-/// Lines that ask for no reply are skipped: see the module documentation.
-async fn next_request(lines: &mut Lines<BufReader<OwnedReadHalf>>) -> Option<Request> {
-    loop {
-        let line = lines.next_line().await.ok()??;
-        match serde_json::from_str(&line) {
-            Ok(ClientFrame::Execute { id, command }) => {
-                return Some(Request::Execute { id, command });
-            }
-            // A second hello is a client error; the connection stays.
-            Ok(ClientFrame::Hello { .. }) => {}
-            Err(error) => match serde_json::from_str(&line) {
-                Ok(UnreadFrame::Execute { id }) => {
-                    tracing::debug!(%error, id, "answered a command that does not parse");
-                    return Some(Request::UnknownCommand { id });
-                }
-                Err(_) => tracing::debug!(%error, "skipped a frame that does not parse"),
-            },
-        }
-    }
+/// Runs the command of an `execute` frame.
+async fn run(
+    service: &ServiceHandle,
+    command: serde_json::Value,
+) -> Result<Response, CommandError> {
+    // Why it does not parse stays out of the log: the reason can quote the
+    // command, which may hold a prompt.
+    let command = Command::deserialize(command).map_err(|_| CommandError::UnreadableCommand)?;
+    service.execute(command).await
 }
 
 /// The next frame that parses; `None` once the connection is closed.

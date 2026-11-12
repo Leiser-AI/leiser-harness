@@ -196,8 +196,8 @@ function describe(error: CommandError): string {
       return `Could not access ${error.file}: ${error.reason}`;
     case "service_stopped":
       return "The harness service has stopped.";
-    case "unknown_command":
-      return "The harness service is older than the app and does not know this command yet.";
+    case "unreadable_command":
+      return "The harness service could not read this command. It may be older than the app.";
     case "no_usage_limit":
       return "The chat's last turn did not stop at a usage limit.";
     case "unknown_subscription":

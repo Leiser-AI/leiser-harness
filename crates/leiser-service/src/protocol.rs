@@ -1439,8 +1439,8 @@ pub enum CommandError {
     /// The harness service could not read the command, for example
     /// because the command is newer than the service. Only the local
     /// interface answers with it.
-    #[error("the harness service does not know this command")]
-    UnknownCommand,
+    #[error("the harness service could not read the command")]
+    UnreadableCommand,
 }
 
 /// Something that happened in the harness service.
