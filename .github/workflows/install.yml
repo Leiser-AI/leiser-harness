@@ -10,13 +10,26 @@ on:
       - install.ps1
       - .github/workflows/install.yml
   release:
-    types: [published, released]
+    types: [published]
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
+  lint:
+    name: lint scripts
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - run: shellcheck install.sh
+      - name: PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          Install-Module PSScriptAnalyzer -Force -Scope CurrentUser
+          Invoke-ScriptAnalyzer -Path install.ps1 -Severity Warning, Error -EnableExit
+
   install:
     name: install (${{ matrix.os }})
     strategy:

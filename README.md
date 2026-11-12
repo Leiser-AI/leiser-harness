@@ -64,7 +64,8 @@ Windows, in PowerShell:
 irm https://raw.githubusercontent.com/Leiser-AI/leiser-harness/development/install.ps1 | iex
 ```
 
-It downloads the newest version, installs it and starts it. Unlike a
+It downloads the newest version, installs it and starts it (on Linux, start
+it from your app menu). Unlike a
 download in the browser, macOS and Windows then do not warn about an app
 without a paid certificate. Run it again to update; the app also updates
 itself. Read the scripts first if you like:

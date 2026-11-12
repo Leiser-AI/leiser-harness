@@ -20,11 +20,15 @@ say() { printf '%s\n' "$*"; }
 fail() { printf 'leiser-harness: %s\n' "$*" >&2; exit 1; }
 
 work=$(mktemp -d)
+# apt reads the package as its own user.
+chmod 755 "$work"
 cleanup() {
-  if [ -n "${volume:-}" ]; then hdiutil detach -quiet "$volume" || true; fi
+  # Never delete into a disk image that is still mounted.
+  if [ -n "${volume:-}" ] && ! hdiutil detach -quiet -force "$volume"; then return; fi
   rm -rf "$work"
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT TERM
 
 fetch() {
   say "Downloading $1 ..."
@@ -39,8 +43,8 @@ install_macos() {
     fail "could not open the disk image"
   # A running app would keep its old files; the harness service keeps
   # running and takes the new version once no turn runs.
-  if [ -z "${LEISER_INSTALL_DIR:-}" ]; then
-    osascript -e 'quit app "leiser-harness"' 2>/dev/null || true
+  if [ -z "${LEISER_INSTALL_DIR:-}" ] && pgrep -x leiser-desktop >/dev/null; then
+    osascript -e 'quit app id "ai.leiser.harness"' 2>/dev/null || true
   fi
   mkdir -p "$target"
   rm -rf "${target:?}/$APP"
@@ -53,9 +57,12 @@ install_linux() {
   [ "$(uname -m)" = x86_64 ] || fail "the Linux packages are for x86_64 only, not $(uname -m)"
   if command -v apt-get >/dev/null 2>&1; then
     fetch leiser-harness-linux.deb
+    sudo apt-get update
     sudo apt-get install -y "$work/leiser-harness-linux.deb"
   elif command -v dnf >/dev/null 2>&1; then
-    # Betas come without an .rpm; the download fails until a stable release.
+    # Betas come without an .rpm (RPM versions cannot hold their `-`).
+    curl -fsIL -o /dev/null "$DOWNLOAD/leiser-harness-linux.rpm" ||
+      fail "there is no .rpm yet: it comes with the first stable release. Until then, use a Debian- or Ubuntu-based system."
     fetch leiser-harness-linux.rpm
     sudo dnf install -y "$work/leiser-harness-linux.rpm"
   else
