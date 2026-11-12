@@ -15,6 +15,7 @@ use leiser_service::{
 };
 use leiser_testkit::{
     DEFAULT_BRANCH, FAKE_GIT_HOST_MERGED_FILE, Script, Step, TestRepo, TestService, collect_turn,
+    next_event,
 };
 use tokio::sync::broadcast;
 
@@ -292,7 +293,9 @@ async fn a_pull_request_pushes_the_branch_and_opens_it_into_the_base_branch_as_t
         read_chat(&bound.service, bound.chat).await?.pull_request,
         Some(pull_request.clone())
     );
-    let event = tokio::time::timeout(Duration::from_secs(5), events.recv()).await??;
+    // Other events, such as a repository's wayfinder maps being read, may
+    // come first; the chat's own is the one meant.
+    let event = next_event(&mut events, bound.chat).await?;
     assert_eq!(
         event,
         Event::PullRequestChanged {
