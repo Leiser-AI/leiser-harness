@@ -424,6 +424,23 @@ label {
   color: var(--color-accent);
 }
 
+/* ---- Hero logo: the icon tile above an empty view's title ---- */
+
+.hero-logo {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  border: 1.5px solid var(--color-border-strong);
+  border-radius: var(--radius-xl);
+  color: var(--color-text-muted);
+}
+
+.hero-logo .icon {
+  width: 20px;
+  height: 20px;
+}
+
 /* ---- Callouts: a notice above or inside a view ---- */
 
 .callout,

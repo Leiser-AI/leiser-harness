@@ -50,6 +50,7 @@ import { icon, type IconName } from "./icons";
 import * as menu from "./menu";
 import { menuButton, type MenuButtonOptions, type MenuSection } from "./menu";
 import * as newChat from "./newChat";
+import { ON_MAC, shortcutLabel } from "./platform";
 import * as service from "./service";
 import * as terminal from "./terminal";
 import * as wayfinder from "./wayfinder";
@@ -74,9 +75,12 @@ type Selection =
   | { type: "extensions"; repository: RepositoryId };
 
 let selected: Selection = { type: "new_chat" };
-// What was selected when the CLI extensions panel opened; closing the
-// panel shows it again.
-let beforeExtensions: Selection = { type: "new_chat" };
+// What the main area showed when the CLI extensions panel opened; closing
+// the panel shows it again.
+let beforeExtensions: { selected: Selection; diffOpen: boolean } = {
+  selected: { type: "new_chat" },
+  diffOpen: false,
+};
 
 /** The selected chat, if a chat is selected. */
 function selectedChat(): ChatId | null {
@@ -279,6 +283,16 @@ async function readDefaults(repository: RepositoryId, updateWaiting: boolean): P
   }
 }
 
+/** What `read` answers about a chat, or `null` when the harness service no longer knows the chat. */
+async function ofKnownChat<T>(read: Promise<T>): Promise<T | null> {
+  try {
+    return await read;
+  } catch (error) {
+    if (error instanceof service.ServiceError && error.error.type === "unknown_chat") return null;
+    throw error;
+  }
+}
+
 async function refresh(): Promise<void> {
   try {
     await readAndRender();
@@ -301,8 +315,8 @@ async function readAndRender(): Promise<void> {
     service.listChats(),
     service.listSubscriptions(),
     service.listHostAccounts(),
-    chat === null ? Promise.resolve(null) : service.readChat(chat),
-    chat === null ? Promise.resolve(null) : service.listTodos(chat),
+    chat === null ? Promise.resolve(null) : ofKnownChat(service.readChat(chat)),
+    chat === null ? Promise.resolve(null) : ofKnownChat(service.listTodos(chat)),
     service.serviceUpdateWaiting(),
   ]);
   // A service older than the app has no repo-check; the rest still shows.
@@ -530,7 +544,7 @@ function leaveExtensions(): boolean {
     showError("Save or discard your changes to the CLI extension first.");
     return false;
   }
-  selected = beforeExtensions;
+  selected = beforeExtensions.selected;
   extensions.hide();
   transcript.hidden = false;
   return true;
@@ -538,7 +552,11 @@ function leaveExtensions(): boolean {
 
 /** Closes the CLI extensions panel and shows what was open before it. */
 async function closeExtensions(): Promise<void> {
-  if (leaveExtensions()) await refresh();
+  if (!leaveExtensions()) return;
+  // The chat comes back with its diff panel, if that was open; the
+  // refresh reads the panel again with whether the chat's turn runs.
+  if (selected.type === "chat" && beforeExtensions.diffOpen) await diffPanel.show(selected.chat, false);
+  await refresh();
 }
 
 function renderExtensionsTopBar(repository: RepositoryOverview | null): void {
@@ -578,6 +596,7 @@ function renderSidebar(
     const extensionsOpen = repository.repository === selectedRepository("extensions");
     showExtensions.classList.toggle("selected", extensionsOpen);
     showExtensions.setAttribute("aria-pressed", String(extensionsOpen));
+    showExtensions.dataset.extensionsOf = String(repository.repository);
     showExtensions.addEventListener("click", () =>
       act(async () => {
         // The button of the open panel closes it, like the other panels' buttons.
@@ -585,8 +604,9 @@ function renderSidebar(
           await closeExtensions();
           return;
         }
-        if (!leaveExtensions()) return;
-        beforeExtensions = selected;
+        // From another repository's panel, closing still leads back to what was open before that one.
+        if (selected.type !== "extensions") beforeExtensions = { selected, diffOpen: diffPanel.isOpen() };
+        else if (!leaveExtensions()) return;
         selected = { type: "extensions", repository: repository.repository };
         repoCheckView.hidden = true;
         transcript.hidden = true;
@@ -678,7 +698,15 @@ function renderSidebar(
     item.append(header, chatList);
     list.append(item);
   }
+  // The sidebar is built again on every refresh. A CLI extensions button
+  // keeps the keyboard, so the key that opened its panel closes it again.
+  const focused = document.activeElement;
+  const extensionsOf =
+    focused instanceof HTMLElement && repositoriesNav.contains(focused) ? focused.dataset.extensionsOf : undefined;
   repositoriesNav.replaceChildren(list);
+  if (extensionsOf !== undefined) {
+    repositoriesNav.querySelector<HTMLElement>(`[data-extensions-of="${extensionsOf}"]`)?.focus();
+  }
 }
 
 /** How close to the end, in pixels, counts as the transcript's bottom. */
@@ -720,7 +748,7 @@ function renderNewChat(
   transcriptChat = null;
   renderTopBar("New chat");
   const hero = el("li", "new-chat");
-  const logo = el("div", "new-chat-logo");
+  const logo = el("div", "hero-logo");
   logo.append(icon("terminal"));
   hero.append(logo);
   if (startsIn === null) {
@@ -2229,15 +2257,14 @@ byId("open-host-accounts").prepend(icon("cloud"));
 sendButton.append(icon("arrowUp"));
 interruptButton.append(icon("stop"));
 
-const onMac = navigator.platform.startsWith("Mac");
-byId("new-chat-shortcut").textContent = onMac ? "⌘N" : "Ctrl+N";
-byId("new-chat").setAttribute("aria-keyshortcuts", onMac ? "Meta+N" : "Control+N");
+byId("new-chat-shortcut").textContent = shortcutLabel("N");
+byId("new-chat").setAttribute("aria-keyshortcuts", ON_MAC ? "Meta+N" : "Control+N");
 
 byId("new-chat").addEventListener("click", () => act(() => openNewChat(null)));
 byId("add-repository").addEventListener("click", () => act(addRepository));
 
 document.addEventListener("keydown", (event) => {
-  const modifier = onMac ? event.metaKey : event.ctrlKey;
+  const modifier = ON_MAC ? event.metaKey : event.ctrlKey;
   if (!modifier || event.shiftKey || event.altKey || event.key.toLowerCase() !== "n") return;
   // A dialog is modal: its fields keep the keyboard.
   if (document.querySelector("dialog[open]") !== null) return;
