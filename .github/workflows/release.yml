@@ -1,0 +1,141 @@
+name: Release
+
+# Builds the installers on GitHub's runners. A version tag (`v*`) also puts
+# them on a draft GitHub release, which the user publishes. A pull request
+# that changes the packaging builds them without publishing anything.
+
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - crates/leiser-desktop/tauri.conf.json
+      - crates/leiser-desktop/tauri.release.conf.json
+      - crates/leiser-desktop/scripts/**
+      - crates/leiser-desktop/package.json
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  version:
+    name: version
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      # The installers take their version from tauri.conf.json; it must
+      # match the workspace's, and a tag's. MSI accepts only X.Y.Z.
+      - name: Check the version
+        run: |
+          cargo_version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+          tauri_version=$(jq -r .version crates/leiser-desktop/tauri.conf.json)
+          echo "Cargo.toml: $cargo_version, tauri.conf.json: $tauri_version"
+          [ "$cargo_version" = "$tauri_version" ] || { echo "::error::the versions differ"; exit 1; }
+          [[ "$tauri_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::the version is not X.Y.Z"; exit 1; }
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            [ "$GITHUB_REF_NAME" = "v$tauri_version" ] || { echo "::error::tag $GITHUB_REF_NAME does not match v$tauri_version"; exit 1; }
+          fi
+
+  build:
+    name: installers (${{ matrix.name }})
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS
+            os: macos-latest
+            target: universal-apple-darwin
+            rust-targets: aarch64-apple-darwin,x86_64-apple-darwin
+            installers: |
+              target/universal-apple-darwin/release/bundle/dmg/*.dmg
+          - name: Windows
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            rust-targets: x86_64-pc-windows-msvc
+            installers: |
+              target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
+              target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi
+          # The oldest supported Ubuntu, so the packages run on older glibc
+          # versions too. No AppImage: the harness service outlives the app,
+          # and an AppImage's files go away when the app quits.
+          - name: Linux
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            rust-targets: x86_64-unknown-linux-gnu
+            installers: |
+              target/x86_64-unknown-linux-gnu/release/bundle/deb/*.deb
+              target/x86_64-unknown-linux-gnu/release/bundle/rpm/*.rpm
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust-targets }}
+      - name: Install Tauri system libraries
+        if: runner.os == 'Linux'
+        timeout-minutes: 5
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev librsvg2-dev libxdo-dev
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+      - uses: actions/setup-node@v7
+        with:
+          node-version: lts/*
+          cache: npm
+          cache-dependency-path: crates/leiser-desktop/package-lock.json
+      - name: Build the installers
+        working-directory: crates/leiser-desktop
+        # bash also on Windows: PowerShell's npm shim can drop the `--`.
+        shell: bash
+        run: |
+          npm ci
+          npm run package -- --target ${{ matrix.target }}
+      - uses: actions/upload-artifact@v7
+        with:
+          name: installers-${{ matrix.name }}
+          path: ${{ matrix.installers }}
+          if-no-files-found: error
+
+  release:
+    name: draft release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: installers
+          merge-multiple: true
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        # The artifacts keep their bundle folders (dmg/, nsis/, msi/, deb/,
+        # rpm/); the release gets the files. A rerun on the same tag
+        # replaces the installers of its release.
+        run: |
+          mapfile -t files < <(find installers -type f)
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "${files[@]}" --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" "${files[@]}" \
+              --repo "$GITHUB_REPOSITORY" \
+              --draft --verify-tag --generate-notes \
+              --title "leiser-harness $GITHUB_REF_NAME"
+          fi
