@@ -1,0 +1,95 @@
+name: Update feed
+
+# Serves a published release to the installed apps (ADR 0009): copies its
+# update manifest `latest.json` to the branch `update-feed`, as `beta.json`
+# and, for a release that is not a pre-release, also as `stable.json`. A
+# file only ever moves to a newer version, so a stable hotfix does not hide
+# a newer beta, and serving an old tag again changes nothing. Installed
+# apps read https://raw.githubusercontent.com/<repo>/update-feed/<channel>.json.
+
+on:
+  release:
+    # `released` also covers a pre-release that later becomes a release.
+    types: [published, released]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Published release to serve, such as v0.2.0-beta.1
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: update-feed
+  cancel-in-progress: false
+
+jobs:
+  feed:
+    name: update feed
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+    steps:
+      - name: Read the release
+        id: release
+        run: |
+          prerelease=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isPrerelease,isDraft \
+            --jq 'if .isDraft then error("the release is a draft") else .isPrerelease end')
+          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern latest.json --dir manifest
+      - name: Check out the feed
+        run: |
+          git init -q feed
+          cd feed
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          if git fetch -q --depth 1 origin update-feed; then
+            git checkout -q -b update-feed FETCH_HEAD
+          else
+            git checkout -q --orphan update-feed
+          fi
+      - name: Publish the manifest
+        working-directory: feed
+        env:
+          PRERELEASE: ${{ steps.release.outputs.prerelease }}
+        run: |
+          channels=(beta)
+          [ "$PRERELEASE" = "false" ] && channels+=(stable)
+          for channel in "${channels[@]}"; do
+            node - "../manifest/latest.json" "$channel.json" <<'JS'
+          const fs = require("node:fs");
+          const [manifest, feed] = process.argv.slice(2);
+          // X.Y.Z or X.Y.Z-beta.N, compared as semver: a release is newer
+          // than its betas.
+          const key = (version) => {
+            const [, x, y, z, beta] = /^(\d+)\.(\d+)\.(\d+)(?:-beta\.(\d+))?$/.exec(version);
+            return [+x, +y, +z, beta === undefined ? Infinity : +beta];
+          };
+          const newer = (a, b) => {
+            const [ka, kb] = [key(a), key(b)];
+            const i = ka.findIndex((part, index) => part !== kb[index]);
+            return i >= 0 && ka[i] > kb[i];
+          };
+          const next = JSON.parse(fs.readFileSync(manifest, "utf8"));
+          const current = fs.existsSync(feed) ? JSON.parse(fs.readFileSync(feed, "utf8")) : null;
+          if (current === null || newer(next.version, current.version)) {
+            fs.copyFileSync(manifest, feed);
+            console.log(`${feed}: ${next.version}`);
+          } else {
+            console.log(`${feed} keeps ${current.version}, not older ${next.version}`);
+          }
+          JS
+          done
+          git add -A
+          if git diff --cached --quiet; then
+            echo "The feed has nothing to change for $TAG."
+            exit 0
+          fi
+          git -c user.name="github-actions[bot]" \
+              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              commit -q -m "Serve $TAG"
+          git push -q origin update-feed

@@ -120,6 +120,19 @@ body {
   color: var(--color-text-muted);
 }
 
+.sidebar-footer .app-update {
+  color: var(--color-accent);
+  font-weight: var(--weight-medium);
+}
+
+.sidebar-footer .app-update .icon {
+  color: inherit;
+}
+
+.sidebar-footer .app-update.failed {
+  color: var(--color-danger);
+}
+
 .sidebar-heading {
   display: flex;
   align-items: center;

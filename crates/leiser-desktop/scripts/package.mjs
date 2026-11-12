@@ -2,6 +2,11 @@
 // bundles it next to the app (`externalBin` in tauri.release.conf.json),
 // then the app itself.
 //
+// A beta version (`X.Y.Z-beta.N` in tauri.conf.json) reads the beta update
+// feed instead of the stable one. With TAURI_SIGNING_PRIVATE_KEY (and
+// TAURI_SIGNING_PRIVATE_KEY_PASSWORD) set, the build also signs the
+// installers the app updater installs; without, it builds no updates.
+//
 //   npm run package                                   # this machine's system
 //   npm run package -- --target universal-apple-darwin
 //
@@ -82,6 +87,46 @@ if (target === UNIVERSAL) {
   bundleService(target);
 }
 
-run("npm", ["exec", "--", "tauri", "build", "--config", "tauri.release.conf.json", "--target", target, ...rest], {
-  cwd: desktop,
-});
+/** tauri.release.conf.json plus what this build adds: the beta feed for a
+ * beta version, and update signatures when there is a key. */
+function packageConfig() {
+  const release = JSON.parse(fs.readFileSync(path.join(desktop, "tauri.release.conf.json"), "utf8"));
+  const app = JSON.parse(fs.readFileSync(path.join(desktop, "tauri.conf.json"), "utf8"));
+  const signs = Boolean(process.env.TAURI_SIGNING_PRIVATE_KEY);
+  release.bundle.createUpdaterArtifacts = signs;
+  if (app.version.includes("-beta.")) {
+    // tauri.conf.json names the stable feed; the beta feed is next to it.
+    const endpoints = app.plugins.updater.endpoints.map((url) => url.replace(/stable\.json$/, "beta.json"));
+    release.plugins = { updater: { endpoints } };
+    // RPM versions cannot hold the `-` of a beta: betas come as .deb only.
+    release.bundle.targets = release.bundle.targets.filter((bundle) => bundle !== "rpm");
+  }
+  const config = path.join(binaries, "tauri.package.conf.json");
+  fs.writeFileSync(config, JSON.stringify(release, null, 2));
+  return { config, signs };
+}
+
+/** The Linux packages of `target` the app updater installs; the bundler
+ * signs only the macOS and Windows ones. */
+function linuxPackages(target) {
+  const bundle = path.join(workspace, "target", target, "release", "bundle");
+  const inFolder = (folder, ending) =>
+    fs.existsSync(path.join(bundle, folder))
+      ? fs
+          .readdirSync(path.join(bundle, folder))
+          .filter((name) => name.endsWith(ending))
+          .map((name) => path.join(bundle, folder, name))
+      : [];
+  return [...inFolder("deb", ".deb"), ...inFolder("rpm", ".rpm")];
+}
+
+const { config, signs } = packageConfig();
+run("npm", ["exec", "--", "tauri", "build", "--config", config, "--target", target, ...rest], { cwd: desktop });
+
+if (signs) {
+  for (const linuxPackage of linuxPackages(target)) {
+    // A signature of an earlier build of the same version would not match.
+    fs.rmSync(`${linuxPackage}.sig`, { force: true });
+    run("npm", ["exec", "--", "tauri", "signer", "sign", linuxPackage], { cwd: desktop });
+  }
+}
