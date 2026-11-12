@@ -17,6 +17,26 @@
 //! command, response or event changes its shape. New commands, responses
 //! and events keep it: a client skips frames it cannot read, so an older
 //! desktop app keeps working with a newer service.
+//!
+//! # What a client may rely on
+//!
+//! After the hellos and for as long as the connection lasts, the service
+//! answers every `execute` frame whose id is a non-negative integer with
+//! exactly one `reply` for that id. When it cannot read the frame's
+//! command, the reply is the error [`CommandError::UnreadableCommand`]. A
+//! command newer than the service is such a command, and a desktop app is
+//! newer than the service it talks to for as long as a service update
+//! waits. So a client may send a command the service might not know yet,
+//! and do without its answer when it fails this way.
+//!
+//! The service skips every other line of text and keeps the connection: a
+//! frame of a type it does not know, an `execute` frame without such an
+//! id, a second hello, text that is not JSON. Nothing answers those. A
+//! line that is not UTF-8 ends the connection.
+//!
+//! A harness service built before `UnreadableCommand` existed skips an
+//! `execute` frame whose command it cannot read as well, so its client
+//! waits for that reply until the connection closes.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -61,6 +81,19 @@ struct Endpoint {
 enum ClientFrame {
     Hello { protocol: u32, token: String },
     Execute { id: u64, command: Command },
+}
+
+/// A [`ClientFrame`] after the hello, as the service reads it: the command
+/// stays unread, so that a frame whose command the service cannot read
+/// still tells which id to answer.
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum Request {
+    Execute {
+        id: u64,
+        #[serde(default)]
+        command: serde_json::Value,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -284,12 +317,12 @@ async fn read_requests(
     let mut running = JoinSet::new();
     loop {
         tokio::select! {
-            frame = next_frame::<ClientFrame>(&mut lines) => match frame {
-                Some(ClientFrame::Execute { id, command }) => {
+            request = next_frame::<Request>(&mut lines) => match request {
+                Some(Request::Execute { id, command }) => {
                     let service = service.clone();
                     let frames = frames.clone();
                     running.spawn(async move {
-                        let result = match service.execute(command).await {
+                        let result = match run(&service, command).await {
                             Ok(response) => Outcome::Ok(Box::new(response)),
                             Err(error) => Outcome::Err(error),
                         };
@@ -301,13 +334,22 @@ async fn read_requests(
                             .await;
                     });
                 }
-                // A second hello is a client error; the connection stays.
-                Some(ClientFrame::Hello { .. }) => {}
                 None => return,
             },
             Some(_) = running.join_next() => {}
         }
     }
+}
+
+/// Runs the command of an `execute` frame.
+async fn run(
+    service: &ServiceHandle,
+    command: serde_json::Value,
+) -> Result<Response, CommandError> {
+    // Why it does not parse stays out of the log: the reason can quote the
+    // command, which may hold a prompt.
+    let command = Command::deserialize(command).map_err(|_| CommandError::UnreadableCommand)?;
+    service.execute(command).await
 }
 
 /// The next frame that parses; `None` once the connection is closed.

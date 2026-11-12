@@ -265,8 +265,9 @@ type NewChatDefaults =
 
 async function readDefaults(repository: RepositoryId, updateWaiting: boolean): Promise<NewChatDefaults> {
   // While an update waits, the running service may be older than the app
-  // and not know chat defaults or a new chat's settings. It never answers
-  // a command it does not know, so the app does not ask.
+  // and not know chat defaults or a new chat's settings. A service built
+  // before it answered such a command with `unreadable_command` never
+  // answers it, so the app does not ask.
   if (updateWaiting) return { type: "service_update_waiting" };
   try {
     return { type: "read", defaults: await service.readChatDefaults(repository) };
