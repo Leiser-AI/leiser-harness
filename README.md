@@ -4,8 +4,11 @@ A desktop app that runs coding agents in chats: Claude Code and Codex, on
 the logins and subscriptions you already have, each chat in its own git
 worktree. Written in Rust (Tauri) for macOS, Windows and Linux.
 
-**[⬇ Download for macOS, Windows or Linux](https://github.com/Leiser-AI/leiser-harness/releases)**
-· [How to install](#install)
+**Download the newest version:**
+[⬇ macOS](https://github.com/Leiser-AI/leiser-harness/releases/latest/download/leiser-harness-macos.dmg) ·
+[⬇ Windows](https://github.com/Leiser-AI/leiser-harness/releases/latest/download/leiser-harness-windows-setup.exe) ·
+[⬇ Linux (.deb)](https://github.com/Leiser-AI/leiser-harness/releases/latest/download/leiser-harness-linux.deb) ·
+[How to install](#install)
 
 > **Source-available, not open source.** Free for private, noncommercial
 > use under the [PolyForm Noncommercial License 1.0.0](LICENSE.md).
@@ -35,23 +38,25 @@ worktree. Written in Rust (Tauri) for macOS, Windows and Linux.
 
 ## Install
 
-Download the installer for your system from the newest entry on the
-[releases page](https://github.com/Leiser-AI/leiser-harness/releases)
-(under **Assets**). While there is only a beta, it is marked
-"Pre-release":
+Click the download for your system; it always gets the newest version:
 
-| System                          | File                                   |
-| ------------------------------- | -------------------------------------- |
-| macOS (Apple silicon, Intel)    | `leiser-harness_<version>_universal.dmg` |
-| Windows 10/11 (x64)             | `leiser-harness_<version>_x64-setup.exe` |
-| Linux (x64)                     | `.deb`, or `.rpm` (not for betas)      |
+| System                        | Download                                                          |
+| ----------------------------- | ----------------------------------------------------------------- |
+| macOS (Apple silicon, Intel)  | [leiser-harness-macos.dmg](https://github.com/Leiser-AI/leiser-harness/releases/latest/download/leiser-harness-macos.dmg)            |
+| Windows 10/11 (x64)           | [leiser-harness-windows-setup.exe](https://github.com/Leiser-AI/leiser-harness/releases/latest/download/leiser-harness-windows-setup.exe) |
+| Linux (x64): Debian, Ubuntu   | [leiser-harness-linux.deb](https://github.com/Leiser-AI/leiser-harness/releases/latest/download/leiser-harness-linux.deb)            |
+| Linux (x64): Fedora           | [leiser-harness-linux.rpm](https://github.com/Leiser-AI/leiser-harness/releases/latest/download/leiser-harness-linux.rpm) (stable releases only) |
+
+Older versions and release notes are on the
+[releases page](https://github.com/Leiser-AI/leiser-harness/releases).
 
 The installers are not signed with a paid certificate yet, so the system
 warns on the first start.
 
 ### macOS
 
-1. Open the `.dmg` and drag **leiser-harness** into **Applications**.
+1. Open `leiser-harness-macos.dmg` and drag **leiser-harness** into
+   **Applications**.
 2. Open it. macOS blocks it the first time: open **System Settings →
    Privacy & Security** and click **Open Anyway**. Or run once:
 
@@ -61,7 +66,7 @@ warns on the first start.
 
 ### Windows
 
-1. Run `leiser-harness_<version>_x64-setup.exe`.
+1. Run `leiser-harness-windows-setup.exe`.
 2. If SmartScreen shows "Windows protected your PC", click **More info →
    Run anyway**. The setup installs Microsoft Edge WebView2 if it is
    missing.
@@ -70,9 +75,9 @@ warns on the first start.
 
 ```bash
 # Debian, Ubuntu
-sudo apt install ./leiser-harness_<version>_amd64.deb
+sudo apt install ./leiser-harness-linux.deb
 # Fedora
-sudo dnf install ./leiser-harness-<version>-1.x86_64.rpm
+sudo dnf install ./leiser-harness-linux.rpm
 ```
 
 Both install WebKitGTK 4.1, which the app needs. There is no AppImage: the
@@ -174,8 +179,11 @@ A release is a merge of `development` into `main` (see
 on `main` with `v<version>` runs the `Release` workflow: it builds the
 installers on GitHub's macOS, Windows and Linux runners and attaches them to
 a draft GitHub release, which a maintainer then publishes. A beta comes from
-`development` instead, with a version `X.Y.Z-beta.N`, and becomes a
-pre-release. The version is set in both `Cargo.toml` and
+`development` instead, with a version `X.Y.Z-beta.N`; it is a pre-release
+once a stable release exists, and until then the latest release, so the
+download links above (`releases/latest/download/<fixed name>`) find it.
+Every release also carries its installers under those fixed names. The
+version is set in both `Cargo.toml` and
 `crates/leiser-desktop/tauri.conf.json`; the workflow checks that both and
 the tag agree. Publishing the release serves it to installed apps through
 the update feed ([ADR 0009](docs/adr/0009-app-updates-from-a-feed-per-channel.md)).

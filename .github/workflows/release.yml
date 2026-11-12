@@ -161,6 +161,24 @@ jobs:
           tag="v$(jq -r .version crates/leiser-desktop/tauri.conf.json)"
           node crates/leiser-desktop/scripts/update-manifest.mjs \
             installers "$tag" "$GITHUB_REPOSITORY" installers/latest.json
+      # The README links to these names under releases/latest/download/,
+      # which stay the same from version to version. After the manifest,
+      # which links the versioned names.
+      - name: Add copies under fixed names
+        run: |
+          mkdir installers/download
+          # The first of the given files that exists, under $name.
+          copy() {
+            local file
+            for file in "$@"; do
+              if [ -e "$file" ]; then cp "$file" "installers/download/$name"; return 0; fi
+            done
+          }
+          name=leiser-harness-macos.dmg copy installers/dmg/*.dmg
+          name=leiser-harness-windows-setup.exe copy installers/*-setup.exe installers/nsis/*-setup.exe
+          name=leiser-harness-linux.deb copy installers/deb/*.deb
+          name=leiser-harness-linux.rpm copy installers/rpm/*.rpm
+          ls installers/download
       - uses: actions/upload-artifact@v7
         with:
           name: release
@@ -188,8 +206,13 @@ jobs:
         # replaces the installers of its release.
         run: |
           mapfile -t files < <(find installers -type f)
+          # A beta is a pre-release once a stable release exists; until then
+          # it is the latest release, so the README's download links
+          # (releases/latest/download/...) find it.
+          stable=$(gh release list --repo "$GITHUB_REPOSITORY" --exclude-drafts --exclude-pre-releases \
+            --json tagName --jq '[.[] | select(.tagName | contains("-beta.") | not)] | length')
           prerelease=()
-          [[ "$GITHUB_REF_NAME" == *-beta.* ]] && prerelease=(--prerelease)
+          [[ "$GITHUB_REF_NAME" == *-beta.* && "$stable" -gt 0 ]] && prerelease=(--prerelease)
           if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
             gh release upload "$GITHUB_REF_NAME" "${files[@]}" --repo "$GITHUB_REPOSITORY" --clobber
           else
