@@ -74,6 +74,9 @@ type Selection =
   | { type: "extensions"; repository: RepositoryId };
 
 let selected: Selection = { type: "new_chat" };
+// What was selected when the CLI extensions panel opened; closing the
+// panel shows it again.
+let beforeExtensions: Selection = { type: "new_chat" };
 
 /** The selected chat, if a chat is selected. */
 function selectedChat(): ChatId | null {
@@ -155,7 +158,7 @@ const todosPanel = byId("todos");
 const todoList = byId("todo-list");
 const todoForm = byId<HTMLFormElement>("todo-form");
 const todoInput = byId<HTMLInputElement>("todo-text");
-extensions.mount(byId("extensions"));
+extensions.mount(byId("extensions"), clearError);
 diffPanel.mount(byId("diff"), showError);
 
 function byId<T extends HTMLElement = HTMLElement>(id: string): T {
@@ -517,21 +520,32 @@ function renderServiceNotice(updateWaiting: boolean): void {
   serviceNotice.hidden = text === null;
 }
 
-/** Leaves the CLI extensions panel; refuses while it has unsaved changes. */
+/**
+ * Leaves the CLI extensions panel for what was selected before it opened;
+ * refuses while it has unsaved changes.
+ */
 function leaveExtensions(): boolean {
   if (selected.type !== "extensions") return true;
   if (extensions.hasUnsavedChanges()) {
     showError("Save or discard your changes to the CLI extension first.");
     return false;
   }
-  selected = { type: "new_chat" };
+  selected = beforeExtensions;
   extensions.hide();
   transcript.hidden = false;
   return true;
 }
 
+/** Closes the CLI extensions panel and shows what was open before it. */
+async function closeExtensions(): Promise<void> {
+  if (leaveExtensions()) await refresh();
+}
+
 function renderExtensionsTopBar(repository: RepositoryOverview | null): void {
-  renderTopBar("CLI extensions", [labelled("Repository", repository?.name ?? "unknown")]);
+  const close = topBarAction("close", "Close");
+  close.title = "Close the CLI extensions panel";
+  close.addEventListener("click", () => act(closeExtensions));
+  renderTopBar("CLI extensions", [labelled("Repository", repository?.name ?? "unknown")], [close]);
 }
 
 function renderSidebar(
@@ -561,13 +575,18 @@ function renderSidebar(
     name.addEventListener("click", () => act(() => openNewChat(repository.repository)));
     const showExtensions = iconButton("blocks", `CLI extensions of ${repository.name}`, "secondary");
     showExtensions.title = `Skills, MCP servers, hooks and instruction files the agent CLIs load from ${repository.name}`;
-    if (repository.repository === selectedRepository("extensions")) {
-      showExtensions.classList.add("selected");
-      showExtensions.setAttribute("aria-current", "true");
-    }
+    const extensionsOpen = repository.repository === selectedRepository("extensions");
+    showExtensions.classList.toggle("selected", extensionsOpen);
+    showExtensions.setAttribute("aria-pressed", String(extensionsOpen));
     showExtensions.addEventListener("click", () =>
       act(async () => {
-        if (selectedRepository("extensions") !== repository.repository && !leaveExtensions()) return;
+        // The button of the open panel closes it, like the other panels' buttons.
+        if (selectedRepository("extensions") === repository.repository) {
+          await closeExtensions();
+          return;
+        }
+        if (!leaveExtensions()) return;
+        beforeExtensions = selected;
         selected = { type: "extensions", repository: repository.repository };
         repoCheckView.hidden = true;
         transcript.hidden = true;

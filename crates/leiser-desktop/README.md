@@ -103,6 +103,16 @@ a store", "type": "research"}, {"number": 3, "title": "Agree on the API",
 "type": "grilling", "blocked_by": [2], "assignees": ["someone"], "open":
 true}]}]}`.
 
+A repository's CLI extensions button in the sidebar opens the CLI
+extensions panel instead of the chat; the same button, or Close in the top
+bar, closes it and shows what was open before. The panel lists what each
+agent CLI loads from the repository (instruction files, skills, MCP servers,
+hooks), one agent CLI at a time, and opens an extension's file as text.
+Saving writes the agent CLI's own file; nothing is converted between agent
+CLIs. A file an agent CLI could not read shows as a warning and still opens.
+While the open file has unsaved changes the panel stays open. Where the
+agent CLIs look is in `docs/cli-extension-locations.md`.
+
 The top bar's Terminal button opens a terminal panel on the right with a
 shell in the chat's checkout (its worktree, or the main checkout): the login
 shell on macOS, PowerShell on Windows. Each chat keeps its own shell while
