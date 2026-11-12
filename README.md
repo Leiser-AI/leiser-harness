@@ -212,16 +212,16 @@ in [`GLOSSARY.md`](GLOSSARY.md).
 A release is a merge of `development` into `main` (see
 [`docs/agents/workflow.md`](docs/agents/workflow.md)). Tagging that commit
 on `main` with `v<version>` runs the `Release` workflow: it builds the
-installers on GitHub's macOS, Windows and Linux runners and attaches them to
-a draft GitHub release, which a maintainer then publishes. A beta comes from
+installers on GitHub's macOS, Windows and Linux runners, attaches them to
+a GitHub release and publishes it. A beta comes from
 `development` instead, with a version `X.Y.Z-beta.N`; it is a pre-release
 once a stable release exists, and until then the latest release, so the
 download links above (`releases/latest/download/<fixed name>`) find it.
 Every release also carries its installers under those fixed names. The
 version is set in both `Cargo.toml` and
 `crates/leiser-desktop/tauri.conf.json`; the workflow checks that both and
-the tag agree. Publishing the release serves it to installed apps through
-the update feed ([ADR 0009](docs/adr/0009-app-updates-from-a-feed-per-channel.md)).
+the tag agree. The workflow then serves the release to installed apps
+through the update feed ([ADR 0009](docs/adr/0009-app-updates-from-a-feed-per-channel.md)).
 The updates are signed with the maintainer's key, stored as the secrets
 `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`. A
 pull request that changes the packaging builds the installers without
