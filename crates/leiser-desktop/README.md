@@ -165,8 +165,10 @@ LEISER_FAKE_AGENT_CLI="$PWD/../../target/debug/fake-agent-cli" npm run tauri dev
 in release mode, copies it to `binaries/` under the name Tauri expects
 (`leiser-harness-service-<target>`), then runs `tauri build` with
 `tauri.release.conf.json`. That file adds the service as `externalBin`, so
-every installer puts it next to the app, where the app looks for it, and
-signs the macOS app ad hoc. It is a separate file because `tauri-build`
+every installer puts it next to the app, where the app looks for it; it
+also limits the installers to `.app`/`.dmg`, NSIS/MSI and `.deb`/`.rpm` (no
+AppImage, whose files are gone once the app quits, while the service runs
+on) and signs the macOS app ad hoc. It is a separate file because `tauri-build`
 requires an `externalBin` to exist on every build, also `cargo test`.
 `--target universal-apple-darwin` builds the service for both Mac
 architectures and joins them with `lipo`. The `Release` workflow runs the

@@ -22,7 +22,7 @@ worktree. Written in Rust (Tauri) for macOS, Windows and Linux.
   full access. In every mode the harness refuses a push to `main` or
   `development`, a force push and commits with AI attribution.
 - **Pull requests and Auto-fix.** A chat opens its pull request through the
-  repository's GitHub account. Failing checks, conflicts and review
+  repository's host account (GitHub). Failing checks, conflicts and review
   comments wake the chat's agent to fix them; merging stays with you.
 - **CLI extensions and wayfinder maps.** See and edit what each agent CLI
   loads from a repository (instructions, skills, MCP servers, hooks), and
@@ -39,7 +39,7 @@ Download the installer for your system from the
 | ------------------------------- | -------------------------------------- |
 | macOS (Apple silicon, Intel)    | `leiser-harness_<version>_universal.dmg` |
 | Windows 10/11 (x64)             | `leiser-harness_<version>_x64-setup.exe` or `.msi` |
-| Linux (x64)                     | `.AppImage`, `.deb` or `.rpm`          |
+| Linux (x64)                     | `.deb` or `.rpm`                       |
 
 The installers are not signed with a paid certificate yet, so the system
 warns on the first start.
@@ -56,7 +56,8 @@ warns on the first start.
 
 ### Windows
 
-1. Run `leiser-harness_<version>_x64-setup.exe`.
+1. Run `leiser-harness_<version>_x64-setup.exe` (or, for managed
+   installs, `leiser-harness_<version>_x64_en-US.msi`).
 2. If SmartScreen shows "Windows protected your PC", click **More info →
    Run anyway**. The setup installs Microsoft Edge WebView2 if it is
    missing.
@@ -66,14 +67,13 @@ warns on the first start.
 ```bash
 # Debian, Ubuntu
 sudo apt install ./leiser-harness_<version>_amd64.deb
-# Fedora, openSUSE
+# Fedora
 sudo dnf install ./leiser-harness-<version>-1.x86_64.rpm
-# Any distribution
-chmod +x leiser-harness_<version>_amd64.AppImage
-./leiser-harness_<version>_amd64.AppImage
 ```
 
-The app needs WebKitGTK 4.1; the `.deb` and `.rpm` install it.
+Both install WebKitGTK 4.1, which the app needs. There is no AppImage: the
+harness service keeps running after the app quits, and an AppImage's files
+are gone by then.
 
 ### What else you need
 
@@ -101,11 +101,12 @@ interrupted.
   running program.
 - **Stop the service:** `pkill -f leiser-harness-service` (macOS, Linux) or
   `taskkill /IM leiser-harness-service.exe /F` (Windows).
-- **Uninstall:** stop the service, remove the app, and delete its data
-  directory if you want your chats gone too:
-  `~/Library/Application Support/ai.leiser.harness` (macOS),
-  `%APPDATA%\ai.leiser.harness` (Windows), `~/.local/share/ai.leiser.harness`
-  (Linux).
+- **Uninstall:** stop the service and remove the app. To remove your chats
+  too, delete the data directory
+  (`~/Library/Application Support/ai.leiser.harness` on macOS,
+  `%APPDATA%\ai.leiser.harness` on Windows,
+  `~/.local/share/ai.leiser.harness` on Linux) and the chats' worktrees in
+  `~/.leiser/worktrees`.
 
 ## Build from source
 
@@ -114,7 +115,7 @@ picked up), [Node.js](https://nodejs.org) LTS and, on Linux, the WebKitGTK
 libraries:
 
 ```bash
-sudo apt install libwebkit2gtk-4.1-dev librsvg2-dev libxdo-dev patchelf
+sudo apt install libwebkit2gtk-4.1-dev librsvg2-dev libxdo-dev
 ```
 
 Then build the installers for your system:
@@ -161,13 +162,15 @@ in [`GLOSSARY.md`](GLOSSARY.md).
 
 ### Releases
 
-A version tag `v*` runs the `Release` workflow: it builds the installers on
-GitHub's macOS, Windows and Linux runners and attaches them to a draft
-GitHub release, which a maintainer then publishes. Bump `version` in
-`Cargo.toml`, `crates/leiser-desktop/tauri.conf.json` and
-`crates/leiser-desktop/package.json` together before tagging. A pull
-request that changes the packaging builds the installers without
-publishing them.
+A release is a merge of `development` into `main` (see
+[`docs/agents/workflow.md`](docs/agents/workflow.md)). Tagging that commit
+on `main` with `v<version>` runs the `Release` workflow: it builds the
+installers on GitHub's macOS, Windows and Linux runners and attaches them to
+a draft GitHub release, which a maintainer then publishes. The version is
+`X.Y.Z` (MSI accepts nothing else) and is set in both `Cargo.toml` and
+`crates/leiser-desktop/tauri.conf.json`; the workflow checks that both and
+the tag agree. A pull request that changes the packaging builds the
+installers without publishing them.
 
 ## Working with coding agents
 
