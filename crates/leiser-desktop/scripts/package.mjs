@@ -98,6 +98,8 @@ function packageConfig() {
     // tauri.conf.json names the stable feed; the beta feed is next to it.
     const endpoints = app.plugins.updater.endpoints.map((url) => url.replace(/stable\.json$/, "beta.json"));
     release.plugins = { updater: { endpoints } };
+    // RPM versions cannot hold the `-` of a beta: betas come as .deb only.
+    release.bundle.targets = release.bundle.targets.filter((bundle) => bundle !== "rpm");
   }
   const config = path.join(binaries, "tauri.package.conf.json");
   fs.writeFileSync(config, JSON.stringify(release, null, 2));

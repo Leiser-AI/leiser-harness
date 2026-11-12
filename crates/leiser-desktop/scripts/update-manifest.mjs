@@ -15,9 +15,13 @@ if (!out) {
 
 const files = fs.readdirSync(dir, { recursive: true }).map((file) => path.join(dir, String(file)));
 
-/** The one installer whose name ends in `ending`, with its signature. */
-function installer(ending) {
+const beta = tag.includes("-beta.");
+
+/** The one installer whose name ends in `ending`, with its signature;
+ * `null` for one a beta does not have when `optionalForBeta`. */
+function installer(ending, optionalForBeta = false) {
   const found = files.filter((file) => file.endsWith(ending));
+  if (found.length === 0 && beta && optionalForBeta) return null;
   if (found.length !== 1) {
     console.error(`expected one installer ending in ${ending}, found ${found.length}`);
     process.exit(1);
@@ -45,8 +49,10 @@ const manifest = {
     "darwin-x86_64": mac,
     "windows-x86_64-nsis": installer("-setup.exe"),
     "linux-x86_64-deb": installer(".deb"),
-    "linux-x86_64-rpm": installer(".rpm"),
   },
 };
+// RPM versions cannot hold the `-` of a beta, so betas have no .rpm.
+const rpm = installer(".rpm", true);
+if (rpm !== null) manifest.platforms["linux-x86_64-rpm"] = rpm;
 fs.writeFileSync(out, `${JSON.stringify(manifest, null, 2)}\n`);
 console.log(`wrote ${out} for ${tag}`);

@@ -134,7 +134,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          sparse-checkout: crates/leiser-desktop/scripts
+          sparse-checkout: |
+            crates/leiser-desktop/scripts
+            crates/leiser-desktop/tauri.conf.json
+          sparse-checkout-cone-mode: false
       - uses: actions/download-artifact@v8
         with:
           pattern: installers-*
@@ -153,11 +156,11 @@ jobs:
       # Fails when an update or its signature is missing, so a release never
       # goes out without updates. Runs on pull requests too, as a check.
       - name: Write the update manifest
-        env:
-          TAG: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || 'v0.0.0-check' }}
         run: |
+          # A tag is the version (checked above); a pull request has none.
+          tag="v$(jq -r .version crates/leiser-desktop/tauri.conf.json)"
           node crates/leiser-desktop/scripts/update-manifest.mjs \
-            installers "$TAG" "$GITHUB_REPOSITORY" installers/latest.json
+            installers "$tag" "$GITHUB_REPOSITORY" installers/latest.json
       - uses: actions/upload-artifact@v7
         with:
           name: release

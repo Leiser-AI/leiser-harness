@@ -44,7 +44,7 @@ Download the installer for your system from the newest entry on the
 | ------------------------------- | -------------------------------------- |
 | macOS (Apple silicon, Intel)    | `leiser-harness_<version>_universal.dmg` |
 | Windows 10/11 (x64)             | `leiser-harness_<version>_x64-setup.exe` |
-| Linux (x64)                     | `.deb` or `.rpm`                       |
+| Linux (x64)                     | `.deb`, or `.rpm` (not for betas)      |
 
 The installers are not signed with a paid certificate yet, so the system
 warns on the first start.
