@@ -4,6 +4,9 @@ A desktop app that runs coding agents in chats: Claude Code and Codex, on
 the logins and subscriptions you already have, each chat in its own git
 worktree. Written in Rust (Tauri) for macOS, Windows and Linux.
 
+**[⬇ Download for macOS, Windows or Linux](https://github.com/Leiser-AI/leiser-harness/releases)**
+· [How to install](#install)
+
 > **Source-available, not open source.** Free for private, noncommercial
 > use under the [PolyForm Noncommercial License 1.0.0](LICENSE.md).
 > Commercial use requires a separate license. See
@@ -32,8 +35,10 @@ worktree. Written in Rust (Tauri) for macOS, Windows and Linux.
 
 ## Install
 
-Download the installer for your system from the
-[latest release](https://github.com/Leiser-AI/leiser-harness/releases/latest):
+Download the installer for your system from the newest entry on the
+[releases page](https://github.com/Leiser-AI/leiser-harness/releases)
+(under **Assets**). While there is only a beta, it is marked
+"Pre-release":
 
 | System                          | File                                   |
 | ------------------------------- | -------------------------------------- |
