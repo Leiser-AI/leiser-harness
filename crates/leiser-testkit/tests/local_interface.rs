@@ -11,7 +11,8 @@ use leiser_service::{
     Event, LOCAL_INTERFACE_VERSION, LocalClient, Notification, Response,
 };
 use leiser_testkit::{Gate, Script, Step, TestRepo, TestService};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::mpsc;
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
@@ -117,6 +118,65 @@ async fn a_failed_command_arrives_as_its_error() -> TestResult {
     let result = app.execute(Command::InterruptTurn { chat }).await;
 
     assert_eq!(result, Err(CommandError::NoTurnRunning { chat }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_command_the_service_does_not_know_arrives_as_an_error() -> TestResult {
+    let service = start_service(&Script::new())?;
+    let _interface = leiser_service::serve(service.connect(), service.data_dir()).await?;
+    let mut app = RawClient::connect(service.data_dir()).await?;
+
+    // What a newer desktop app sends to a service that waits for its update.
+    app.send(&serde_json::json!({
+        "type": "execute",
+        "id": 7,
+        "command": { "type": "a_command_of_a_newer_app", "chat": 1 },
+    }))
+    .await?;
+
+    assert_eq!(
+        app.next_frame().await?,
+        serde_json::json!({
+            "type": "reply",
+            "id": 7,
+            "result": { "err": { "type": "unknown_command" } },
+        })
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn frames_that_ask_for_no_reply_are_skipped() -> TestResult {
+    let service = start_service(&Script::new())?;
+    let _interface = leiser_service::serve(service.connect(), service.data_dir()).await?;
+    let mut app = RawClient::connect(service.data_dir()).await?;
+
+    app.send_line("not json").await?;
+    app.send(&serde_json::json!({ "type": "a_frame_of_a_newer_app", "id": 1 }))
+        .await?;
+    app.send(&serde_json::json!({
+        "type": "execute",
+        "command": { "type": "a_command_of_a_newer_app" },
+    }))
+    .await?;
+    app.send(&serde_json::json!({
+        "type": "execute",
+        "id": 2,
+        "command": { "type": "list_chats" },
+    }))
+    .await?;
+
+    // The first frame the service sends answers the last one: it skipped
+    // the others and kept the connection.
+    assert_eq!(
+        app.next_frame().await?,
+        serde_json::json!({
+            "type": "reply",
+            "id": 2,
+            "result": { "ok": { "type": "chats", "chats": [] } },
+        })
+    );
     Ok(())
 }
 
@@ -271,4 +331,54 @@ async fn raw_hello(port: u64, protocol: u32, token: &str) -> TestResult<Option<S
     let rest = tokio::time::timeout(TIMEOUT, lines.next_line()).await??;
     assert_eq!(rest, None, "the service kept the connection open");
     Ok(first)
+}
+
+/// A client that writes its own frames, as a desktop app of another
+/// version would.
+struct RawClient {
+    lines: Lines<BufReader<OwnedReadHalf>>,
+    write: OwnedWriteHalf,
+}
+
+impl RawClient {
+    /// Connects to the service on `data_dir` and exchanges hellos.
+    async fn connect(data_dir: &Path) -> TestResult<Self> {
+        let endpoint: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(data_dir.join(ENDPOINT_FILE))?)?;
+        let port = u16::try_from(endpoint["port"].as_u64().ok_or("no port")?)?;
+        let stream = tokio::net::TcpStream::connect(("127.0.0.1", port)).await?;
+        let (read, write) = stream.into_split();
+        let mut client = Self {
+            lines: BufReader::new(read).lines(),
+            write,
+        };
+        client
+            .send(&serde_json::json!({
+                "type": "hello",
+                "protocol": LOCAL_INTERFACE_VERSION,
+                "token": endpoint["token"],
+            }))
+            .await?;
+        let hello = client.next_frame().await?;
+        if hello["type"] != "hello" {
+            return Err(format!("expected a hello, got {hello}").into());
+        }
+        Ok(client)
+    }
+
+    async fn send(&mut self, frame: &serde_json::Value) -> TestResult {
+        self.send_line(&frame.to_string()).await
+    }
+
+    async fn send_line(&mut self, line: &str) -> TestResult {
+        Ok(self.write.write_all(format!("{line}\n").as_bytes()).await?)
+    }
+
+    /// The next frame the service sends.
+    async fn next_frame(&mut self) -> TestResult<serde_json::Value> {
+        let line = tokio::time::timeout(TIMEOUT, self.lines.next_line())
+            .await??
+            .ok_or("the service closed the connection")?;
+        Ok(serde_json::from_str(&line)?)
+    }
 }

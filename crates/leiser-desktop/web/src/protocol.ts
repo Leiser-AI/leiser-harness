@@ -250,7 +250,8 @@ export type CommandError =
   | { type: "invalid_cli_extension_file"; file: string; reason: string }
   | { type: "cli_extension_file_access"; file: string; reason: string }
   | { type: "no_usage_limit"; chat: ChatId }
-  | { type: "service_stopped" };
+  | { type: "service_stopped" }
+  | { type: "unknown_command" };
 
 /** A rule of `repo-check`, such as `D3`. */
 export type CheckId = string;

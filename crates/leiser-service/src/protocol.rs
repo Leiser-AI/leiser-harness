@@ -1436,6 +1436,11 @@ pub enum CommandError {
     NoUsageLimit { chat: ChatId },
     #[error("the harness service has stopped")]
     ServiceStopped,
+    /// The harness service could not read the command, for example
+    /// because the command is newer than the service. Only the local
+    /// interface answers with it.
+    #[error("the harness service does not know this command")]
+    UnknownCommand,
 }
 
 /// Something that happened in the harness service.
