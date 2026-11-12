@@ -20,14 +20,14 @@
   $download = "https://github.com/Leiser-AI/leiser-harness/releases/latest/download/leiser-harness-windows-setup.exe"
   $installer = Join-Path ([System.IO.Path]::GetTempPath()) "leiser-harness-windows-setup.exe"
 
-  Write-Host "Downloading $download ..."
+  Write-Output "Downloading $download ..."
   Invoke-WebRequest -Uri $download -OutFile $installer -UseBasicParsing
 
   # A running app would hold its files; the harness service keeps running and
   # takes the new version once no turn runs.
   Get-Process -Name "leiser-desktop" -ErrorAction SilentlyContinue | Stop-Process -Force
 
-  Write-Host "Installing ..."
+  Write-Output "Installing ..."
   $setup = Start-Process -FilePath $installer -ArgumentList "/S" -Wait -PassThru
   Remove-Item $installer -Force
   if ($setup.ExitCode -ne 0) {
@@ -38,7 +38,7 @@
   if (-not (Test-Path $app)) {
     throw "The installer finished, but $app is missing."
   }
-  Write-Host "Installed $app"
+  Write-Output "Installed $app"
   if ($env:LEISER_INSTALL_NO_OPEN -ne "1") {
     Start-Process -FilePath $app
   }

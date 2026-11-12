@@ -27,7 +27,9 @@ jobs:
       - name: PSScriptAnalyzer
         shell: pwsh
         run: |
-          Install-Module PSScriptAnalyzer -Force -Scope CurrentUser
+          if (-not (Get-Module -ListAvailable PSScriptAnalyzer)) {
+            Install-Module PSScriptAnalyzer -Force -Scope CurrentUser
+          }
           Invoke-ScriptAnalyzer -Path install.ps1 -Severity Warning, Error -EnableExit
 
   install:
