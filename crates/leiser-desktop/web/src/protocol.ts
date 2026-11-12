@@ -67,6 +67,7 @@ export type Command =
   | { type: "remove_worktree"; chat: ChatId }
   | { type: "run_repo_check"; repository: RepositoryId }
   | { type: "read_repo_check"; repository: RepositoryId }
+  | { type: "read_wayfinder_maps"; repository: RepositoryId }
   | { type: "read_service_status" }
   | { type: "list_todos"; chat: ChatId }
   | { type: "add_todo"; chat: ChatId; text: string }
@@ -177,6 +178,7 @@ export type Response =
   | { type: "continued_on_subscription" }
   | { type: "repo_check_started" }
   | { type: "repo_check"; check: RepoCheck }
+  | { type: "wayfinder_maps"; maps: WayfinderMaps }
   | { type: "service_status"; version: string; update_waiting: boolean }
   | { type: "todos"; todos: Todo[] }
   | { type: "todo_added"; todo: TodoId }
@@ -345,6 +347,45 @@ export interface PullRequest {
   state: PullRequestState;
 }
 
+/** A repository's open wayfinder maps, as the harness last read them from the git host. */
+export type WayfinderMaps =
+  | { type: "not_read" }
+  | { type: "unavailable"; reason: string }
+  /** Newest first. */
+  | { type: "read"; maps: WayfinderMap[] };
+
+export interface WayfinderMap {
+  number: number;
+  title: string;
+  url: string;
+  /** In map order: the first frontier ticket is the next to take. */
+  tickets: Ticket[];
+}
+
+export interface Ticket {
+  number: number;
+  title: string;
+  url: string;
+  /** From its `wayfinder:<type>` label; `null` without one. */
+  ticket_type: TicketType | null;
+  state: TicketState;
+  /** The tickets of the same map that block this one, open or closed. */
+  blocked_by: number[];
+}
+
+export type TicketType = "research" | "prototype" | "grilling" | "task";
+
+/** An issue on the git host, in the repository or in another one. */
+export type IssueRef =
+  | { type: "here"; number: number }
+  | { type: "elsewhere"; repository: string; number: number };
+
+export type TicketState =
+  | { type: "closed" }
+  | { type: "claimed"; assignees: string[] }
+  | { type: "blocked"; open_blockers: IssueRef[] }
+  | { type: "frontier" };
+
 /** Whether the harness watches the chat's open pull request and fixes it. */
 export type AutoFix = { type: "on" } | { type: "off" } | { type: "stopped"; reason: AutoFixStop };
 
@@ -483,6 +524,7 @@ export type ServiceEvent =
   | { type: "host_account_login_finished"; host_account: HostAccountId; outcome: LoginOutcome }
   | { type: "repo_check_started"; repository: RepositoryId }
   | { type: "repo_check_finished"; repository: RepositoryId }
+  | { type: "wayfinder_maps_changed"; repository: RepositoryId }
   | { type: "todos_changed"; chat: ChatId; todos: Todo[] }
   | { type: "checkpoint_restored"; chat: ChatId; turn: number; moment: CheckpointMoment }
   | { type: "pull_request_changed"; chat: ChatId; pull_request: PullRequest }

@@ -86,3 +86,21 @@ agent when a check fails, the branch conflicts with the base branch or a
 review comment comes in, then pushing the agent's fix. On by default, set
 per chat; merging stays with the developer.
 _Avoid_: autopilot, PR bot, watcher
+
+**Wayfinder map**:
+A plan for work too big for one chat, kept on the git host as an issue
+labelled `wayfinder:map` whose sub-issues are its tickets. The desktop app
+shows it as a graph from Start to Destination.
+_Avoid_: roadmap, plan, epic
+
+**Ticket**:
+One question or piece of work on a wayfinder map, with a type (research,
+prototype, grilling or task). It is closed, claimed (assigned to someone),
+blocked (by an open issue) or on the frontier.
+_Avoid_: card, node, step
+
+**Frontier**:
+The tickets of a wayfinder map that are open, unblocked and unclaimed: the
+ones that can be taken now.
+_Avoid_: backlog, next up, ready
+

@@ -230,7 +230,8 @@ fn start(
             .with_keychain(Arc::new(keychain.clone()))
             .with_codex_home(codex_home.path().to_path_buf())
             .with_git_host(Arc::new(git_host.clone()))
-            .with_pull_request_poll_interval(POLL_INTERVAL),
+            .with_pull_request_poll_interval(POLL_INTERVAL)
+            .with_wayfinder_poll_interval(POLL_INTERVAL),
         |config, (agent_cli, driver)| config.with_driver(*agent_cli, driver.clone()),
     );
     if let Some(driver) = &drivers.repo_check {

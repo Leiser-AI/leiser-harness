@@ -58,6 +58,7 @@ pub fn service_config(program: &ServiceProgram) -> Result<ServiceConfig, FakeAge
             .with_repo_check(Arc::new(fake_repo_check(fake)?))
             .with_git_host(Arc::new(FakeGitHost::new()))
             .with_pull_request_poll_interval(FAKE_POLL_INTERVAL)
+            .with_wayfinder_poll_interval(FAKE_POLL_INTERVAL)
     } else {
         let claude_code = Arc::new(ClaudeCodeDriver::installed());
         ServiceConfig::new(AgentCli::ClaudeCode, claude_code.clone(), data_dir)

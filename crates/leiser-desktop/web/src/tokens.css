@@ -48,6 +48,13 @@
   --color-diff-added: rgb(46 160 67 / 14%);
   --color-diff-removed: rgb(248 81 73 / 14%);
 
+  /* Wayfinder ticket types. */
+  --color-type-research: #7a4cc2;
+  --color-type-prototype: #b75a00;
+  --color-type-grilling: #c42b2b;
+  --color-type-task: #2f67c9;
+  --color-type-untyped: var(--color-text-faint);
+
   /* Type. */
   --font-sans: -apple-system, BlinkMacSystemFont, system-ui, "Segoe UI", Roboto, sans-serif;
   --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
@@ -143,6 +150,11 @@
 
     --color-diff-added: rgb(46 160 67 / 18%);
     --color-diff-removed: rgb(248 81 73 / 18%);
+
+    --color-type-research: #b28cf2;
+    --color-type-prototype: #f0a35c;
+    --color-type-grilling: #f47067;
+    --color-type-task: #6ea2ff;
 
     --shadow-sm: 0 1px 2px rgb(0 0 0 / 30%);
     --shadow-md: 0 2px 8px rgb(0 0 0 / 35%);

@@ -13,6 +13,9 @@
 //! question) while the app is not in front, the app sends an OS
 //! notification.
 //!
+//! Links to the git host, such as a wayfinder map's tickets, open in the
+//! developer's browser (`open_in_browser`); the page itself cannot.
+//!
 //! The terminal panel's shells run in the app itself (`terminals.rs`), in
 //! the chat's checkout, and end when the app quits.
 
@@ -28,12 +31,14 @@ use connection::{ConnectionState, ServiceConnection};
 use leiser_service::{Command, CommandError, Response};
 use tauri::{AppHandle, Manager, RunEvent, State};
 use tauri_plugin_dialog::DialogExt;
+use tauri_plugin_opener::OpenerExt;
 use terminals::Terminals;
 
 fn main() -> Result<(), tauri::Error> {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_opener::init())
         .manage(Terminals::default())
         .setup(|app| {
             // Not in the app data directory: its path has a space on macOS,
@@ -53,6 +58,7 @@ fn main() -> Result<(), tauri::Error> {
             execute,
             service_connection,
             pick_folder,
+            open_in_browser,
             terminals::open_terminal,
             terminals::write_terminal,
             terminals::resize_terminal,
@@ -97,4 +103,28 @@ async fn pick_folder(app: AppHandle) -> Option<PathBuf> {
         .file()
         .blocking_pick_folder()
         .and_then(|folder| folder.into_path().ok())
+}
+
+/// Why a link did not open.
+#[derive(Debug, thiserror::Error, serde::Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum OpenError {
+    #[error("only https links open in the browser, not {url}")]
+    NotHttps { url: String },
+    #[error("the browser did not open: {reason}")]
+    Failed { reason: String },
+}
+
+/// Opens an `https://` link, such as a ticket on the git host, in the
+/// developer's default browser.
+#[tauri::command]
+async fn open_in_browser(app: AppHandle, url: String) -> Result<(), OpenError> {
+    if !url.starts_with("https://") {
+        return Err(OpenError::NotHttps { url });
+    }
+    app.opener()
+        .open_url(url, None::<&str>)
+        .map_err(|error| OpenError::Failed {
+            reason: error.to_string(),
+        })
 }
