@@ -166,7 +166,9 @@ A release is a merge of `development` into `main` (see
 [`docs/agents/workflow.md`](docs/agents/workflow.md)). Tagging that commit
 on `main` with `v<version>` runs the `Release` workflow: it builds the
 installers on GitHub's macOS, Windows and Linux runners and attaches them to
-a draft GitHub release, which a maintainer then publishes. The version is
+a draft GitHub release, which a maintainer then publishes. A beta comes from
+`development` instead, tagged `v<version>-beta.<n>`, and becomes a
+pre-release; its installers carry the plain version. The version is
 `X.Y.Z` (MSI accepts nothing else) and is set in both `Cargo.toml` and
 `crates/leiser-desktop/tauri.conf.json`; the workflow checks that both and
 the tag agree. A pull request that changes the packaging builds the
