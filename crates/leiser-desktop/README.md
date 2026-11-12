@@ -190,6 +190,23 @@ which takes the new program as a service update. A failed install says why
 on hover and can be retried. Debug builds (`npm run tauri dev`) never look
 for updates.
 
+## App icon
+
+`icons/icon.svg` is the source of the app icon: the Leiser AI logo on
+Apple's macOS app icon grid. The other files in `icons/` are generated from
+it. After a change to the source, run:
+
+```bash
+npm run tauri icon icons/icon.svg -- -o ../../target/app-icon
+```
+
+Then copy `32x32.png`, `128x128.png`, `128x128@2x.png`, `icon.icns`,
+`icon.ico` and `icon.png` from `../../target/app-icon/` into `icons/`. The
+first five are the ones `bundle.icon` in `tauri.conf.json` lists; `icon.png`
+is not bundled and is copied only so that no file keeps an old icon. The
+command also writes sizes for app stores and phones, which the app does not
+use.
+
 ## Styles
 
 - `web/src/tokens.css` names every color, font size, spacing step, radius
