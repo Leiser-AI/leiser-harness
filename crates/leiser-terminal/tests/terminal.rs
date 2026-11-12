@@ -148,11 +148,12 @@ fn programs_see_the_terminal_size_and_its_changes() -> TestResult {
     // line of input and says the size again. `stty` fails unless its input
     // is a terminal.
     let say_size_twice = if cfg!(windows) {
-        let size =
+        let say_size =
             r#""size=$($Host.UI.RawUI.WindowSize.Height) $($Host.UI.RawUI.WindowSize.Width)""#;
-        format!("{size}; $null = Read-Host; {size}")
+        format!("{say_size}; $null = Read-Host; {say_size}")
     } else {
-        r#"sh -c 'echo "size=$(stty size)"; read line; echo "size=$(stty size)"'"#.to_owned()
+        let say_size = r#"echo "size=$(stty size)""#;
+        format!("sh -c '{say_size}; read line; {say_size}'")
     };
 
     type_line(&terminal, &say_size_twice)?;
@@ -165,6 +166,7 @@ fn programs_see_the_terminal_size_and_its_changes() -> TestResult {
         rows: 30,
         cols: 100,
     })?;
+    // The line of input the program waits for.
     type_line(&terminal, "")?;
 
     screen.wait_for_text("size=30 100")
