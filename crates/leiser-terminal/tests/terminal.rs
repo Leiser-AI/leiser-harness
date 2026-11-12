@@ -144,20 +144,28 @@ fn the_shell_starts_in_the_given_directory_and_runs_typed_commands() -> TestResu
 fn programs_see_the_terminal_size_and_its_changes() -> TestResult {
     let checkout = tempfile::tempdir()?;
     let (terminal, screen) = Screen::open(checkout.path())?;
-    // `stty` fails unless its input is a terminal. Rows first, then columns.
-    let ask_size = if cfg!(windows) {
-        r#""size=$($Host.UI.RawUI.WindowSize.Height) $($Host.UI.RawUI.WindowSize.Width)""#
+    // A program that says the size (rows first, then columns), waits for a
+    // line of input and says the size again. `stty` fails unless its input
+    // is a terminal.
+    let say_size_twice = if cfg!(windows) {
+        let size =
+            r#""size=$($Host.UI.RawUI.WindowSize.Height) $($Host.UI.RawUI.WindowSize.Width)""#;
+        format!("{size}; $null = Read-Host; {size}")
     } else {
-        r#"echo "size=$(stty size)""#
+        r#"sh -c 'echo "size=$(stty size)"; read line; echo "size=$(stty size)"'"#.to_owned()
     };
 
-    type_line(&terminal, ask_size)?;
+    type_line(&terminal, &say_size_twice)?;
     screen.wait_for_text("size=24 80")?;
+    // The size changes while the program runs, not between two commands: a
+    // shell that returns to its prompt may write the size it just read back
+    // to the terminal (bash's readline does), which undoes a change made in
+    // between.
     terminal.resize(Size {
         rows: 30,
         cols: 100,
     })?;
-    type_line(&terminal, ask_size)?;
+    type_line(&terminal, "")?;
 
     screen.wait_for_text("size=30 100")
 }
