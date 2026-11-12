@@ -4,9 +4,11 @@ name: Update feed
 # update manifest `latest.json` to the branch `update-feed`, as `beta.json`
 # and, for a version without `-beta.`, also as `stable.json`. The version
 # decides, not the pre-release flag: a beta is the latest release until a
-# stable one exists. A file only ever moves to a newer version, so a stable
+# stable one exists. A file never moves to an older version, so a stable
 # hotfix does not hide a newer beta, and serving an old tag again changes
-# nothing. Installed apps read
+# nothing. Serving the same version again takes its manifest: a rerun of
+# release.yml replaces the installers, and the feed must carry their new
+# signatures. Installed apps read
 # https://raw.githubusercontent.com/<repo>/update-feed/<channel>.json.
 #
 # release.yml calls it for the release it has just published. The `release`
@@ -83,11 +85,11 @@ jobs:
           };
           const next = JSON.parse(fs.readFileSync(manifest, "utf8"));
           const current = fs.existsSync(feed) ? JSON.parse(fs.readFileSync(feed, "utf8")) : null;
-          if (current === null || newer(next.version, current.version)) {
+          if (current !== null && newer(current.version, next.version)) {
+            console.log(`${feed} keeps ${current.version}, not older ${next.version}`);
+          } else {
             fs.copyFileSync(manifest, feed);
             console.log(`${feed}: ${next.version}`);
-          } else {
-            console.log(`${feed} keeps ${current.version}, not older ${next.version}`);
           }
           JS
           done
