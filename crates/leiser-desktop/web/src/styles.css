@@ -864,21 +864,6 @@ body {
   text-align: center;
 }
 
-.new-chat-logo {
-  display: grid;
-  place-items: center;
-  width: 44px;
-  height: 44px;
-  border: 1.5px solid var(--color-border-strong);
-  border-radius: var(--radius-xl);
-  color: var(--color-text-muted);
-}
-
-.new-chat-logo .icon {
-  width: 20px;
-  height: 20px;
-}
-
 .new-chat-title {
   margin: 0;
   font-size: var(--text-2xl);
@@ -1382,67 +1367,127 @@ body {
   flex: 1;
   min-height: 0;
   display: grid;
-  grid-template-columns: minmax(220px, 340px) minmax(0, 1fr);
+  grid-template-columns: minmax(var(--panel-width), var(--panel-width-wide)) minmax(0, 1fr);
+}
+
+.extensions-pane {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-right: 1px solid var(--color-border);
+}
+
+/* One agent CLI at a time: the tabs sit in a track, the shown one raised. */
+.extensions-tabs {
+  display: flex;
+  flex: none;
+  gap: var(--space-half);
+  margin: var(--space-3) var(--space-3) var(--space-1);
+  padding: var(--space-half);
+  border-radius: var(--radius-lg);
+  background: var(--color-selected);
+}
+
+.extensions-tab {
+  flex: 1;
+  min-width: 0;
+  gap: var(--space-2);
+  border: none;
+  background: none;
+  box-shadow: none;
+  color: var(--color-text-muted);
+}
+
+.extensions-tab:hover:not(:disabled) {
+  background: none;
+  color: var(--color-text);
+}
+
+.extensions-tab[aria-selected="true"],
+.extensions-tab[aria-selected="true"]:hover:not(:disabled) {
+  background: var(--color-surface);
+  box-shadow: var(--shadow-sm);
+  color: var(--color-text);
+}
+
+/* How many entries a tab or a kind has. */
+.extensions-count {
+  color: var(--color-text-faint);
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+  font-weight: var(--weight-normal);
 }
 
 .extensions-list {
+  flex: 1;
+  min-height: 0;
   overflow-y: auto;
-  padding: var(--space-2) var(--space-2) var(--space-4);
-  border-right: 1px solid var(--color-border);
-  background: var(--color-bg-sidebar);
+  padding: var(--space-2) var(--space-3) var(--space-4);
 }
 
-.extensions-agent-cli + .extensions-agent-cli {
-  margin-top: var(--space-4);
-  padding-top: var(--space-2);
-  border-top: 1px solid var(--color-border);
+.extensions-list > .callout {
+  margin: var(--space-2) 0;
 }
 
-.extensions-list h2 {
-  margin: var(--space-2) var(--space-2) var(--space-1);
-  font-size: var(--text-lg);
-  font-weight: var(--weight-semibold);
+.extensions-list > .empty {
+  margin: var(--space-6) var(--space-2);
+  font-size: var(--text-md);
+  text-align: center;
 }
 
-.extensions-list h3 {
-  margin: var(--space-3) var(--space-2) var(--space-1);
-  color: var(--color-text-faint);
-  font-size: var(--text-xs);
-  font-weight: var(--weight-semibold);
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-}
-
-.extensions-list > section > .empty,
 .extensions-note {
-  margin: 0 var(--space-2) var(--space-1);
+  display: flex;
+  gap: var(--space-2);
+  margin: var(--space-1) 0 var(--space-2);
+  padding: var(--space-2);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-sunken);
   color: var(--color-text-muted);
   font-size: var(--text-sm);
 }
 
+.extensions-note .icon {
+  margin-top: var(--space-half);
+  color: var(--color-text-faint);
+}
+
+.extensions-group-heading {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: var(--space-3) 0 var(--space-1);
+  padding: 0 var(--space-2);
+  color: var(--color-text-muted);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+}
+
+.extensions-group-heading .icon {
+  color: var(--color-text-faint);
+}
+
 .extensions-items {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-half);
   list-style: none;
   margin: 0;
   padding: 0;
 }
 
 .extension {
-  display: flex;
-  flex-direction: column;
-  align-items: stretch;
-  gap: 1px;
+  justify-content: flex-start;
+  gap: var(--space-2);
   width: 100%;
   height: auto;
-  margin-top: 1px;
-  padding: 6px var(--space-2);
+  /* In line with the kind's name, past its icon. */
+  padding: var(--space-1) var(--space-2) var(--space-1) calc(var(--space-2) + var(--icon-size) + var(--space-2));
   border: none;
-  border-radius: var(--radius-md);
   background: none;
   box-shadow: none;
   font-weight: var(--weight-normal);
   line-height: var(--leading-normal);
   text-align: left;
-  white-space: normal;
 }
 
 .extension:hover:not(:disabled) {
@@ -1454,31 +1499,55 @@ body {
   background: var(--color-selected);
 }
 
+/* A file the agent CLI could not read: a warning that opens the file. */
 .extension.unreadable {
+  align-items: flex-start;
+  margin-bottom: var(--space-1);
+  padding-left: var(--space-2);
+  border: 1px solid var(--color-warning-border);
   background: var(--color-warning-soft);
 }
 
+.extension.unreadable .icon {
+  margin-top: var(--space-half);
+  color: var(--color-warning);
+}
+
+.extension.unreadable .extension-name,
+.extension.unreadable .extension-summary {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.extension-text {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+}
+
 .extension-name {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
   font-weight: var(--weight-medium);
 }
 
-.extension-shared {
-  margin-left: 6px;
-  color: var(--color-accent);
-  font-size: var(--text-xs);
-  font-weight: var(--weight-normal);
-}
-
-.extension-path,
-.extension-detail {
+.extension-name-text,
+.extension-summary {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.extension-summary {
   color: var(--color-text-muted);
   font-size: var(--text-sm);
 }
 
-.extension-path {
+.extension-summary.mono {
   font-family: var(--font-mono);
   font-size: var(--text-xs);
 }
@@ -1486,18 +1555,39 @@ body {
 .extensions-editor {
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
   min-width: 0;
   min-height: 0;
-  padding: var(--space-3) var(--space-4) var(--space-2);
+}
+
+.extensions-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-3);
+  max-width: var(--panel-width-wide);
+  margin: auto;
+  padding: var(--space-6) var(--space-6) var(--space-8);
+  text-align: center;
+}
+
+.extensions-empty-title {
+  margin: 0;
+  font-size: var(--text-xl);
+  font-weight: var(--weight-medium);
+}
+
+.extensions-empty .muted {
+  margin: 0;
 }
 
 .extensions-editor-header {
   display: flex;
   flex-wrap: wrap;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
   gap: var(--space-2) var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--color-border);
 }
 
 .extensions-editor-heading {
@@ -1505,22 +1595,27 @@ body {
   min-width: 0;
 }
 
+.extensions-editor-title-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
 .extensions-editor-title {
+  margin: 0;
   overflow-wrap: anywhere;
   font-family: var(--font-mono);
   font-size: var(--text-md);
   font-weight: var(--weight-semibold);
 }
 
-.extensions-editor-title.placeholder {
-  color: var(--color-text-muted);
-  font-family: inherit;
-  font-weight: var(--weight-normal);
-}
-
 .extensions-editor-detail {
   color: var(--color-text-muted);
   font-size: var(--text-sm);
+}
+
+.extensions-editor-unreadable {
+  color: var(--color-warning);
 }
 
 .extensions-editor-actions {
@@ -1529,25 +1624,42 @@ body {
   gap: var(--space-1);
 }
 
+/* The file fills the pane like a document, without a frame of its own. */
 .extensions-editor-text {
   flex: 1;
   min-height: 0;
-  padding: var(--space-3);
-  border-radius: var(--radius-lg);
+  padding: var(--space-4);
+  border: none;
+  border-radius: 0;
   background: var(--color-surface-sunken);
   font: var(--text-sm) / var(--leading-relaxed) var(--font-mono);
   resize: none;
   tab-size: 2;
 }
 
-.extensions-editor-status {
-  min-height: 18px;
+.extensions-editor-text:focus-visible {
+  box-shadow: var(--focus-ring-inset);
+}
+
+.extensions-editor-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  min-height: var(--row-height);
+  padding: 0 var(--space-4);
+  border-top: 1px solid var(--color-border);
   color: var(--color-text-muted);
   font-size: var(--text-sm);
 }
 
 .extensions-editor-status.failed {
   color: var(--color-danger);
+}
+
+.extensions-editor-hint {
+  flex: none;
+  color: var(--color-text-faint);
 }
 
 /* ---- Dialogs: subscriptions ---- */

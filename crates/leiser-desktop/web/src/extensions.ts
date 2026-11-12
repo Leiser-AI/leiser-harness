@@ -3,17 +3,19 @@
 // CLI (ADR 0003): the panel opens the agent CLI's own file as text and
 // saves it back. It never converts between agent CLIs.
 
+import { icon, type IconName } from "./icons";
+import { shortcutLabel } from "./platform";
 import type { AgentCli, CliExtension, CliExtensionKind, RepositoryId, UnreadableCliExtensionFile } from "./protocol";
 import * as service from "./service";
 import { AGENT_CLI_NAMES } from "./service";
 
 const AGENT_CLIS: AgentCli[] = ["claude_code", "codex"];
 
-const KINDS: { type: CliExtensionKind["type"]; title: string }[] = [
-  { type: "instruction_file", title: "Instruction files" },
-  { type: "skill", title: "Skills" },
-  { type: "mcp_server", title: "MCP servers" },
-  { type: "hook", title: "Hooks" },
+const KINDS: { type: CliExtensionKind["type"]; title: string; icon: IconName }[] = [
+  { type: "instruction_file", title: "Instruction files", icon: "file" },
+  { type: "skill", title: "Skills", icon: "sparkle" },
+  { type: "mcp_server", title: "MCP servers", icon: "plug" },
+  { type: "hook", title: "Hooks", icon: "hook" },
 ];
 
 /** What the agent CLI needs before it loads a kind, where it is not obvious. */
@@ -28,15 +30,35 @@ interface OpenFile {
   previous: string;
 }
 
+/**
+ * What the list shows of the repository: nothing while its CLI extensions
+ * are read for the first time; then what the agent CLIs load and the agent
+ * CLI whose part shows; or why they could not be read.
+ */
+type Listed =
+  | { type: "reading" }
+  | { type: "read"; listing: service.CliExtensions; agentCli: AgentCli }
+  | { type: "failed"; reason: string };
+
+const NOTHING_LISTED: service.CliExtensions = { extensions: [], unreadable: [] };
+
 let repository: RepositoryId | null = null;
-let listing: service.CliExtensions = { extensions: [], unreadable: [] };
+let listed: Listed = { type: "reading" };
 let open: OpenFile | null = null;
 
+/** Runs when the open file's unsaved changes are saved or discarded. */
+let changesSettled: () => void = () => {};
+
 let root: HTMLElement;
+let tabs: HTMLElement;
 let list: HTMLElement;
+let editorEmpty: HTMLElement;
+let editorHeader: HTMLElement;
 let editorTitle: HTMLElement;
+let editorUnsaved: HTMLElement;
 let editorDetail: HTMLElement;
 let editorText: HTMLTextAreaElement;
+let editorFooter: HTMLElement;
 let editorStatus: HTMLElement;
 let saveButton: HTMLButtonElement;
 let discardButton: HTMLButtonElement;
@@ -53,34 +75,71 @@ function el<K extends keyof HTMLElementTagNameMap>(
   return element;
 }
 
-function button(text: string, onClick: () => void): HTMLButtonElement {
-  const element = el("button", "", text);
+function button(text: string, className: string, onClick: () => void): HTMLButtonElement {
+  const element = el("button", className, text);
   element.type = "button";
   element.addEventListener("click", onClick);
   return element;
 }
 
-/** Builds the panel inside `container` once; it stays hidden until opened. */
-export function mount(container: HTMLElement): void {
+const SAVE_SHORTCUT = shortcutLabel("S");
+const LIST_ID = "extensions-list";
+
+function tabId(agentCli: AgentCli): string {
+  return `extensions-tab-${agentCli}`;
+}
+
+/**
+ * Builds the panel inside `container` once; it stays hidden until opened.
+ * `onChangesSettled` runs when the open file's unsaved changes are saved
+ * or discarded, so the app can take back what it said about them.
+ */
+export function mount(container: HTMLElement, onChangesSettled: () => void): void {
   root = container;
-  list = el("nav", "extensions-list");
-  list.setAttribute("aria-label", "CLI extensions");
+  changesSettled = onChangesSettled;
+  const pane = el("div", "extensions-pane");
+  tabs = el("div", "extensions-tabs");
+  tabs.setAttribute("role", "tablist");
+  tabs.setAttribute("aria-label", "Agent CLI");
+  tabs.addEventListener("keydown", moveBetweenTabs);
+  list = el("div", "extensions-list");
+  list.id = LIST_ID;
+  list.setAttribute("role", "tabpanel");
+  pane.append(tabs, list);
 
   const editor = el("section", "extensions-editor");
-  const header = el("header", "extensions-editor-header");
+  editorEmpty = el("div", "extensions-empty");
+  const logo = el("div", "hero-logo");
+  logo.append(icon("blocks"));
+  editorEmpty.append(
+    logo,
+    el("h2", "extensions-empty-title", "Select a CLI extension"),
+    el(
+      "p",
+      "muted",
+      "Its file opens here as text. Saving writes the agent CLI's own file; nothing is converted between agent CLIs.",
+    ),
+  );
+  editorHeader = el("header", "extensions-editor-header");
   const heading = el("div", "extensions-editor-heading");
-  editorTitle = el("div", "extensions-editor-title");
+  const titleRow = el("div", "extensions-editor-title-row");
+  editorTitle = el("h2", "extensions-editor-title");
+  editorUnsaved = el("span", "badge warning", "Unsaved");
+  titleRow.append(editorTitle, editorUnsaved);
   editorDetail = el("div", "extensions-editor-detail");
-  heading.append(editorTitle, editorDetail);
-  reloadButton = button("Reload", () => void run(reload));
-  discardButton = button("Discard changes", () => void run(reload));
-  saveButton = button("Save", () => void run(save));
-  saveButton.classList.add("primary");
+  heading.append(titleRow, editorDetail);
+  reloadButton = button("Reload", "ghost", () => void run(reload));
+  reloadButton.prepend(icon("refresh"));
+  reloadButton.title = "Read the file from disk again";
+  discardButton = button("Discard changes", "", () => void run(reload));
+  saveButton = button("Save", "primary", () => void run(save));
+  saveButton.title = `Save the file (${SAVE_SHORTCUT})`;
   const actions = el("div", "extensions-editor-actions");
   actions.append(reloadButton, discardButton, saveButton);
-  header.append(heading, actions);
+  editorHeader.append(heading, actions);
   editorText = el("textarea", "extensions-editor-text");
   editorText.spellcheck = false;
+  editorText.setAttribute("aria-label", "File contents");
   editorText.addEventListener("input", renderEditorState);
   editorText.addEventListener("keydown", (event) => {
     if (event.key === "s" && (event.metaKey || event.ctrlKey)) {
@@ -88,24 +147,38 @@ export function mount(container: HTMLElement): void {
       void run(save);
     }
   });
+  editorFooter = el("footer", "extensions-editor-footer");
   editorStatus = el("div", "extensions-editor-status");
   editorStatus.setAttribute("role", "status");
-  editor.append(header, editorText, editorStatus);
+  editorFooter.append(editorStatus, el("span", "extensions-editor-hint", `${SAVE_SHORTCUT} saves`));
+  editor.append(editorEmpty, editorHeader, editorText, editorFooter);
 
-  root.replaceChildren(list, editor);
+  root.replaceChildren(pane, editor);
   renderEditor();
 }
 
-/** Shows the panel for `id`, reading its CLI extensions again. */
+/**
+ * Shows the panel for `id`, reading its CLI extensions again. When they
+ * cannot be read, the list says why.
+ */
 export async function show(id: RepositoryId): Promise<void> {
   if (repository !== id) {
     repository = id;
     open = null;
-    listing = { extensions: [], unreadable: [] };
+    listed = { type: "reading" };
+    status("");
+    renderList();
     renderEditor();
   }
   root.hidden = false;
-  await loadList();
+  try {
+    await loadList();
+  } catch (error) {
+    if (repository !== id) return;
+    listed = { type: "failed", reason: errorText(error) };
+    renderList();
+    renderEditor();
+  }
 }
 
 export function hide(): void {
@@ -117,11 +190,15 @@ export function hasUnsavedChanges(): boolean {
   return open !== null && editorText.value !== open.previous;
 }
 
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 async function run(action: () => Promise<void>): Promise<void> {
   try {
     await action();
   } catch (error) {
-    status(error instanceof Error ? error.message : String(error), true);
+    status(errorText(error), true);
   }
 }
 
@@ -133,11 +210,34 @@ function status(text: string, failed = false): void {
 async function loadList(): Promise<void> {
   if (repository === null) return;
   const id = repository;
-  const loaded = await service.listCliExtensions(id);
+  const listing = await service.listCliExtensions(id);
   if (repository !== id) return;
-  listing = loaded;
+  // The list stays on the agent CLI it shows. The first time, that is the
+  // first agent CLI that loads something.
+  const shown = listed.type === "read" ? listed.agentCli : null;
+  listed = { type: "read", listing, agentCli: shown ?? "claude_code" };
+  if (shown === null) listed.agentCli = AGENT_CLIS.find((agentCli) => entryCount(agentCli) > 0) ?? "claude_code";
   renderList();
   renderEditor();
+}
+
+/** What the agent CLIs load from the repository, as last read. */
+function listing(): service.CliExtensions {
+  return listed.type === "read" ? listed.listing : NOTHING_LISTED;
+}
+
+/** What `agentCli` loads from the repository, and the files it could not read. */
+function loadedBy(agentCli: AgentCli): service.CliExtensions {
+  return {
+    extensions: listing().extensions.filter((extension) => extension.agent_cli === agentCli),
+    unreadable: listing().unreadable.filter((file) => file.agent_cli === agentCli),
+  };
+}
+
+/** How many entries the list has for `agentCli`. */
+function entryCount(agentCli: AgentCli): number {
+  const { extensions, unreadable } = loadedBy(agentCli);
+  return extensions.length + unreadable.length;
 }
 
 async function openFile(file: string): Promise<void> {
@@ -161,6 +261,8 @@ async function reload(): Promise<void> {
   const text = await service.readCliExtensionFile(repository, open.file);
   open = { file: open.file, previous: text };
   editorText.value = text;
+  renderEditorState();
+  changesSettled();
   status("Reloaded from disk.");
   await loadList();
 }
@@ -170,41 +272,104 @@ async function save(): Promise<void> {
   const text = editorText.value;
   await service.saveCliExtensionFile(repository, open.file, text, open.previous);
   open = { file: open.file, previous: text };
+  renderEditorState();
+  changesSettled();
   status(`Saved ${open.file}.`);
   await loadList();
 }
 
 function renderList(): void {
-  const columns = AGENT_CLIS.map((agentCli) => {
-    const column = el("section", "extensions-agent-cli");
-    column.append(el("h2", "", AGENT_CLI_NAMES[agentCli]));
-    const note = NOTES[agentCli];
-    if (note) column.append(el("p", "extensions-note", note));
-    const extensions = listing.extensions.filter((extension) => extension.agent_cli === agentCli);
-    const unreadable = listing.unreadable.filter((file) => file.agent_cli === agentCli);
-    if (extensions.length === 0 && unreadable.length === 0) {
-      column.append(el("p", "empty", "Loads no CLI extensions from this repository."));
-    }
-    for (const file of unreadable) column.append(renderUnreadable(file));
-    for (const kind of KINDS) {
-      const ofKind = extensions.filter((extension) => extension.kind.type === kind.type);
-      if (ofKind.length === 0) continue;
-      const items = el("ul", "extensions-items");
-      for (const extension of ofKind) items.append(renderExtension(extension));
-      column.append(el("h3", "", `${kind.title} (${ofKind.length})`), items);
-    }
-    return column;
-  });
-  list.replaceChildren(...columns);
+  tabs.hidden = listed.type !== "read";
+  if (listed.type === "reading") {
+    list.replaceChildren();
+    return;
+  }
+  if (listed.type === "failed") {
+    list.replaceChildren(el("p", "callout danger", `The CLI extensions could not be read: ${listed.reason}`));
+    return;
+  }
+  const agentCli = listed.agentCli;
+  tabs.replaceChildren(...AGENT_CLIS.map((tab) => renderTab(tab, tab === agentCli)));
+  list.setAttribute("aria-labelledby", tabId(agentCli));
+  const body: HTMLElement[] = [];
+  const note = NOTES[agentCli];
+  if (note) {
+    const item = el("p", "extensions-note");
+    item.append(icon("info"), el("span", "", note));
+    body.push(item);
+  }
+  const { extensions, unreadable } = loadedBy(agentCli);
+  body.push(...unreadable.map(renderUnreadable));
+  for (const kind of KINDS) {
+    const ofKind = extensions.filter((extension) => extension.kind.type === kind.type);
+    if (ofKind.length === 0) continue;
+    const group = el("section", "extensions-group");
+    const heading = el("h3", "extensions-group-heading");
+    heading.append(icon(kind.icon), el("span", "", kind.title), el("span", "extensions-count", String(ofKind.length)));
+    const items = el("ul", "extensions-items");
+    for (const extension of ofKind) items.append(renderExtension(extension));
+    group.append(heading, items);
+    body.push(group);
+  }
+  if (extensions.length === 0 && unreadable.length === 0) {
+    body.push(el("p", "empty", `${AGENT_CLI_NAMES[agentCli]} loads no CLI extensions from this repository.`));
+  }
+  list.replaceChildren(...body);
+}
+
+function renderTab(agentCli: AgentCli, shown: boolean): HTMLElement {
+  const tab = el("button", "extensions-tab");
+  tab.type = "button";
+  tab.id = tabId(agentCli);
+  tab.setAttribute("role", "tab");
+  tab.setAttribute("aria-controls", LIST_ID);
+  tab.setAttribute("aria-selected", String(shown));
+  // Only the shown tab is a tab stop; the arrow keys move between tabs.
+  tab.tabIndex = shown ? 0 : -1;
+  tab.append(
+    el("span", "", AGENT_CLI_NAMES[agentCli]),
+    el("span", "extensions-count", String(entryCount(agentCli))),
+  );
+  tab.addEventListener("click", () => showAgentCli(agentCli));
+  return tab;
+}
+
+function showAgentCli(agentCli: AgentCli): void {
+  if (listed.type !== "read") return;
+  listed.agentCli = agentCli;
+  // The tabs are built again: the shown one keeps the keyboard.
+  const focused = tabs.contains(document.activeElement);
+  renderList();
+  if (focused) document.getElementById(tabId(agentCli))?.focus();
+}
+
+function moveBetweenTabs(event: KeyboardEvent): void {
+  if (listed.type !== "read") return;
+  const at = AGENT_CLIS.indexOf(listed.agentCli);
+  const last = AGENT_CLIS.length - 1;
+  const targets: Record<string, number> = {
+    ArrowRight: at === last ? 0 : at + 1,
+    ArrowLeft: at === 0 ? last : at - 1,
+    Home: 0,
+    End: last,
+  };
+  const target = targets[event.key];
+  const next = target === undefined ? undefined : AGENT_CLIS[target];
+  if (next === undefined) return;
+  event.preventDefault();
+  showAgentCli(next);
 }
 
 function renderUnreadable(file: UnreadableCliExtensionFile): HTMLElement {
   const item = el("button", "extension unreadable");
   item.type = "button";
-  item.append(
+  item.title = `${file.file}\n${file.reason}`;
+  const text = el("span", "extension-text");
+  text.append(
     el("span", "extension-name", `${file.path} could not be read`),
-    el("span", "extension-detail", file.reason),
+    el("span", "extension-summary", file.reason),
   );
+  item.append(icon("alert"), text);
   markOpen(item, file.file);
   item.addEventListener("click", () => void run(() => openFile(file.file)));
   return item;
@@ -214,21 +379,56 @@ function renderExtension(extension: CliExtension): HTMLElement {
   const listItem = el("li");
   const item = el("button", "extension");
   item.type = "button";
-  item.title = extension.file;
-  const name = el("span", "extension-name", extension.name);
+  const loadedFrom = extension.path === extension.file ? extension.path : `${extension.path} → ${extension.file}`;
+  const detail = describe(extension.kind);
+  item.title = detail === null ? loadedFrom : `${loadedFrom}\n${detail}`;
+  const name = el("span", "extension-name");
+  name.append(el("span", "extension-name-text", extension.name));
   const shared = otherAgentClis(extension);
   if (shared.length > 0) {
-    name.append(el("span", "extension-shared", `also ${shared.map((cli) => AGENT_CLI_NAMES[cli]).join(", ")}`));
+    name.append(el("span", "badge", `also ${shared.map((cli) => AGENT_CLI_NAMES[cli]).join(", ")}`));
   }
-  item.append(name);
-  const where = extension.path === extension.file ? extension.path : `${extension.path} → ${extension.file}`;
-  item.append(el("span", "extension-path", where));
-  const detail = describe(extension.kind);
-  if (detail) item.append(el("span", "extension-detail", detail));
+  const text = el("span", "extension-text");
+  text.append(name);
+  const summary = summarize(extension);
+  if (summary !== null) {
+    const line = el("span", "extension-summary", summary.text);
+    line.classList.toggle("mono", summary.code);
+    text.append(line);
+  }
+  item.append(text);
   markOpen(item, extension.file);
   item.addEventListener("click", () => void run(() => openFile(extension.file)));
   listItem.append(item);
   return listItem;
+}
+
+/** The line below an extension's name in the list. */
+interface Summary {
+  text: string;
+  /** Whether `text` is a path or a command, which shows in the code font. */
+  code: boolean;
+}
+
+/**
+ * What the list says below an extension's name: what it does, or else
+ * where its file lies. An instruction file is named after its file, so
+ * its path shows only where it says more than the name.
+ */
+function summarize(extension: CliExtension): Summary | null {
+  const detail = describe(extension.kind);
+  switch (extension.kind.type) {
+    case "instruction_file": {
+      const path = extension.path === extension.name ? null : extension.path;
+      const text = [path, detail].filter((part) => part !== null).join(" · ");
+      return text === "" ? null : { text, code: true };
+    }
+    case "skill":
+      return detail === null ? { text: extension.path, code: true } : { text: detail, code: false };
+    case "mcp_server":
+    case "hook":
+      return { text: detail ?? extension.path, code: true };
+  }
 }
 
 function markOpen(item: HTMLElement, file: string): void {
@@ -258,36 +458,38 @@ function otherAgentClis(extension: CliExtension): AgentCli[] {
   return AGENT_CLIS.filter(
     (agentCli) =>
       agentCli !== extension.agent_cli &&
-      listing.extensions.some((other) => other.agent_cli === agentCli && other.file === extension.file),
+      listing().extensions.some((other) => other.agent_cli === agentCli && other.file === extension.file),
   );
 }
 
 function renderEditor(): void {
   const hasFile = open !== null;
+  editorEmpty.hidden = hasFile;
+  editorHeader.hidden = !hasFile;
   editorText.hidden = !hasFile;
-  reloadButton.hidden = !hasFile;
-  editorTitle.classList.toggle("placeholder", open === null);
-  if (open === null) {
-    editorTitle.textContent = "Select a CLI extension to open its file.";
-    editorDetail.textContent = "";
-    discardButton.hidden = true;
-    saveButton.hidden = true;
-    return;
-  }
+  editorFooter.hidden = !hasFile;
+  if (open === null) return;
   const file = open.file;
   editorTitle.textContent = file;
-  const loadedAs = listing.extensions
-    .filter((extension) => extension.file === file)
+  const loadedAs = listing()
+    .extensions.filter((extension) => extension.file === file)
     .map((extension) => `${AGENT_CLI_NAMES[extension.agent_cli]}: ${extension.name}`);
-  const unique = [...new Set(loadedAs)];
-  editorDetail.textContent =
-    unique.length === 0 ? "" : `Holds ${unique.join(" · ")}. Saved as is, in this agent CLI's own format.`;
+  const holds = [...new Set(loadedAs)];
+  const unreadable = listing()
+    .unreadable.filter((unread) => unread.file === file)
+    .map((unread) => `${AGENT_CLI_NAMES[unread.agent_cli]} could not read it: ${unread.reason}`);
+  editorDetail.replaceChildren(
+    ...unreadable.map((reason) => el("div", "extensions-editor-unreadable", reason)),
+    ...(holds.length === 0
+      ? []
+      : [el("div", "", `Holds ${holds.join(" · ")}. Saved as is, in this agent CLI's own format.`)]),
+  );
   renderEditorState();
 }
 
 function renderEditorState(): void {
   const dirty = hasUnsavedChanges();
-  saveButton.hidden = open === null;
+  editorUnsaved.hidden = !dirty;
   saveButton.disabled = !dirty;
   discardButton.hidden = !dirty;
 }

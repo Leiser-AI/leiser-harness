@@ -96,10 +96,13 @@
   --shadow-md: 0 2px 8px rgb(0 0 0 / 6%), 0 1px 2px rgb(0 0 0 / 4%);
   --shadow-lg: 0 16px 48px rgb(0 0 0 / 18%), 0 2px 6px rgb(0 0 0 / 8%);
   --focus-ring: 0 0 0 2px var(--color-bg), 0 0 0 4px var(--color-accent);
+  /* For a field that fills its pane and has no room for a ring around it. */
+  --focus-ring-inset: inset 0 0 0 2px var(--color-accent-soft);
 
   /* Layout. */
   --sidebar-width: 264px;
   --panel-width: 264px;
+  --panel-width-wide: 320px;
   --content-width: 760px;
   --control-height: 28px;
   --control-height-sm: 24px;

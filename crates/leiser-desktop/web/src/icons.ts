@@ -36,6 +36,12 @@ const PATHS = {
   circle: "M8 4.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7z",
   external: "M9 3h4v4M13 3 7.5 8.5M11 9.5V13H3V5h3.5",
   chat: "M3 3.5h10v7H7l-3 2.5v-2.5H3z",
+  file: "M4.5 2h4.5l3 3v8a1 1 0 0 1-1 1h-6.5a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1zM9 2v3h3M6 8.5h4M6 11h4",
+  sparkle: "M7 2.5l1.2 3.3L11.5 7 8.2 8.2 7 11.5 5.8 8.2 2.5 7l3.3-1.2zM12 10v3.5M10.25 11.75h3.5",
+  plug: "M6 2v3.5M10 2v3.5M4 5.5h8V8a4 4 0 0 1-8 0zM8 12v2",
+  hook: "M9.5 2.5a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3zM9.5 5.5v5a3 3 0 0 1-6 0V8.5M2 10l1.5-1.5L5 10",
+  refresh: "M13 8a5 5 0 1 1-1.6-3.67M13 2.5v2.5h-2.5",
+  info: "M8 2.5a5.5 5.5 0 1 0 0 11 5.5 5.5 0 0 0 0-11zM8 7.5V11M8 5.25h.01",
 } as const;
 
 export type IconName = keyof typeof PATHS;
