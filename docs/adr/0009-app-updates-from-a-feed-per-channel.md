@@ -20,10 +20,10 @@ writes its manifest there: a beta to `beta.json`, a stable release to both,
 so beta users get stable releases too; the version decides, not GitHub's
 pre-release flag. Drafts are never served.
 
-The README links to the newest installers under fixed names at
-`releases/latest/download/`, which GitHub resolves to the latest release
-that is not a pre-release. So a beta is published as a pre-release only
-once a stable release exists; until then it is the latest release.
+Amended 2026-11-12: the README links to the newest installers under fixed
+names at `releases/latest/download/`, which GitHub resolves to the latest
+release that is not a pre-release. So a beta is published as a pre-release
+only once a stable release exists; until then it is the latest release.
 
 Updates are signed with a key of the maintainer; the public key is in
 `tauri.conf.json`, the private key and its password are GitHub secrets.

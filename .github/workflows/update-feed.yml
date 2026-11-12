@@ -4,10 +4,10 @@ name: Update feed
 # update manifest `latest.json` to the branch `update-feed`, as `beta.json`
 # and, for a version without `-beta.`, also as `stable.json`. The version
 # decides, not the pre-release flag: a beta is the latest release until a
-# stable one exists. A
-# file only ever moves to a newer version, so a stable hotfix does not hide
-# a newer beta, and serving an old tag again changes nothing. Installed
-# apps read https://raw.githubusercontent.com/<repo>/update-feed/<channel>.json.
+# stable one exists. A file only ever moves to a newer version, so a stable
+# hotfix does not hide a newer beta, and serving an old tag again changes
+# nothing. Installed apps read
+# https://raw.githubusercontent.com/<repo>/update-feed/<channel>.json.
 
 on:
   release:

@@ -3,7 +3,7 @@ name: Release
 # Builds the installers on GitHub's runners. The tag `v<version>` also puts
 # them on a draft GitHub release, which the user publishes: a version
 # `X.Y.Z` from `main` is a release, `X.Y.Z-beta.N` from `development` a
-# pre-release. It also carries the updates, signed with the maintainer's
+# beta (a pre-release once a stable release exists). It also carries the updates, signed with the maintainer's
 # key (secrets TAURI_SIGNING_*), and their manifest `latest.json`, which
 # update-feed.yml serves once the release is published. A pull
 # request that changes the packaging builds the installers without
@@ -166,18 +166,23 @@ jobs:
       # which links the versioned names.
       - name: Add copies under fixed names
         run: |
+          tag="v$(jq -r .version crates/leiser-desktop/tauri.conf.json)"
           mkdir installers/download
-          # The first of the given files that exists, under $name.
+          # The installer $1 (a glob) under the name $2; fails without one.
           copy() {
             local file
-            for file in "$@"; do
-              if [ -e "$file" ]; then cp "$file" "installers/download/$name"; return 0; fi
+            for file in $1; do
+              [ -e "$file" ] && cp "$file" "installers/download/$2" && return 0
             done
+            echo "::error::no installer $1"
+            return 1
           }
-          name=leiser-harness-macos.dmg copy installers/dmg/*.dmg
-          name=leiser-harness-windows-setup.exe copy installers/*-setup.exe installers/nsis/*-setup.exe
-          name=leiser-harness-linux.deb copy installers/deb/*.deb
-          name=leiser-harness-linux.rpm copy installers/rpm/*.rpm
+          copy 'installers/dmg/*.dmg' leiser-harness-macos.dmg
+          # The Windows artifact has a single folder, so its file sits at the top.
+          copy 'installers/*-setup.exe' leiser-harness-windows-setup.exe
+          copy 'installers/deb/*.deb' leiser-harness-linux.deb
+          # Betas have no .rpm (the manifest checks a release has one).
+          if [[ "$tag" != *-beta.* ]]; then copy 'installers/rpm/*.rpm' leiser-harness-linux.rpm; fi
           ls installers/download
       - uses: actions/upload-artifact@v7
         with:
@@ -201,15 +206,16 @@ jobs:
       - name: Create the draft release
         env:
           GH_TOKEN: ${{ github.token }}
-        # The artifact keeps the bundle folders (dmg/, macos/, nsis/, deb/,
-        # rpm/); the release gets the files. A rerun on the same tag
+        # The artifact keeps the bundle folders (dmg/, macos/, deb/, rpm/,
+        # download/); the release gets the files. A rerun on the same tag
         # replaces the installers of its release.
         run: |
           mapfile -t files < <(find installers -type f)
           # A beta is a pre-release once a stable release exists; until then
           # it is the latest release, so the README's download links
           # (releases/latest/download/...) find it.
-          stable=$(gh release list --repo "$GITHUB_REPOSITORY" --exclude-drafts --exclude-pre-releases \
+          # Stable drafts count too: one published later must stay latest.
+          stable=$(gh release list --repo "$GITHUB_REPOSITORY" --exclude-pre-releases \
             --json tagName --jq '[.[] | select(.tagName | contains("-beta.") | not)] | length')
           prerelease=()
           [[ "$GITHUB_REF_NAME" == *-beta.* && "$stable" -gt 0 ]] && prerelease=(--prerelease)

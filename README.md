@@ -45,7 +45,7 @@ Click the download for your system; it always gets the newest version:
 | macOS (Apple silicon, Intel)  | [leiser-harness-macos.dmg](https://github.com/Leiser-AI/leiser-harness/releases/latest/download/leiser-harness-macos.dmg)            |
 | Windows 10/11 (x64)           | [leiser-harness-windows-setup.exe](https://github.com/Leiser-AI/leiser-harness/releases/latest/download/leiser-harness-windows-setup.exe) |
 | Linux (x64): Debian, Ubuntu   | [leiser-harness-linux.deb](https://github.com/Leiser-AI/leiser-harness/releases/latest/download/leiser-harness-linux.deb)            |
-| Linux (x64): Fedora           | [leiser-harness-linux.rpm](https://github.com/Leiser-AI/leiser-harness/releases/latest/download/leiser-harness-linux.rpm) (stable releases only) |
+| Linux (x64): Fedora           | [leiser-harness-linux.rpm](https://github.com/Leiser-AI/leiser-harness/releases/latest/download/leiser-harness-linux.rpm) (from the first stable release on; none yet) |
 
 Older versions and release notes are on the
 [releases page](https://github.com/Leiser-AI/leiser-harness/releases).
