@@ -16,3 +16,6 @@
 # Editors
 /.idea/
 .vscode/
+
+# Built by `npm run package` (crates/leiser-desktop/scripts/package.mjs).
+crates/leiser-desktop/binaries/

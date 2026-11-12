@@ -10,7 +10,8 @@
     "check": "tsc --noEmit",
     "tauri": "tauri",
     "service": "cargo build -p leiser-harness-service",
-    "fake-agent-cli": "cargo build -p leiser-testkit --bin fake-agent-cli"
+    "fake-agent-cli": "cargo build -p leiser-testkit --bin fake-agent-cli",
+    "package": "node scripts/package.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "~2.12.4",
