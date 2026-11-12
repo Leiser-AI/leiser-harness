@@ -201,8 +201,11 @@ npm run tauri icon icons/icon.svg -- -o ../../target/app-icon
 ```
 
 Then copy `32x32.png`, `128x128.png`, `128x128@2x.png`, `icon.icns`,
-`icon.ico` and `icon.png` from `target/app-icon/` into `icons/`. The command
-also writes sizes for app stores and phones, which the app does not use.
+`icon.ico` and `icon.png` from `../../target/app-icon/` into `icons/`. The
+first five are the ones `bundle.icon` in `tauri.conf.json` lists; `icon.png`
+is not bundled and is copied only so that no file keeps an old icon. The
+command also writes sizes for app stores and phones, which the app does not
+use.
 
 ## Styles
 
