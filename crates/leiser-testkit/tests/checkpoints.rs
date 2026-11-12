@@ -9,8 +9,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command as Process;
 
 use leiser_service::{
-    AgentEvent, ChatId, Checkout, CheckpointMoment, Command, CommandError, DiffLine, DiffRange,
-    Event, FileChange, FileDiff, Patch, RepositoryId, Response, ServiceHandle, TurnCheckpoints,
+    AgentEvent, ChatId, ChatSettings, Checkout, CheckpointMoment, Command, CommandError, DiffLine,
+    DiffRange, Event, FileChange, FileDiff, Patch, RepositoryId, Response, ServiceHandle,
+    TurnCheckpoints,
 };
 use leiser_testkit::{
     DEFAULT_BRANCH, Gate, Script, Step, TestRepo, TestService, collect_turn, next_event,
@@ -74,6 +75,7 @@ async fn start_chat(service: &ServiceHandle, repository: RepositoryId) -> TestRe
         .execute(Command::StartChat {
             repository,
             checkout: Checkout::NewWorktree,
+            settings: ChatSettings::default(),
         })
         .await?
     {

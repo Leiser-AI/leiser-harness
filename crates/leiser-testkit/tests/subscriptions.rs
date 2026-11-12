@@ -8,9 +8,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use leiser_service::{
-    AgentCli, AgentEvent, ApiKey, CLAUDE_CONFIG_DIR, CODEX_HOME, ChatId, Checkout, Command,
-    CommandError, Event, LoginAnswer, LoginOutcome, Provider, RepoCheck, RepositoryId, Response,
-    ServiceHandle, SignIn, SubscriptionId, SubscriptionKind, SubscriptionOverview,
+    AgentCli, AgentEvent, ApiKey, CLAUDE_CONFIG_DIR, CODEX_HOME, ChatId, ChatSettings, Checkout,
+    Command, CommandError, Event, LoginAnswer, LoginOutcome, Provider, RepoCheck, RepositoryId,
+    Response, ServiceHandle, SignIn, SubscriptionId, SubscriptionKind, SubscriptionOverview,
 };
 use leiser_testkit::{
     FAKE_LOGIN_FILE, FakeDriver, FakeLogin, Script, Step, TestRepo, TestService, UNSET,
@@ -154,6 +154,7 @@ async fn start_chat(service: &ServiceHandle, repo: &TestRepo) -> Result<ChatId, 
         .execute(Command::StartChat {
             repository,
             checkout: Checkout::Main,
+            settings: ChatSettings::default(),
         })
         .await?
     {

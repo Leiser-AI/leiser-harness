@@ -12,6 +12,7 @@ import type {
   Checkout,
   ChatOverview,
   ChatPlace,
+  ChatSettings,
   ChatStatus,
   CheckpointMoment,
   CliExtension,
@@ -252,10 +253,37 @@ export async function addRepository(path: string): Promise<RepositoryId> {
   return response.type === "repository_added" ? response.repository : unexpected(response);
 }
 
-/** Starts a chat; without a checkout, in a new worktree. */
-export async function startChat(repository: RepositoryId, checkout?: Checkout): Promise<ChatId> {
-  const response = await execute({ type: "start_chat", repository, checkout });
+/**
+ * Starts a chat; without a checkout, in a new worktree. What `settings`
+ * leaves out comes from the repository's defaults.
+ */
+export async function startChat(
+  repository: RepositoryId,
+  checkout?: Checkout,
+  settings?: ChatSettings,
+): Promise<ChatId> {
+  const response = await execute({ type: "start_chat", repository, checkout, settings });
   return response.type === "chat_started" ? response.chat : unexpected(response);
+}
+
+/** What a new chat in a repository starts with. */
+export interface ChatDefaults {
+  agentCli: AgentCli;
+  permissionMode: PermissionMode;
+  /** `null`: the agent CLI's own default login. */
+  subscription: SubscriptionId | null;
+}
+
+/** What a new chat in the repository starts with when the developer chooses nothing else. */
+export async function readChatDefaults(repository: RepositoryId): Promise<ChatDefaults> {
+  const response = await execute({ type: "read_chat_defaults", repository });
+  return response.type === "chat_defaults"
+    ? {
+        agentCli: response.agent_cli,
+        permissionMode: response.permission_mode,
+        subscription: response.subscription,
+      }
+    : unexpected(response);
 }
 
 export async function markChatDone(chat: ChatId): Promise<void> {

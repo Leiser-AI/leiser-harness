@@ -5,8 +5,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use leiser_service::{
-    AgentCli, AgentEvent, ChatId, ChatOverview, ChatStatus, Checkout, Command, Response,
-    ServiceConfig, ServiceHandle, StartError, StorageError, TranscriptEntry,
+    AgentCli, AgentEvent, ChatId, ChatOverview, ChatSettings, ChatStatus, Checkout, Command,
+    Response, ServiceConfig, ServiceHandle, StartError, StorageError, TranscriptEntry,
 };
 use leiser_testkit::{FakeDriver, Gate, Script, Step, TestRepo, TestService, collect_turn};
 
@@ -31,6 +31,7 @@ async fn start_chat(service: &ServiceHandle, repo: &TestRepo) -> TestResult<Chat
         .execute(Command::StartChat {
             repository,
             checkout: Checkout::Main,
+            settings: ChatSettings::default(),
         })
         .await?;
     let Response::ChatStarted { chat } = response else {

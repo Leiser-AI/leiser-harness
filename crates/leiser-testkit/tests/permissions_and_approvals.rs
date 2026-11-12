@@ -6,9 +6,9 @@ use std::error::Error;
 use std::path::Path;
 
 use leiser_service::{
-    AgentEvent, Answer, ChatId, ChatOverview, ChatStatus, Checkout, Command, CommandError, Event,
-    PermissionMode, Question, QuestionOption, RepositoryId, Response, ServiceHandle,
-    TranscriptEntry,
+    AgentEvent, Answer, ChatId, ChatOverview, ChatSettings, ChatStatus, Checkout, Command,
+    CommandError, Event, PermissionMode, Question, QuestionOption, RepositoryId, Response,
+    ServiceHandle, TranscriptEntry,
 };
 use leiser_testkit::{Gate, Script, Step, TestRepo, TestService, collect_turn, next_event};
 use tokio::sync::broadcast;
@@ -69,6 +69,7 @@ impl Setup {
             .execute(Command::StartChat {
                 repository: self.repository,
                 checkout: Checkout::Main,
+                settings: ChatSettings::default(),
             })
             .await?;
         let Response::ChatStarted { chat } = response else {
@@ -267,6 +268,7 @@ async fn a_repository_default_that_is_no_permission_mode_fails_the_new_chat() ->
         .execute(Command::StartChat {
             repository: setup.repository,
             checkout: Checkout::Main,
+            settings: ChatSettings::default(),
         })
         .await;
 

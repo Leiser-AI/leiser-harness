@@ -8,9 +8,9 @@ use std::process::Command as Process;
 use std::sync::Arc;
 
 use leiser_service::{
-    AgentCli, AgentEvent, Branch, ChatId, ChatOverview, ChatStatus, Checkout, Command,
-    CommandError, Event, QueueReason, RepositoryId, RepositoryScript, Response, ServiceHandle,
-    TranscriptEntry,
+    AgentCli, AgentEvent, Branch, ChatId, ChatOverview, ChatSettings, ChatStatus, Checkout,
+    Command, CommandError, Event, QueueReason, RepositoryId, RepositoryScript, Response,
+    ServiceHandle, TranscriptEntry,
 };
 use leiser_testkit::{
     DEFAULT_BRANCH, FakeDriver, Gate, Script, Step, TestRepo, TestService, collect_turn, next_event,
@@ -55,6 +55,7 @@ async fn start_chat(
         .execute(Command::StartChat {
             repository,
             checkout,
+            settings: ChatSettings::default(),
         })
         .await?
     {
@@ -301,6 +302,7 @@ async fn a_chat_in_the_main_checkout_has_no_worktree_to_continue_in() -> TestRes
         .execute(Command::StartChat {
             repository,
             checkout: Checkout::Worktree { chat: main },
+            settings: ChatSettings::default(),
         })
         .await;
 
@@ -319,6 +321,7 @@ async fn a_repository_without_commits_cannot_start_a_worktree() -> TestResult {
         .execute(Command::StartChat {
             repository,
             checkout: Checkout::NewWorktree,
+            settings: ChatSettings::default(),
         })
         .await;
 
@@ -346,6 +349,7 @@ async fn an_invalid_repository_config_is_reported_when_a_chat_starts() -> TestRe
         .execute(Command::StartChat {
             repository,
             checkout: Checkout::NewWorktree,
+            settings: ChatSettings::default(),
         })
         .await;
 

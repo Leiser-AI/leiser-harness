@@ -23,12 +23,16 @@
   --color-text: #1d1d1b;
   --color-text-muted: #66665f;
   --color-text-faint: #9b9b94;
-  --color-text-on-accent: #ffffff;
 
-  /* One accent for focus, selection and primary actions. */
+  /* Primary actions, such as sending a message: the text color, inverted. */
+  --color-primary: #1d1d1b;
+  --color-primary-hover: #3a3a37;
+  --color-text-on-primary: #ffffff;
+
+  /* One accent for focus, selection and marks that ask for attention. */
   --color-accent: #3b5bd9;
-  --color-accent-hover: #3150c8;
   --color-accent-soft: rgb(59 91 217 / 10%);
+  --color-text-on-accent: #ffffff;
 
   /* Status: text color and a soft background each. */
   --color-success: #1d7a3a;
@@ -71,7 +75,8 @@
   --weight-medium: 500;
   --weight-semibold: 600;
 
-  /* Spacing on a 4px grid. */
+  /* Spacing on a 4px grid; the half step sets apart what belongs together. */
+  --space-half: 2px;
   --space-1: 4px;
   --space-2: 8px;
   --space-3: 12px;
@@ -85,6 +90,7 @@
   --radius-md: 6px;
   --radius-lg: 10px;
   --radius-xl: 14px;
+  --radius-2xl: 20px;
   --radius-full: 999px;
   --shadow-sm: 0 1px 2px rgb(0 0 0 / 5%);
   --shadow-md: 0 2px 8px rgb(0 0 0 / 6%), 0 1px 2px rgb(0 0 0 / 4%);
@@ -94,9 +100,13 @@
   /* Layout. */
   --sidebar-width: 264px;
   --panel-width: 264px;
-  --content-width: 780px;
+  --content-width: 760px;
   --control-height: 28px;
   --control-height-sm: 24px;
+  --icon-size: 16px;
+  /* The top bar and the sidebar's header beside it; a row in the sidebar. */
+  --bar-height: 46px;
+  --row-height: 30px;
 
   /*
    * Older names, kept so styles written against them pick up the tokens.
@@ -130,11 +140,14 @@
     --color-text: #e9e9eb;
     --color-text-muted: #a2a2aa;
     --color-text-faint: #6f6f78;
-    --color-text-on-accent: #10142a;
+
+    --color-primary: #ececee;
+    --color-primary-hover: #ffffff;
+    --color-text-on-primary: #1a1a1c;
 
     --color-accent: #7b97ff;
-    --color-accent-hover: #93abff;
     --color-accent-soft: rgb(123 151 255 / 14%);
+    --color-text-on-accent: #10142a;
 
     --color-success: #57c278;
     --color-success-soft: rgb(87 194 120 / 13%);

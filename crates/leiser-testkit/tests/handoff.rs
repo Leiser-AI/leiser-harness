@@ -7,7 +7,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use leiser_service::{
-    AgentCli, AgentEvent, ChatId, Checkout, Command, CommandError, Event, Response, ServiceHandle,
+    AgentCli, AgentEvent, ChatId, ChatSettings, Checkout, Command, CommandError, Event, Response,
+    ServiceHandle,
 };
 use leiser_testkit::{FakeDriver, Script, Step, TestRepo, TestService, collect_turn};
 use serde_json::json;
@@ -49,6 +50,7 @@ async fn start_chat(service: &ServiceHandle, repo: &TestRepo) -> TestResult<Chat
         .execute(Command::StartChat {
             repository,
             checkout: Checkout::Main,
+            settings: ChatSettings::default(),
         })
         .await?;
     let Response::ChatStarted { chat } = response else {
