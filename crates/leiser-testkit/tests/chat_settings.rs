@@ -7,10 +7,12 @@ use std::sync::Arc;
 
 use leiser_service::{
     AgentCli, AgentEvent, ApiKey, ChatId, ChatSettings, ChatStatus, Checkout, Command,
-    CommandError, PermissionMode, Provider, RepositoryId, Response, ServiceHandle, SignIn, StartOn,
-    SubscriptionId,
+    CommandError, Event, PermissionMode, Provider, RepositoryId, Response, ServiceHandle, SignIn,
+    StartOn, SubscriptionId,
 };
-use leiser_testkit::{FakeDriver, Gate, Script, Step, TestRepo, TestService, collect_turn};
+use leiser_testkit::{
+    FakeDriver, Gate, Script, Step, TestRepo, TestService, collect_turn, next_event,
+};
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
@@ -244,6 +246,7 @@ async fn the_chosen_settings_hold_while_the_worktrees_setup_script_runs() -> Tes
         ),
     )?;
     let repository = add_repository(&service, &repo).await?;
+    let mut events = service.subscribe();
 
     let chat = start_chat(
         &service,
@@ -260,12 +263,26 @@ async fn the_chosen_settings_hold_while_the_worktrees_setup_script_runs() -> Tes
     .await?;
 
     // The setup script still runs: a change of agent CLI would be refused now.
-    assert_eq!(status(&service, chat).await?, ChatStatus::Working);
-    assert_eq!(
+    let during_setup = (
+        status(&service, chat).await?,
         chat_settings(&service, chat).await?,
-        (AgentCli::Codex, None, PermissionMode::Supervised)
     );
+    // The script ends before the test does: it looks for the gate's file,
+    // which goes with the gate, and on Windows the test's runtime waits
+    // for a script that still runs.
     gate.open()?;
+    while !matches!(
+        next_event(&mut events, chat).await?,
+        Event::ScriptFinished { .. }
+    ) {}
+
+    assert_eq!(
+        during_setup,
+        (
+            ChatStatus::Working,
+            (AgentCli::Codex, None, PermissionMode::Supervised)
+        )
+    );
     Ok(())
 }
 
