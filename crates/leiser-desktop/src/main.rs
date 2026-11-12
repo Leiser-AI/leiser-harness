@@ -18,10 +18,14 @@
 //!
 //! The terminal panel's shells run in the app itself (`terminals.rs`), in
 //! the chat's checkout, and end when the app quits.
+//!
+//! The app updates itself from its release channel's update feed
+//! (`app_update.rs`).
 
 // Release builds on Windows open no console window next to the app.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod app_update;
 mod connection;
 mod terminals;
 
@@ -39,6 +43,8 @@ fn main() -> Result<(), tauri::Error> {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .manage(app_update::FoundUpdate::default())
         .manage(Terminals::default())
         .setup(|app| {
             // Not in the app data directory: its path has a space on macOS,
@@ -64,6 +70,8 @@ fn main() -> Result<(), tauri::Error> {
             terminals::resize_terminal,
             terminals::close_terminal,
             terminals::close_all_terminals,
+            app_update::check_app_update,
+            app_update::install_app_update,
         ])
         .build(tauri::generate_context!())?
         .run(|app, event| {

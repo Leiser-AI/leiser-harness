@@ -44,6 +44,7 @@ import type {
   WayfinderMap,
   WayfinderMaps,
 } from "./protocol";
+import * as appUpdate from "./appUpdate";
 import * as diffPanel from "./diff";
 import * as extensions from "./extensions";
 import { icon, type IconName } from "./icons";
@@ -2372,6 +2373,11 @@ addSubscriptionForm.addEventListener("submit", (event) => {
 
 // The top bar's terminal button follows the panel.
 terminal.init(() => void refresh().catch(showError));
+
+// The sidebar offers a new version of the app once one is out.
+void appUpdate.start(byId<HTMLButtonElement>("app-update")).catch((error) =>
+  console.warn("app updates are off", error),
+);
 
 void act(async () => {
   await service.subscribe(

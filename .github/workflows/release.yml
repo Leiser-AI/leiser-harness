@@ -1,9 +1,13 @@
 name: Release
 
-# Builds the installers on GitHub's runners. A version tag also puts them
-# on a draft GitHub release, which the user publishes: `v<version>` on
-# `main` is a release, `v<version>-beta.<n>` on `development` a pre-release. A pull request
-# that changes the packaging builds them without publishing anything.
+# Builds the installers on GitHub's runners. The tag `v<version>` also puts
+# them on a draft GitHub release, which the user publishes: a version
+# `X.Y.Z` from `main` is a release, `X.Y.Z-beta.N` from `development` a
+# pre-release. With the update signing key (secrets TAURI_SIGNING_*), the
+# release also carries the signed updates and their manifest `latest.json`,
+# which update-feed.yml serves once the release is published. A pull
+# request that changes the packaging builds the installers without
+# publishing anything.
 
 on:
   push:
@@ -35,17 +39,16 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       # The installers take their version from tauri.conf.json; it must
-      # match the workspace's, and a tag's (a beta tag adds `-beta.<n>`,
-      # which the installers do not carry). MSI accepts only X.Y.Z.
+      # match the workspace's and the tag's.
       - name: Check the version
         run: |
           cargo_version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
           tauri_version=$(jq -r .version crates/leiser-desktop/tauri.conf.json)
           echo "Cargo.toml: $cargo_version, tauri.conf.json: $tauri_version"
           [ "$cargo_version" = "$tauri_version" ] || { echo "::error::the versions differ"; exit 1; }
-          [[ "$tauri_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::the version is not X.Y.Z"; exit 1; }
+          [[ "$tauri_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-beta\.[0-9]+)?$ ]] || { echo "::error::the version is neither X.Y.Z nor X.Y.Z-beta.N"; exit 1; }
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            [[ "$GITHUB_REF_NAME" =~ ^v${tauri_version//./\\.}(-beta\.[0-9]+)?$ ]] || { echo "::error::tag $GITHUB_REF_NAME is neither v$tauri_version nor v$tauri_version-beta.<n>"; exit 1; }
+            [ "$GITHUB_REF_NAME" = "v$tauri_version" ] || { echo "::error::tag $GITHUB_REF_NAME does not match v$tauri_version"; exit 1; }
           fi
 
   build:
@@ -61,13 +64,13 @@ jobs:
             rust-targets: aarch64-apple-darwin,x86_64-apple-darwin
             installers: |
               target/universal-apple-darwin/release/bundle/dmg/*.dmg
+              target/universal-apple-darwin/release/bundle/macos/*.app.tar.gz*
           - name: Windows
             os: windows-latest
             target: x86_64-pc-windows-msvc
             rust-targets: x86_64-pc-windows-msvc
             installers: |
-              target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
-              target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi
+              target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe*
           # The oldest supported Ubuntu, so the packages run on older glibc
           # versions too. No AppImage: the harness service outlives the app,
           # and an AppImage's files go away when the app quits.
@@ -76,8 +79,8 @@ jobs:
             target: x86_64-unknown-linux-gnu
             rust-targets: x86_64-unknown-linux-gnu
             installers: |
-              target/x86_64-unknown-linux-gnu/release/bundle/deb/*.deb
-              target/x86_64-unknown-linux-gnu/release/bundle/rpm/*.rpm
+              target/x86_64-unknown-linux-gnu/release/bundle/deb/*.deb*
+              target/x86_64-unknown-linux-gnu/release/bundle/rpm/*.rpm*
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     steps:
@@ -90,7 +93,7 @@ jobs:
         timeout-minutes: 5
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev librsvg2-dev libxdo-dev
+          sudo apt-get install -y libwebkit2gtk-4.1-dev librsvg2-dev libxdo-dev libssl-dev
       - uses: Swatinem/rust-cache@v2
         with:
           key: release-${{ matrix.target }}
@@ -103,6 +106,9 @@ jobs:
         working-directory: crates/leiser-desktop
         # bash also on Windows: PowerShell's npm shim can drop the `--`.
         shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           npm ci
           npm run package -- --target ${{ matrix.target }}
@@ -121,14 +127,33 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v7
+        with:
+          sparse-checkout: crates/leiser-desktop/scripts
       - uses: actions/download-artifact@v8
         with:
           path: installers
           merge-multiple: true
+      # GitHub renames asset files with other characters (an `.rpm` of a
+      # beta has a `~`); renamed here, the manifest's links match the assets.
+      - name: Give the installers plain names
+        run: |
+          find installers -type f -name '*[!A-Za-z0-9._-]*' -print0 |
+            while IFS= read -r -d '' file; do
+              name=$(basename "$file")
+              mv "$file" "$(dirname "$file")/${name//[^A-Za-z0-9._-]/.}"
+            done
+          find installers -type f
+      # Fails when an update or its signature is missing, so a release never
+      # goes out without updates.
+      - name: Write the update manifest
+        run: |
+          node crates/leiser-desktop/scripts/update-manifest.mjs \
+            installers "$GITHUB_REF_NAME" "$GITHUB_REPOSITORY" installers/latest.json
       - name: Create the draft release
         env:
           GH_TOKEN: ${{ github.token }}
-        # The artifacts keep their bundle folders (dmg/, nsis/, msi/, deb/,
+        # The artifacts keep their bundle folders (dmg/, macos/, nsis/, deb/,
         # rpm/); the release gets the files. A rerun on the same tag
         # replaces the installers of its release.
         run: |

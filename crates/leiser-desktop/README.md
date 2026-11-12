@@ -166,9 +166,22 @@ in release mode, copies it to `binaries/` under the name Tauri expects
 (`leiser-harness-service-<target>`), then runs `tauri build` with
 `tauri.release.conf.json`. That file adds the service as `externalBin`, so
 every installer puts it next to the app, where the app looks for it; it
-also limits the installers to `.app`/`.dmg`, NSIS/MSI and `.deb`/`.rpm` (no
+also limits the installers to `.app`/`.dmg`, NSIS and `.deb`/`.rpm` (no
 AppImage, whose files are gone once the app quits, while the service runs
-on) and signs the macOS app ad hoc. It is a separate file because `tauri-build`
+on; no MSI, which takes no beta version), signs the macOS app ad hoc and
+gives the Windows installer `windows/installer-hooks.nsh`, which moves the
+running service program aside so it can be replaced. With
+`TAURI_SIGNING_PRIVATE_KEY` set, the build signs the installers the updater
+installs; a beta version (`X.Y.Z-beta.N`) reads the beta update feed.
+
+## App updates
+
+`src/app_update.rs` and `web/src/appUpdate.ts`: the app looks for a new
+version in its channel's update feed (ADR 0009) when it starts and every
+four hours, and offers it as "Update to …" at the bottom of the sidebar.
+Installing it restarts the app; turns keep running in the harness service,
+which moves to the new program once none runs. Debug builds (`npm run
+tauri dev`) never look for updates. It is a separate file because `tauri-build`
 requires an `externalBin` to exist on every build, also `cargo test`.
 `--target universal-apple-darwin` builds the service for both Mac
 architectures and joins them with `lipo`. The `Release` workflow runs the

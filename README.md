@@ -43,7 +43,7 @@ Download the installer for your system from the newest entry on the
 | System                          | File                                   |
 | ------------------------------- | -------------------------------------- |
 | macOS (Apple silicon, Intel)    | `leiser-harness_<version>_universal.dmg` |
-| Windows 10/11 (x64)             | `leiser-harness_<version>_x64-setup.exe` or `.msi` |
+| Windows 10/11 (x64)             | `leiser-harness_<version>_x64-setup.exe` |
 | Linux (x64)                     | `.deb` or `.rpm`                       |
 
 The installers are not signed with a paid certificate yet, so the system
@@ -61,8 +61,7 @@ warns on the first start.
 
 ### Windows
 
-1. Run `leiser-harness_<version>_x64-setup.exe` (or, for managed
-   installs, `leiser-harness_<version>_x64_en-US.msi`).
+1. Run `leiser-harness_<version>_x64-setup.exe`.
 2. If SmartScreen shows "Windows protected your PC", click **More info →
    Run anyway**. The setup installs Microsoft Edge WebView2 if it is
    missing.
@@ -100,10 +99,13 @@ are gone by then.
 The harness service keeps running after you quit the app, so turns are not
 interrupted.
 
-- **Update:** install the new version over the old one. The running harness
-  service switches to it as soon as no turn runs. On Windows, quit the app
-  and stop the service first (below), since Windows cannot replace a
-  running program.
+- **Update:** the app looks for a new version when it starts and every few
+  hours. When there is one, **Update to …** shows at the bottom of the
+  sidebar; a click installs it and restarts the app (on Linux it asks for
+  your password). Running turns go on, and the harness service moves to the
+  new version as soon as no turn runs. A beta updates to newer betas and
+  stable releases, a stable release only to stable releases. Installing a
+  new version by hand over the old one works too.
 - **Stop the service:** `pkill -f leiser-harness-service` (macOS, Linux) or
   `taskkill /IM leiser-harness-service.exe /F` (Windows).
 - **Uninstall:** stop the service and remove the app. To remove your chats
@@ -120,7 +122,7 @@ picked up), [Node.js](https://nodejs.org) LTS and, on Linux, the WebKitGTK
 libraries:
 
 ```bash
-sudo apt install libwebkit2gtk-4.1-dev librsvg2-dev libxdo-dev
+sudo apt install libwebkit2gtk-4.1-dev librsvg2-dev libxdo-dev libssl-dev
 ```
 
 Then build the installers for your system:
@@ -172,12 +174,15 @@ A release is a merge of `development` into `main` (see
 on `main` with `v<version>` runs the `Release` workflow: it builds the
 installers on GitHub's macOS, Windows and Linux runners and attaches them to
 a draft GitHub release, which a maintainer then publishes. A beta comes from
-`development` instead, tagged `v<version>-beta.<n>`, and becomes a
-pre-release; its installers carry the plain version. The version is
-`X.Y.Z` (MSI accepts nothing else) and is set in both `Cargo.toml` and
+`development` instead, with a version `X.Y.Z-beta.N`, and becomes a
+pre-release. The version is set in both `Cargo.toml` and
 `crates/leiser-desktop/tauri.conf.json`; the workflow checks that both and
-the tag agree. A pull request that changes the packaging builds the
-installers without publishing them.
+the tag agree. Publishing the release serves it to installed apps through
+the update feed ([ADR 0009](docs/adr/0009-app-updates-from-a-feed-per-channel.md)).
+The updates are signed with the maintainer's key, stored as the secrets
+`TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`. A
+pull request that changes the packaging builds the installers without
+publishing them.
 
 ## Working with coding agents
 

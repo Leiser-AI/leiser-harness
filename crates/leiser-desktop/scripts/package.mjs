@@ -2,6 +2,11 @@
 // bundles it next to the app (`externalBin` in tauri.release.conf.json),
 // then the app itself.
 //
+// A beta version (`X.Y.Z-beta.N` in tauri.conf.json) reads the beta update
+// feed instead of the stable one. With TAURI_SIGNING_PRIVATE_KEY (and
+// TAURI_SIGNING_PRIVATE_KEY_PASSWORD) set, the build also signs the
+// installers the app updater installs; without, it builds no updates.
+//
 //   npm run package                                   # this machine's system
 //   npm run package -- --target universal-apple-darwin
 //
@@ -16,6 +21,7 @@ const binaries = path.join(desktop, "binaries");
 const SERVICE = "leiser-harness-service";
 const UNIVERSAL = "universal-apple-darwin";
 const MAC_ARCHITECTURES = ["aarch64-apple-darwin", "x86_64-apple-darwin"];
+const FEED = "https://raw.githubusercontent.com/Leiser-AI/leiser-harness/update-feed";
 
 function fail(message) {
   console.error(`package: ${message}`);
@@ -82,6 +88,48 @@ if (target === UNIVERSAL) {
   bundleService(target);
 }
 
-run("npm", ["exec", "--", "tauri", "build", "--config", "tauri.release.conf.json", "--target", target, ...rest], {
-  cwd: desktop,
-});
+/** tauri.release.conf.json plus what this build adds: the beta feed for a
+ * beta version, and update signatures when there is a key. */
+function packageConfig() {
+  const release = JSON.parse(fs.readFileSync(path.join(desktop, "tauri.release.conf.json"), "utf8"));
+  const { version } = JSON.parse(fs.readFileSync(path.join(desktop, "tauri.conf.json"), "utf8"));
+  const signs = Boolean(process.env.TAURI_SIGNING_PRIVATE_KEY);
+  release.bundle.createUpdaterArtifacts = signs;
+  if (version.includes("-beta.")) {
+    release.plugins = { updater: { endpoints: [`${FEED}/beta.json`] } };
+  }
+  const config = path.join(binaries, "tauri.package.conf.json");
+  fs.writeFileSync(config, JSON.stringify(release, null, 2));
+  return { config, signs };
+}
+
+/** The installers of `target` the app updater installs. */
+function updaterInstallers(target) {
+  const bundle = path.join(workspace, "target", target, "release", "bundle");
+  const inFolder = (folder, ending) =>
+    fs.existsSync(path.join(bundle, folder))
+      ? fs
+          .readdirSync(path.join(bundle, folder))
+          .filter((name) => name.endsWith(ending))
+          .map((name) => path.join(bundle, folder, name))
+      : [];
+  return [
+    ...inFolder("macos", ".app.tar.gz"),
+    ...inFolder("nsis", "-setup.exe"),
+    ...inFolder("deb", ".deb"),
+    ...inFolder("rpm", ".rpm"),
+  ];
+}
+
+const { config, signs } = packageConfig();
+run("npm", ["exec", "--", "tauri", "build", "--config", config, "--target", target, ...rest], { cwd: desktop });
+
+// The bundler signs the macOS and Windows updates; the Linux packages the
+// updater installs too are signed here.
+if (signs) {
+  for (const installer of updaterInstallers(target)) {
+    if (!fs.existsSync(`${installer}.sig`)) {
+      run("npm", ["exec", "--", "tauri", "signer", "sign", installer], { cwd: desktop });
+    }
+  }
+}
