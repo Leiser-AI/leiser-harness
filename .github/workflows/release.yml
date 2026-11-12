@@ -126,12 +126,15 @@ jobs:
       - name: Create the draft release
         env:
           GH_TOKEN: ${{ github.token }}
-        # A rerun on the same tag replaces the installers of its release.
+        # The artifacts keep their bundle folders (dmg/, nsis/, msi/, deb/,
+        # rpm/); the release gets the files. A rerun on the same tag
+        # replaces the installers of its release.
         run: |
+          mapfile -t files < <(find installers -type f)
           if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" installers/* --repo "$GITHUB_REPOSITORY" --clobber
+            gh release upload "$GITHUB_REF_NAME" "${files[@]}" --repo "$GITHUB_REPOSITORY" --clobber
           else
-            gh release create "$GITHUB_REF_NAME" installers/* \
+            gh release create "$GITHUB_REF_NAME" "${files[@]}" \
               --repo "$GITHUB_REPOSITORY" \
               --draft --verify-tag --generate-notes \
               --title "leiser-harness $GITHUB_REF_NAME"
