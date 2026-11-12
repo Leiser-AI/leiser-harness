@@ -32,6 +32,7 @@
   /* One accent for focus, selection and marks that ask for attention. */
   --color-accent: #3b5bd9;
   --color-accent-soft: rgb(59 91 217 / 10%);
+  --color-text-on-accent: #ffffff;
 
   /* Status: text color and a soft background each. */
   --color-success: #1d7a3a;
@@ -50,6 +51,13 @@
   /* Diffs. */
   --color-diff-added: rgb(46 160 67 / 14%);
   --color-diff-removed: rgb(248 81 73 / 14%);
+
+  /* Wayfinder ticket types. */
+  --color-type-research: #7a4cc2;
+  --color-type-prototype: #b75a00;
+  --color-type-grilling: #c42b2b;
+  --color-type-task: #2f67c9;
+  --color-type-untyped: var(--color-text-faint);
 
   /* Type. */
   --font-sans: -apple-system, BlinkMacSystemFont, system-ui, "Segoe UI", Roboto, sans-serif;
@@ -139,6 +147,7 @@
 
     --color-accent: #7b97ff;
     --color-accent-soft: rgb(123 151 255 / 14%);
+    --color-text-on-accent: #10142a;
 
     --color-success: #57c278;
     --color-success-soft: rgb(87 194 120 / 13%);
@@ -154,6 +163,11 @@
 
     --color-diff-added: rgb(46 160 67 / 18%);
     --color-diff-removed: rgb(248 81 73 / 18%);
+
+    --color-type-research: #b28cf2;
+    --color-type-prototype: #f0a35c;
+    --color-type-grilling: #f47067;
+    --color-type-task: #6ea2ff;
 
     --shadow-sm: 0 1px 2px rgb(0 0 0 / 30%);
     --shadow-md: 0 2px 8px rgb(0 0 0 / 35%);

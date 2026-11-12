@@ -29,7 +29,9 @@ use crate::todos::{TodoChange, TodoError, TodoList};
 use crate::worktree::{self, WorktreeError};
 
 mod auto_fix;
+mod polls;
 mod pull_requests;
+mod wayfinder;
 
 use crate::{
     Access, AgentCli, AgentEvent, AgentSessionId, Answer, Branch, ChatId, ChatOverview,
@@ -42,6 +44,7 @@ use crate::{
 };
 use auto_fix::{AutoFixWork, ChatAutoFix};
 use pull_requests::{ChatPullRequest, PullRequestWork};
+use wayfinder::{RepositoryMaps, WayfinderWork};
 
 /// Commands waiting for the command loop. Small, so callers feel back
 /// pressure instead of queueing without bound.
@@ -78,6 +81,8 @@ pub struct ServiceConfig {
     git_host: Option<Arc<dyn GitHost>>,
     /// How often auto-fix polls an open pull request.
     pull_request_poll_interval: Duration,
+    /// How often repositories' wayfinder maps are polled.
+    wayfinder_poll_interval: Duration,
 }
 
 impl ServiceConfig {
@@ -102,7 +107,16 @@ impl ServiceConfig {
             repo_check: None,
             git_host: None,
             pull_request_poll_interval: auto_fix::POLL_INTERVAL,
+            wayfinder_poll_interval: wayfinder::POLL_INTERVAL,
         }
+    }
+
+    /// Polls repositories' wayfinder maps every `interval` instead of
+    /// every 30 seconds.
+    #[must_use]
+    pub fn with_wayfinder_poll_interval(mut self, interval: Duration) -> Self {
+        self.wayfinder_poll_interval = interval;
+        self
     }
 
     /// Polls open pull requests for auto-fix every `interval` instead of
@@ -545,6 +559,7 @@ enum Background {
     },
     PullRequest(PullRequestWork),
     AutoFix(AutoFixWork),
+    Wayfinder(WayfinderWork),
 }
 
 /// A repository's `repo-check`, once it has run or runs.
@@ -679,6 +694,10 @@ struct State {
     git_host: Arc<dyn GitHost>,
     /// How often auto-fix polls an open pull request.
     pull_request_poll_interval: Duration,
+    /// How often repositories' wayfinder maps are polled.
+    wayfinder_poll_interval: Duration,
+    /// Repositories' wayfinder maps, once read.
+    wayfinder: BTreeMap<RepositoryId, RepositoryMaps>,
     host_accounts: HostAccounts,
     host_account_logins: BTreeMap<HostAccountId, Login>,
     next_id: u64,
@@ -744,6 +763,8 @@ impl State {
                 .git_host
                 .unwrap_or_else(|| Arc::new(GhGitHost::installed())),
             pull_request_poll_interval: config.pull_request_poll_interval,
+            wayfinder_poll_interval: config.wayfinder_poll_interval,
+            wayfinder: BTreeMap::new(),
             host_accounts,
             host_account_logins: BTreeMap::new(),
             next_id: stored.next_id,
@@ -781,6 +802,8 @@ impl State {
     ) {
         let mut polls = tokio::time::interval(self.pull_request_poll_interval);
         polls.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut map_polls = tokio::time::interval(self.wayfinder_poll_interval);
+        map_polls.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tokio::select! {
                 biased;
@@ -790,6 +813,7 @@ impl State {
                 // Never closes: `self` holds a sender.
                 Some(finished) = background.recv() => self.on_background(finished).await,
                 _ = polls.tick() => self.poll_pull_requests(),
+                _ = map_polls.tick() => self.poll_wayfinder_maps(),
                 // Never closes: the harness MCP server holds a sender.
                 Some(call) = calls.recv() => self.on_call(call),
                 Some(()) = updates.recv(), if !self.update_waiting => {
@@ -893,6 +917,7 @@ impl State {
             Command::SetAutoFix { chat, on } => self.set_auto_fix(chat, on),
             Command::RunRepoCheck { repository } => self.run_repo_check(repository),
             Command::ReadRepoCheck { repository } => self.read_repo_check(repository),
+            Command::ReadWayfinderMaps { repository } => self.read_wayfinder_maps(repository),
             command @ (Command::ListTodos { .. }
             | Command::AddTodo { .. }
             | Command::SetTodoDone { .. }
@@ -1349,6 +1374,7 @@ impl State {
             }
             Background::PullRequest(work) => self.pull_request_finished(work),
             Background::AutoFix(work) => self.auto_fix_finished(work).await,
+            Background::Wayfinder(work) => self.wayfinder_polled(work),
         }
     }
 

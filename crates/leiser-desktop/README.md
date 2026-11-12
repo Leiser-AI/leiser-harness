@@ -81,6 +81,28 @@ the branch conflict or post comments, for example `{"1": {"failed_checks":
 "reviewer", "body": "Rename it", "location": {"path": "src/lib.rs", "line":
 3}}]}}`.
 
+A repository with an open wayfinder map (an issue labelled
+`wayfinder:map` on the git host) shows "Wayfinder map" in the sidebar; one
+without shows nothing extra. It draws the map as a graph from Start to
+Destination: each ticket (the map's sub-issues) as a box with its type as
+icon and color, arrows along the git host's blocking dependencies, and its
+state: closed, claimed (assigned), blocked (an open blocker; one outside
+the map shows as a small box of its own) or on the frontier. A picker
+switches between several open maps. While the app is connected, the
+harness service polls the maps every 30 seconds (5 on the fake git host)
+with entity tags through the repository's host account, so a ticket closed
+or claimed on the git host shows up by itself. Clicking a ticket opens it
+in the browser; a frontier ticket's chat button opens a new chat in a new
+worktree with the wayfinder skill invoked for the ticket in the composer
+(`/wayfinder <map> <ticket>` for Claude Code, `$wayfinder` for Codex; it
+follows the agent CLI chosen in the composer), ready to send: sending
+starts the chat. On the fake git host, write `fake-git-host-wayfinder.json`
+into the host account's `gh` config directory, for example `{"maps":
+[{"number": 1, "title": "Map: v2", "tickets": [{"number": 2, "title": "Pick
+a store", "type": "research"}, {"number": 3, "title": "Agree on the API",
+"type": "grilling", "blocked_by": [2], "assignees": ["someone"], "open":
+true}]}]}`.
+
 The top bar's Terminal button opens a terminal panel on the right with a
 shell in the chat's checkout (its worktree, or the main checkout): the login
 shell on macOS, PowerShell on Windows. Each chat keeps its own shell while

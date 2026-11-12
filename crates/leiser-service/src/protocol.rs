@@ -464,6 +464,13 @@ pub enum Command {
     /// Reads the repository's last `repo-check` result, without the checks
     /// that its `.leiser/config.toml` switches off.
     ReadRepoCheck { repository: RepositoryId },
+    /// Reads the repository's open wayfinder maps as the harness service
+    /// last polled them from the git host, with the repository's host
+    /// account. While a client is connected, the harness service polls
+    /// them every 30 seconds with the entity tags of the last answers;
+    /// a change is reported as [`Event::WayfinderMapsChanged`]. The first
+    /// read of a repository that was not polled yet starts a poll.
+    ReadWayfinderMaps { repository: RepositoryId },
     /// Reads a chat's todo list.
     ListTodos { chat: ChatId },
     /// Adds a todo at the end of the chat's todo list. Its text is trimmed
@@ -745,6 +752,9 @@ pub enum Response {
     RepoCheck {
         check: RepoCheck,
     },
+    WayfinderMaps {
+        maps: WayfinderMaps,
+    },
     Todos {
         todos: Vec<Todo>,
     },
@@ -972,6 +982,108 @@ pub enum PullRequestState {
     Merged,
     /// Closed without a merge.
     Closed,
+}
+
+/// A repository's open wayfinder maps, as the harness service last read
+/// them from the git host.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum WayfinderMaps {
+    /// Not read yet; [`Event::WayfinderMapsChanged`] follows once they are.
+    NotRead,
+    /// The harness cannot read them: the repository has no host account,
+    /// no `origin` on its git host, or the git host refused.
+    Unavailable { reason: String },
+    /// Every open issue labelled `wayfinder:map`, newest first. A failed
+    /// poll after a successful one keeps these.
+    Read { maps: Vec<WayfinderMap> },
+}
+
+/// A wayfinder map: an issue on the git host whose sub-issues are its
+/// tickets, from the start to the map's destination.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WayfinderMap {
+    /// The map issue's number on the git host.
+    pub number: u64,
+    pub title: String,
+    /// Where the git host shows the map.
+    pub url: String,
+    /// The map's tickets in map order: the first frontier ticket is the
+    /// next to take.
+    pub tickets: Vec<Ticket>,
+}
+
+/// A ticket of a wayfinder map: one question or piece of work, as one
+/// sub-issue of the map.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Ticket {
+    /// The ticket's issue number on the git host.
+    pub number: u64,
+    pub title: String,
+    /// Where the git host shows the ticket.
+    pub url: String,
+    /// From its `wayfinder:<type>` label; `None` without one.
+    pub ticket_type: Option<TicketType>,
+    pub state: TicketState,
+    /// The tickets of the same map that block this one, open or closed:
+    /// the map's edges, by issue number.
+    pub blocked_by: Vec<u64>,
+}
+
+/// What resolving a ticket takes, after its `wayfinder:<type>` label.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TicketType {
+    /// Reading documentation or sources for a fact a decision waits on.
+    Research,
+    /// A rough artifact to react to.
+    Prototype,
+    /// A conversation with the developer.
+    Grilling,
+    /// Work that must be done before a decision can be made.
+    Task,
+}
+
+/// Where a ticket stands. A closed ticket is [`TicketState::Closed`]; an
+/// open one is claimed when it is assigned, else blocked while one of its
+/// blockers is open, else on the frontier.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum TicketState {
+    Closed,
+    /// Someone works on it: it is assigned to them.
+    Claimed {
+        assignees: Vec<String>,
+    },
+    /// Open issues block it: tickets of the map, or issues outside it.
+    Blocked {
+        open_blockers: Vec<IssueRef>,
+    },
+    /// Open, unblocked and unclaimed: it can be taken now.
+    Frontier,
+}
+
+/// An issue on the git host, in the repository or in another one.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum IssueRef {
+    Here {
+        number: u64,
+    },
+    Elsewhere {
+        /// `owner/name`.
+        repository: String,
+        number: u64,
+    },
+}
+
+impl std::fmt::Display for IssueRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Here { number } => write!(f, "#{number}"),
+            Self::Elsewhere { repository, number } => write!(f, "{repository}#{number}"),
+        }
+    }
 }
 
 /// Whether the harness watches a chat's open pull request and wakes the
@@ -1580,6 +1692,10 @@ pub enum Event {
         pull_request: u64,
         triggers: Vec<AutoFixTrigger>,
     },
+    /// The repository's wayfinder maps changed on the git host, or were
+    /// read for the first time; read them with
+    /// [`Command::ReadWayfinderMaps`].
+    WayfinderMapsChanged { repository: RepositoryId },
     /// An update of the harness service waits until no turn runs. Then the
     /// service restarts on the new version and resumes every agent session.
     ServiceUpdateWaiting,
@@ -1612,6 +1728,7 @@ impl Event {
             | Self::HostAccountLoginFinished { .. }
             | Self::RepoCheckStarted { .. }
             | Self::RepoCheckFinished { .. }
+            | Self::WayfinderMapsChanged { .. }
             | Self::ServiceUpdateWaiting => None,
         }
     }

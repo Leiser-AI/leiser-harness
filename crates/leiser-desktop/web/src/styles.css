@@ -259,7 +259,8 @@ body {
 }
 
 .chat-link.done .chat-title,
-.repo-check-link .chat-title {
+.repo-check-link .chat-title,
+.wayfinder-link .chat-title {
   color: var(--color-text-muted);
 }
 
@@ -1970,4 +1971,246 @@ body {
 .pull-request-target {
   margin: 0;
   font-size: var(--text-sm);
+}
+
+/* ---- Wayfinder map ---- */
+
+.wayfinder {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: var(--space-4) var(--space-4) 0;
+}
+
+.wayfinder-intro {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-bottom: var(--space-2);
+}
+
+.wayfinder-intro p {
+  margin: 0;
+  font-size: var(--text-md);
+}
+
+.wayfinder-picker {
+  height: var(--control-height);
+  max-width: 320px;
+}
+
+.wayfinder-legend {
+  display: flex;
+  gap: var(--space-4);
+  margin: 0 0 var(--space-2);
+  padding: 0;
+  list-style: none;
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
+}
+
+.wayfinder-legend li::before {
+  content: "";
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: var(--space-1);
+  border-radius: var(--radius-full);
+  background: var(--type-color);
+}
+
+.wayfinder-scroller {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  border-top: 1px solid var(--color-border);
+}
+
+.wayfinder-graph {
+  position: relative;
+  margin: 0 auto;
+}
+
+.wayfinder-arrows {
+  position: absolute;
+  inset: 0;
+  overflow: visible;
+}
+
+.wayfinder-arrow {
+  fill: none;
+  stroke: var(--color-border-strong);
+  stroke-width: 1.5;
+}
+
+.wayfinder-arrow.blocking {
+  stroke: var(--color-text-muted);
+}
+
+.wayfinder-arrow.cleared {
+  stroke-dasharray: 3 3;
+}
+
+.wayfinder-arrow.cycle {
+  stroke: var(--color-danger);
+  stroke-dasharray: 4 3;
+}
+
+.wayfinder-arrowhead {
+  fill: var(--color-text-muted);
+}
+
+.wayfinder-end {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  font-size: var(--text-md);
+  font-weight: var(--weight-semibold);
+  color: var(--color-text);
+  background: var(--color-bg);
+}
+
+.wayfinder-outside {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px dashed var(--color-border-strong);
+  border-radius: var(--radius-full);
+  background: var(--color-surface-sunken);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.type-research { --type-color: var(--color-type-research); }
+.type-prototype { --type-color: var(--color-type-prototype); }
+.type-grilling { --type-color: var(--color-type-grilling); }
+.type-task { --type-color: var(--color-type-task); }
+.type-untyped { --type-color: var(--color-type-untyped); }
+
+.wayfinder-ticket {
+  position: absolute;
+  display: flex;
+  border: 1.5px solid var(--type-color);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-sm);
+  overflow: hidden;
+}
+
+.wayfinder-ticket-open {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 0 var(--space-2);
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--color-text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.wayfinder-ticket-open:hover {
+  background: var(--color-hover);
+}
+
+.wayfinder-type {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: var(--radius-sm);
+  color: var(--type-color);
+  background: color-mix(in srgb, var(--type-color) 12%, transparent);
+}
+
+.wayfinder-ticket-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.wayfinder-ticket-title {
+  overflow: hidden;
+  font-size: var(--text-md);
+  font-weight: var(--weight-medium);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.wayfinder-ticket-facts {
+  overflow: hidden;
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.wayfinder-ticket.state-closed {
+  opacity: 0.55;
+}
+
+.wayfinder-ticket.state-closed .wayfinder-ticket-title {
+  text-decoration: line-through;
+}
+
+.wayfinder-ticket.state-closed .wayfinder-ticket-open > .icon {
+  flex: none;
+  margin-left: auto;
+  color: var(--color-success);
+}
+
+.wayfinder-ticket.state-blocked {
+  border-style: dashed;
+  box-shadow: none;
+}
+
+.wayfinder-ticket.state-claimed .wayfinder-ticket-facts {
+  color: var(--color-accent);
+}
+
+.wayfinder-ticket.state-frontier {
+  border-width: 2px;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--type-color) 18%, transparent), var(--shadow-md);
+}
+
+.wayfinder-ticket.state-frontier .wayfinder-ticket-facts {
+  color: var(--color-success);
+  font-weight: var(--weight-medium);
+}
+
+.wayfinder-start-chat {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  border: 0;
+  border-left: 1px solid var(--color-border);
+  border-radius: 0;
+  background: var(--color-accent-soft);
+  color: var(--color-accent);
+  cursor: pointer;
+}
+
+.wayfinder-start-chat:hover {
+  background: var(--color-accent);
+  color: var(--color-text-on-accent);
+}
+
+.wayfinder-ticket button:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px var(--color-accent);
 }

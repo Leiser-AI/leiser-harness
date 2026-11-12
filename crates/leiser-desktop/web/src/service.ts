@@ -43,6 +43,7 @@ import type {
   TurnCheckpoints,
   UnreadableCliExtensionFile,
   UsageLimit,
+  WayfinderMaps,
 } from "./protocol";
 
 /** A chat as the service reports it. */
@@ -478,6 +479,32 @@ export async function runRepoCheck(repository: RepositoryId): Promise<void> {
 export async function readRepoCheck(repository: RepositoryId): Promise<RepoCheck> {
   const response = await execute({ type: "read_repo_check", repository });
   return response.type === "repo_check" ? response.check : unexpected(response);
+}
+
+/** The repository's open wayfinder maps, as the harness last read them. */
+export async function readWayfinderMaps(repository: RepositoryId): Promise<WayfinderMaps> {
+  const response = await execute({ type: "read_wayfinder_maps", repository });
+  return response.type === "wayfinder_maps" ? response.maps : unexpected(response);
+}
+
+/** Why a link did not open, as the app's Rust side reports it. */
+type OpenError = { type: "not_https"; url: string } | { type: "failed"; reason: string };
+
+/** Opens an `https://` link, such as a ticket on the git host, in the developer's browser. */
+export async function openInBrowser(url: string): Promise<void> {
+  try {
+    await invoke("open_in_browser", { url });
+  } catch (error) {
+    if (typeof error === "object" && error !== null && "type" in error) {
+      const failure = error as OpenError;
+      throw new Error(
+        failure.type === "not_https"
+          ? `Only https links open in the browser, not ${failure.url}.`
+          : `The browser did not open: ${failure.reason}`,
+      );
+    }
+    throw new Error(String(error));
+  }
 }
 
 /** Whether an update of the harness service waits for running turns. */

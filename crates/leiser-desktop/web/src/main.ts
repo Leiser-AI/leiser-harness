@@ -2,10 +2,10 @@
 // repositories, their repo-check results and the selected chat from the
 // harness service and reads them again on every service event. What it
 // keeps is how the developer looks at them: what is selected (a chat, a
-// repository's repo-check or its CLI extensions panel), whether a chat
-// shows its diff panel instead of its transcript, and which chats show
-// their todo list. A chat is always open: while none is selected, the new
-// chat the developer is about to start (`newChat.ts`).
+// repository's repo-check, its wayfinder map or its CLI extensions panel),
+// whether a chat shows its diff panel instead of its transcript, and which
+// chats show their todo list. A chat is always open: while none is
+// selected, the new chat the developer is about to start (`newChat.ts`).
 
 import type {
   AgentCli,
@@ -37,9 +37,12 @@ import type {
   SubscriptionId,
   SubscriptionOverview,
   ServiceConnection,
+  Ticket,
   Todo,
   TranscriptEntry,
   UsageLimit,
+  WayfinderMap,
+  WayfinderMaps,
 } from "./protocol";
 import * as diffPanel from "./diff";
 import * as extensions from "./extensions";
@@ -49,6 +52,7 @@ import { menuButton, type MenuButtonOptions, type MenuSection } from "./menu";
 import * as newChat from "./newChat";
 import * as service from "./service";
 import * as terminal from "./terminal";
+import * as wayfinder from "./wayfinder";
 import {
   AGENT_CLI_NAMES,
   AGENT_CLI_PROVIDERS,
@@ -66,6 +70,7 @@ type Selection =
   | { type: "new_chat" }
   | { type: "chat"; chat: ChatId }
   | { type: "repo_check"; repository: RepositoryId }
+  | { type: "wayfinder_map"; repository: RepositoryId }
   | { type: "extensions"; repository: RepositoryId };
 
 let selected: Selection = { type: "new_chat" };
@@ -76,10 +81,16 @@ function selectedChat(): ChatId | null {
 }
 
 /** The repository whose `view` is selected, if it is. */
-function selectedRepository(view: "repo_check" | "extensions"): RepositoryId | null {
+function selectedRepository(view: "repo_check" | "wayfinder_map" | "extensions"): RepositoryId | null {
   return selected.type === view ? selected.repository : null;
 }
 
+// The map the developer picked, by repository, when one has several.
+const pickedMaps = new Map<RepositoryId, number>();
+// A fingerprint of what the wayfinder view shows now; the view is built
+// again only when it changes, so other events keep the developer's focus
+// and scroll position.
+let renderedMapFingerprint: string | null = null;
 // Drops answers to older reads that arrive after newer ones.
 let readCount = 0;
 
@@ -138,6 +149,7 @@ const loginLines: string[] = [];
 let answeringLogin: number | null = null;
 
 const repoCheckView = byId("repo-check");
+const wayfinderView = byId("wayfinder");
 const serviceNotice = byId("service-notice");
 const todosPanel = byId("todos");
 const todoList = byId("todo-list");
@@ -303,18 +315,42 @@ async function readAndRender(): Promise<void> {
   // The new chat shows what it would start with in its repository.
   const startsIn = selected.type === "new_chat" ? newChat.repository(repositories) : null;
   const defaults = startsIn === null ? null : await readDefaults(startsIn.repository, updateWaiting);
+  // Read from what the service last polled, not from the git host.
+  const maps = new Map(
+    await Promise.all(
+      repositories.map(
+        async (overview) =>
+          [
+            overview.repository,
+            await service.readWayfinderMaps(overview.repository).catch(() => null),
+          ] as const,
+      ),
+    ),
+  );
   if (read !== readCount) return;
   renderServiceNotice(updateWaiting);
-  renderSidebar(repositories, chats, checks, startsIn?.repository ?? null);
+  renderSidebar(repositories, chats, checks, maps, startsIn?.repository ?? null);
   // The subscriptions dialog can open over any view.
   renderSubscriptions(subscriptions);
   renderHostAccounts(hostAccounts);
+  wayfinderView.hidden = true;
   if (selected.type === "extensions") {
     const shownRepository = selected.repository;
     const shown = repositories.find((overview) => overview.repository === shownRepository);
     repoCheckView.hidden = true;
     diffPanel.hide();
     renderExtensionsTopBar(shown ?? null);
+    renderTodos(null, null);
+    terminal.show(null);
+    return;
+  }
+  const mapRepository = repositories.find(
+    (overview) => overview.repository === selectedRepository("wayfinder_map"),
+  );
+  if (mapRepository) {
+    diffPanel.hide();
+    repoCheckView.hidden = true;
+    renderWayfinder(mapRepository, openMaps(maps.get(mapRepository.repository) ?? null));
     renderTodos(null, null);
     terminal.show(null);
     return;
@@ -501,6 +537,7 @@ function renderSidebar(
   repositories: RepositoryOverview[],
   chats: ChatOverview[],
   checks: Map<RepositoryId, RepoCheck>,
+  maps: Map<RepositoryId, WayfinderMaps | null>,
   /** The repository the new chat on screen starts in, if one shows. */
   newChatIn: RepositoryId | null,
 ): void {
@@ -566,6 +603,31 @@ function renderSidebar(
       );
       checkItem.append(button);
       chatList.append(checkItem);
+    }
+    // A repository without an open map shows nothing extra.
+    const open = openMaps(maps.get(repository.repository) ?? null);
+    if (open.length > 0) {
+      const mapItem = el("li");
+      const button = el("button", "chat-link wayfinder-link");
+      button.type = "button";
+      button.title = open.map((map) => map.title).join("\n");
+      button.append(
+        icon("map"),
+        el("span", "chat-title", open.length === 1 ? "Wayfinder map" : `Wayfinder maps (${open.length})`),
+      );
+      if (repository.repository === selectedRepository("wayfinder_map")) {
+        button.classList.add("selected");
+        button.setAttribute("aria-current", "true");
+      }
+      button.addEventListener("click", () =>
+        act(async () => {
+          if (!leaveExtensions()) return;
+          selected = { type: "wayfinder_map", repository: repository.repository };
+          await refresh();
+        }),
+      );
+      mapItem.append(button);
+      chatList.append(mapItem);
     }
     // The service lists waiting chats first, then working, then done ones.
     for (const chat of chats.filter((overview) => overview.repository === repository.repository)) {
@@ -690,17 +752,19 @@ function renderNewChat(
       (mode) => setAndRefresh(() => newChat.setPermissionMode(mode)),
     ),
   );
+  const startOn =
+    repositoryDefaults === null
+      ? null
+      : (draft.startOn ?? {
+          provider: AGENT_CLI_PROVIDERS[repositoryDefaults.agentCli],
+          subscription: repositoryDefaults.subscription,
+        });
   composerAgent.replaceChildren(
-    agentPicker(
-      repositoryDefaults === null
-        ? null
-        : (draft.startOn ?? {
-            provider: AGENT_CLI_PROVIDERS[repositoryDefaults.agentCli],
-            subscription: repositoryDefaults.subscription,
-          }),
-      subscriptions,
-      true,
-      (choice) => setAndRefresh(() => newChat.setStartOn(choice)),
+    agentPicker(startOn, subscriptions, true, (choice) =>
+      setAndRefresh(() => {
+        if (startOn !== null) retargetWayfinderInvocation(startOn.provider, choice.provider);
+        newChat.setStartOn(choice);
+      }),
     ),
   );
   labelSendButton("Send", "starts the chat (Enter)");
@@ -1313,6 +1377,118 @@ function renderRepoCheck(repository: RepositoryOverview, check: RepoCheck): void
   repoCheckView.replaceChildren(...body);
 }
 
+/** The open maps of a repository; none when they could not be read. */
+function openMaps(maps: WayfinderMaps | null): WayfinderMap[] {
+  return maps?.type === "read" ? maps.maps : [];
+}
+
+function renderWayfinder(repository: RepositoryOverview, maps: WayfinderMap[]): void {
+  selectedWorking = false;
+  composer.hidden = true;
+  transcript.hidden = true;
+  wayfinderView.hidden = false;
+  const picked = pickedMaps.get(repository.repository);
+  const map = maps.find((candidate) => candidate.number === picked) ?? maps[0];
+  if (map === undefined) {
+    renderTopBar("Wayfinder map", [labelled("Repository", repository.name)]);
+    renderedMapFingerprint = null;
+    wayfinderView.replaceChildren(el("p", "empty", "The repository has no open wayfinder map now."));
+    return;
+  }
+  const closed = map.tickets.filter((ticket) => ticket.state.type === "closed").length;
+  const openMap = topBarAction("external", "Open map");
+  openMap.title = `${map.url}\nOpen the map on the git host`;
+  openMap.addEventListener("click", () => act(() => service.openInBrowser(map.url)));
+  renderTopBar(
+    map.title,
+    [
+      labelled("Repository", repository.name),
+      labelled("Tickets", `${closed} of ${map.tickets.length} closed`),
+      labelled("Frontier", String(wayfinder.frontierCount(map))),
+    ],
+    [openMap],
+  );
+
+  const fingerprint = JSON.stringify([repository.repository, maps.map((candidate) => candidate.number), map]);
+  if (fingerprint === renderedMapFingerprint) return;
+  renderedMapFingerprint = fingerprint;
+  const intro = el("div", "wayfinder-intro");
+  if (maps.length > 1) {
+    const picker = el("select", "wayfinder-picker");
+    picker.setAttribute("aria-label", "Wayfinder map");
+    for (const candidate of maps) {
+      const option = el("option", "", candidate.title);
+      option.value = String(candidate.number);
+      option.selected = candidate.number === map.number;
+      picker.append(option);
+    }
+    picker.addEventListener("change", () =>
+      act(async () => {
+        pickedMaps.set(repository.repository, Number(picker.value));
+        await refresh();
+      }),
+    );
+    intro.append(picker);
+  }
+  intro.append(
+    el(
+      "p",
+      "muted",
+      "Click a ticket to open it on the git host. A ticket on the frontier is open, unblocked and unclaimed: start a chat on it with its chat button.",
+    ),
+  );
+  const legend = el("ul", "wayfinder-legend");
+  for (const type of ["research", "prototype", "grilling", "task"] as const) {
+    legend.append(el("li", `type-${type}`, wayfinder.TYPE_NAMES[type]));
+  }
+  const scroller = el("div", "wayfinder-scroller");
+  scroller.append(
+    wayfinder.renderGraph(map, {
+      openTicket: (ticket) => void act(() => service.openInBrowser(ticket.url)),
+      startChat: (ticket) => void act(() => startChatOnTicket(repository.repository, map, ticket)),
+    }),
+  );
+  wayfinderView.replaceChildren(intro, legend, scroller);
+}
+
+/** How each agent CLI's prompt invokes a skill by name. */
+const SKILL_PREFIXES: Record<AgentCli, string> = {
+  claude_code: "/",
+  codex: "$",
+};
+
+/**
+ * Opens a new chat in a new worktree with the wayfinder skill invoked for
+ * the ticket in the composer, as the chat's agent CLI takes it; the
+ * developer sends it, which starts the chat.
+ */
+async function startChatOnTicket(repository: RepositoryId, map: WayfinderMap, ticket: Ticket): Promise<void> {
+  await openNewChat(repository, { type: "new_worktree" });
+  if (selected.type !== "new_chat") return;
+  const defaults = await readDefaults(repository, await service.serviceUpdateWaiting());
+  const agentCli = defaults.type === "read" ? defaults.defaults.agentCli : "claude_code";
+  messageInput.value = `${wayfinderInvocation(agentCli)}${map.url} ${ticket.url}`;
+  fitMessageInput();
+  messageInput.focus();
+}
+
+/** The start of a prompt that invokes the wayfinder skill, as `agentCli` takes it. */
+function wayfinderInvocation(agentCli: AgentCli): string {
+  return `${SKILL_PREFIXES[agentCli]}wayfinder `;
+}
+
+/**
+ * Keeps a wayfinder invocation in the composer working when the new chat
+ * changes its agent CLI: each agent CLI invokes a skill its own way.
+ */
+function retargetWayfinderInvocation(from: Provider, to: Provider): void {
+  const [before, after] = [agentCliOf(from), agentCliOf(to)];
+  if (before === undefined || after === undefined) return;
+  const invocation = wayfinderInvocation(before);
+  if (!messageInput.value.startsWith(invocation)) return;
+  messageInput.value = wayfinderInvocation(after) + messageInput.value.slice(invocation.length);
+}
+
 function findingSection(rank: "Must" | "Should", meaning: string, findings: Finding[]): HTMLElement {
   const section = el("section", `findings ${rank.toLowerCase()}`);
   const heading = el("h2", "", rank);
@@ -1408,6 +1584,10 @@ function labelled(label: string, value: string): HTMLElement {
 /** The agent CLIs a chat can run on, in the order the pickers list them. */
 const AGENT_CLIS = Object.keys(AGENT_CLI_PROVIDERS) as AgentCli[];
 
+function agentCliOf(provider: Provider): AgentCli | undefined {
+  return AGENT_CLIS.find((candidate) => AGENT_CLI_PROVIDERS[candidate] === provider);
+}
+
 /** What a chat runs on: a provider's subscription, or its agent CLI's default login. */
 type SubscriptionChoice = StartOn;
 
@@ -1469,7 +1649,7 @@ function agentPicker(
       },
     ],
   });
-  const agentCli = AGENT_CLIS.find((candidate) => AGENT_CLI_PROVIDERS[candidate] === current?.provider);
+  const agentCli = current === null ? undefined : agentCliOf(current.provider);
   return menuButton({
     key: "agent",
     name: "Agent CLI and subscription",

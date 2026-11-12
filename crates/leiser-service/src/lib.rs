@@ -81,9 +81,10 @@ pub use driver::{
     SubscriptionAccess, SubscriptionEnvironment,
 };
 pub use git_host::{
-    CheckOutcome, CommitId, GH_CONFIG_DIR, GhGitHost, GitHost, GitHostError, GitHostFuture,
-    HostAccountAccess, Mergeable, NewPullRequest, OpenedPullRequest, PollMemo, PolledPullRequest,
-    PullRequestActivity, PullRequestCheck, PullRequestComment,
+    Blocker, CheckOutcome, CommitId, GH_CONFIG_DIR, GhGitHost, GitHost, GitHostError,
+    GitHostFuture, HostAccountAccess, MapIssue, Mergeable, NewPullRequest, OpenedPullRequest,
+    PollMemo, PolledPullRequest, PolledWayfinderMaps, PullRequestActivity, PullRequestCheck,
+    PullRequestComment, TicketIssue,
 };
 pub use harness_mcp::HarnessMcpError;
 pub use installed::Environment;
@@ -98,11 +99,12 @@ pub use protocol::{
     ChatOverview, ChatPlace, ChatSettings, ChatStatus, CheckId, Checkout, CheckpointMoment,
     CliExtension, CliExtensionKind, Command, CommandError, CommentLocation, CommitAuthor, DiffLine,
     DiffRange, Event, FileChange, FileDiff, Finding, HostAccountBinding, HostAccountId,
-    HostAccountOverview, Hunk, InvalidCheckId, LoginAnswer, LoginOutcome, OptOuts, Patch,
+    HostAccountOverview, Hunk, InvalidCheckId, IssueRef, LoginAnswer, LoginOutcome, OptOuts, Patch,
     PermissionMode, Provider, PullRequest, PullRequestState, Question, QuestionOption, QueueReason,
     RepoCheck, RepoCheckReport, RepositoryId, RepositoryOverview, RepositoryScript, Response,
     SignIn, StartOn, SubscriptionId, SubscriptionKind, SubscriptionOverview, SwitchedOffCheck,
-    Todo, TodoId, TranscriptEntry, TurnCheckpoints, UnreadableCliExtensionFile, UsageLimit,
+    Ticket, TicketState, TicketType, Todo, TodoId, TranscriptEntry, TurnCheckpoints,
+    UnreadableCliExtensionFile, UsageLimit, WayfinderMap, WayfinderMaps,
 };
 pub use service::{Service, ServiceConfig, ServiceHandle, StartError, start};
 pub use store::StorageError;
