@@ -1,7 +1,8 @@
 name: Release
 
-# Builds the installers on GitHub's runners. A version tag (`v*`) also puts
-# them on a draft GitHub release, which the user publishes. A pull request
+# Builds the installers on GitHub's runners. A version tag also puts them
+# on a draft GitHub release, which the user publishes: `v<version>` on
+# `main` is a release, `v<version>-beta.<n>` on `development` a pre-release. A pull request
 # that changes the packaging builds them without publishing anything.
 
 on:
@@ -34,7 +35,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       # The installers take their version from tauri.conf.json; it must
-      # match the workspace's, and a tag's. MSI accepts only X.Y.Z.
+      # match the workspace's, and a tag's (a beta tag adds `-beta.<n>`,
+      # which the installers do not carry). MSI accepts only X.Y.Z.
       - name: Check the version
         run: |
           cargo_version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
@@ -43,7 +45,7 @@ jobs:
           [ "$cargo_version" = "$tauri_version" ] || { echo "::error::the versions differ"; exit 1; }
           [[ "$tauri_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::the version is not X.Y.Z"; exit 1; }
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            [ "$GITHUB_REF_NAME" = "v$tauri_version" ] || { echo "::error::tag $GITHUB_REF_NAME does not match v$tauri_version"; exit 1; }
+            [[ "$GITHUB_REF_NAME" =~ ^v${tauri_version//./\\.}(-beta\.[0-9]+)?$ ]] || { echo "::error::tag $GITHUB_REF_NAME is neither v$tauri_version nor v$tauri_version-beta.<n>"; exit 1; }
           fi
 
   build:
@@ -131,11 +133,13 @@ jobs:
         # replaces the installers of its release.
         run: |
           mapfile -t files < <(find installers -type f)
+          prerelease=()
+          [[ "$GITHUB_REF_NAME" == *-beta.* ]] && prerelease=(--prerelease)
           if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
             gh release upload "$GITHUB_REF_NAME" "${files[@]}" --repo "$GITHUB_REPOSITORY" --clobber
           else
             gh release create "$GITHUB_REF_NAME" "${files[@]}" \
               --repo "$GITHUB_REPOSITORY" \
-              --draft --verify-tag --generate-notes \
+              --draft "${prerelease[@]}" --verify-tag --generate-notes \
               --title "leiser-harness $GITHUB_REF_NAME"
           fi
