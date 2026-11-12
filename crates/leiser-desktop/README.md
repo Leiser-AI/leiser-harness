@@ -17,8 +17,19 @@ When the service program is replaced, for example by `cargo build`, the
 service shows that an update waits, applies it once no turn runs and
 resumes every chat.
 
+A chat is always open. On start, and after a chat is marked done, the app
+shows a new chat in the most recently used repository. It starts on the
+harness service only with its first message, so an open app creates no
+chats or worktrees by itself. Until then the composer chooses where it
+starts (repository; new worktree or main checkout) and with what (agent
+CLI and subscription, permission mode), beginning with the defaults from
+the repository's `.leiser/config.toml`. While a service update waits, the
+running service may not know these settings yet: a new chat then starts
+with the repository's defaults, and its settings change once it has
+started.
+
 Chats start on the installed Claude Code; Codex is configured as a second
-agent CLI. The composer's subscription picker lists every agent CLI's
+agent CLI. The composer's agent CLI picker lists every agent CLI's
 default login and every subscription, grouped by provider. Choosing a
 subscription or default login of the other provider moves the chat to that
 agent CLI between turns, with a handoff. An app started from the Finder does not get the shell's `PATH`,
@@ -81,10 +92,11 @@ switches between several open maps. While the app is connected, the
 harness service polls the maps every 30 seconds (5 on the fake git host)
 with entity tags through the repository's host account, so a ticket closed
 or claimed on the git host shows up by itself. Clicking a ticket opens it
-in the browser; a frontier ticket's chat button starts a chat in a new
+in the browser; a frontier ticket's chat button opens a new chat in a new
 worktree with the wayfinder skill invoked for the ticket in the composer
-(`/wayfinder <map> <ticket>` for Claude Code, `$wayfinder` for Codex),
-ready to send. On the fake git host, write `fake-git-host-wayfinder.json`
+(`/wayfinder <map> <ticket>` for Claude Code, `$wayfinder` for Codex; it
+follows the agent CLI chosen in the composer), ready to send: sending
+starts the chat. On the fake git host, write `fake-git-host-wayfinder.json`
 into the host account's `gh` config directory, for example `{"maps":
 [{"number": 1, "title": "Map: v2", "tickets": [{"number": 2, "title": "Pick
 a store", "type": "research"}, {"number": 3, "title": "Agree on the API",
@@ -143,8 +155,9 @@ LEISER_FAKE_AGENT_CLI="$PWD/../../target/debug/fake-agent-cli" npm run tauri dev
   and shadow, for light and dark (dark follows the OS). Views use these
   variables, never raw values.
 - `web/src/components.css` styles the shared pieces: buttons (`primary`,
-  `ghost`, `danger`, `small`, `icon-button`), inputs, `badge`, `callout`,
-  `code-block`, dialogs.
+  `ghost`, `danger`, `small`, `icon-button`, `round-button`), menus
+  (`menu-button` and its `menu`, built by `web/src/menu.ts`), inputs,
+  `badge`, `callout`, `code-block`, dialogs.
 - `web/src/styles.css` lays out the window and the views.
 - `web/src/icons.ts` draws the few line icons; no icon font or package.
 

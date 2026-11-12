@@ -7,8 +7,8 @@ use std::path::Path;
 use std::time::Duration;
 
 use leiser_service::{
-    AgentCli, AgentEvent, Answer, ChatId, ChatStatus, Checkout, Command, Event, RepositoryScript,
-    Response, ServiceHandle, TranscriptEntry,
+    AgentCli, AgentEvent, Answer, ChatId, ChatSettings, ChatStatus, Checkout, Command, Event,
+    RepositoryScript, Response, ServiceHandle, TranscriptEntry,
 };
 use leiser_testkit::{Gate, Script, Step, TestRepo, TestService, collect_turn};
 use tokio::sync::broadcast;
@@ -36,6 +36,7 @@ async fn start_chat(service: &ServiceHandle, repo: &TestRepo) -> TestResult<Chat
         .execute(Command::StartChat {
             repository,
             checkout: Checkout::Main,
+            settings: ChatSettings::default(),
         })
         .await?;
     let Response::ChatStarted { chat } = response else {
@@ -402,6 +403,7 @@ async fn a_service_update_waits_for_the_setup_script_of_a_new_worktree() -> Test
         .execute(Command::StartChat {
             repository,
             checkout: Checkout::NewWorktree,
+            settings: ChatSettings::default(),
         })
         .await?
     else {

@@ -13,8 +13,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use leiser_service::{
-    AgentCli, Checkout, ClaudeCodeDriver, CodexDriver, Command, CommandError, Driver, DriverError,
-    Environment, Response,
+    AgentCli, ChatSettings, Checkout, ClaudeCodeDriver, CodexDriver, Command, CommandError, Driver,
+    DriverError, Environment, Response,
 };
 use leiser_testkit::{TestRepo, TestService};
 
@@ -58,6 +58,7 @@ async fn send_first_message(driver: Arc<dyn Driver>) -> TestResult<Result<Respon
         .execute(Command::StartChat {
             repository,
             checkout: Checkout::Main,
+            settings: ChatSettings::default(),
         })
         .await?
     else {

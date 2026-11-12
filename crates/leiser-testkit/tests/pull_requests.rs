@@ -9,12 +9,13 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use leiser_service::{
-    AgentEvent, Branch, ChatId, ChatPlace, ChatStatus, Checkout, Command, CommandError,
-    CommitAuthor, Event, HostAccountId, LoginOutcome, PullRequest, PullRequestState, RepositoryId,
-    Response, ServiceHandle, TranscriptEntry,
+    AgentEvent, Branch, ChatId, ChatPlace, ChatSettings, ChatStatus, Checkout, Command,
+    CommandError, CommitAuthor, Event, HostAccountId, LoginOutcome, PullRequest, PullRequestState,
+    RepositoryId, Response, ServiceHandle, TranscriptEntry,
 };
 use leiser_testkit::{
     DEFAULT_BRANCH, FAKE_GIT_HOST_MERGED_FILE, Script, Step, TestRepo, TestService, collect_turn,
+    next_event,
 };
 use tokio::sync::broadcast;
 
@@ -99,6 +100,7 @@ async fn start_chat(service: &ServiceHandle, repository: RepositoryId) -> TestRe
         .execute(Command::StartChat {
             repository,
             checkout: Checkout::NewWorktree,
+            settings: ChatSettings::default(),
         })
         .await?
     {
@@ -292,7 +294,9 @@ async fn a_pull_request_pushes_the_branch_and_opens_it_into_the_base_branch_as_t
         read_chat(&bound.service, bound.chat).await?.pull_request,
         Some(pull_request.clone())
     );
-    let event = tokio::time::timeout(Duration::from_secs(5), events.recv()).await??;
+    // The chat's next event: one about the repository's wayfinder maps,
+    // which the service polls meanwhile, may come before it.
+    let event = next_event(&mut events, bound.chat).await?;
     assert_eq!(
         event,
         Event::PullRequestChanged {
@@ -565,6 +569,7 @@ async fn a_chat_in_the_main_checkout_has_no_worktree_to_remove() -> TestResult {
         .execute(Command::StartChat {
             repository,
             checkout: Checkout::Main,
+            settings: ChatSettings::default(),
         })
         .await?
     {

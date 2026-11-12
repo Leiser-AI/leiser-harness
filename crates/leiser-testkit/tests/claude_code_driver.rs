@@ -5,8 +5,8 @@ use std::error::Error;
 use std::sync::Arc;
 
 use leiser_service::{
-    Access, AgentCli, ClaudeCodeDriver, Command, CommandError, Driver, DriverError, PermissionMode,
-    Response, SessionSpec, Version,
+    Access, AgentCli, ChatSettings, ClaudeCodeDriver, Command, CommandError, Driver, DriverError,
+    PermissionMode, Response, SessionSpec, Version,
 };
 use leiser_testkit::{TestRepo, TestService};
 
@@ -64,6 +64,7 @@ async fn the_developer_learns_why_a_chat_cannot_start_claude_code() -> TestResul
         .execute(Command::StartChat {
             repository,
             checkout: leiser_service::Checkout::Main,
+            settings: ChatSettings::default(),
         })
         .await?
     else {

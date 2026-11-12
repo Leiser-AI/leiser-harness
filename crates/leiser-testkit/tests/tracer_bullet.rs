@@ -4,7 +4,7 @@ use std::error::Error;
 use std::path::Path;
 
 use leiser_service::{
-    AgentEvent, ChatId, Checkout, Command, CommandError, Response, ServiceHandle,
+    AgentEvent, ChatId, ChatSettings, Checkout, Command, CommandError, Response, ServiceHandle,
 };
 use leiser_testkit::{Script, Step, TestRepo, TestService, collect_turn};
 
@@ -29,6 +29,7 @@ async fn start_chat(service: &ServiceHandle, repo: &TestRepo) -> TestResult<Chat
         .execute(Command::StartChat {
             repository,
             checkout: Checkout::Main,
+            settings: ChatSettings::default(),
         })
         .await?;
     let Response::ChatStarted { chat } = response else {

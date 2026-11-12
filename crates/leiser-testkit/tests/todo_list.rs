@@ -6,8 +6,8 @@ use std::error::Error;
 use std::path::Path;
 
 use leiser_service::{
-    AgentEvent, ChatId, Checkout, Command, CommandError, Event, Response, ServiceHandle, Todo,
-    TodoId,
+    AgentEvent, ChatId, ChatSettings, Checkout, Command, CommandError, Event, Response,
+    ServiceHandle, Todo, TodoId,
 };
 use leiser_testkit::{Script, Step, TestRepo, TestService, collect_turn, next_event};
 use serde_json::{Value, json};
@@ -46,6 +46,7 @@ async fn start_chat(service: &ServiceHandle, repo: &TestRepo) -> TestResult<Chat
         .execute(Command::StartChat {
             repository,
             checkout: Checkout::Main,
+            settings: ChatSettings::default(),
         })
         .await?;
     let Response::ChatStarted { chat } = response else {
@@ -501,6 +502,7 @@ async fn an_invalid_repository_config_is_reported() -> TestResult {
         .execute(Command::StartChat {
             repository,
             checkout: Checkout::Main,
+            settings: ChatSettings::default(),
         })
         .await;
 

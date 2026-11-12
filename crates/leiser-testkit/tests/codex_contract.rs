@@ -20,8 +20,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use leiser_service::{
-    Access, AgentCli, AgentEvent, Answer, ChatId, Checkout, CodexDriver, Command, Driver, Event,
-    PermissionMode, QueueReason, Response, ServiceHandle, SessionSpec,
+    Access, AgentCli, AgentEvent, Answer, ChatId, ChatSettings, Checkout, CodexDriver, Command,
+    Driver, Event, PermissionMode, QueueReason, Response, ServiceHandle, SessionSpec,
 };
 use leiser_testkit::{FakeDriver, Gate, Script, Step, TestRepo, TestService, collect_turn_within};
 use tokio::sync::broadcast;
@@ -81,6 +81,7 @@ impl Chat {
             .execute(Command::StartChat {
                 repository,
                 checkout: Checkout::Main,
+                settings: ChatSettings::default(),
             })
             .await?
         else {

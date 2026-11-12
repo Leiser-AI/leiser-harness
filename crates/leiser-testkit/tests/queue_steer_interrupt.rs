@@ -5,8 +5,8 @@ use std::error::Error;
 use std::path::Path;
 
 use leiser_service::{
-    AgentCli, AgentEvent, ChatId, ChatStatus, Checkout, Command, CommandError, Event, QueueReason,
-    Response, ServiceHandle, TranscriptEntry,
+    AgentCli, AgentEvent, ChatId, ChatSettings, ChatStatus, Checkout, Command, CommandError, Event,
+    QueueReason, Response, ServiceHandle, TranscriptEntry,
 };
 use leiser_testkit::{Gate, Script, Step, TestRepo, TestService, collect_turn, next_event};
 use tokio::sync::broadcast;
@@ -40,6 +40,7 @@ async fn setup(script: &Script) -> TestResult<Setup> {
         .execute(Command::StartChat {
             repository,
             checkout: Checkout::Main,
+            settings: ChatSettings::default(),
         })
         .await?;
     let Response::ChatStarted { chat } = response else {
