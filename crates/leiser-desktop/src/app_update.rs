@@ -6,8 +6,7 @@
 //! `install_app_update` downloads it, checks its signature against the
 //! public key in `tauri.conf.json`, installs it and restarts the app. The
 //! harness service is not stopped for it: the installer replaces its
-//! program next to the app, and the service moves to the new program once
-//! no turn runs (ADR 0007).
+//! program next to the app, which is a service update (ADR 0007).
 //!
 //! Debug builds never look for updates: they are not installed from a
 //! release.
@@ -18,7 +17,8 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_updater::{Update, UpdaterExt};
 
-/// The update the last check found, until it is installed.
+/// The update the last check found. It stays after a failed install, so
+/// the developer can try again without a new check.
 #[derive(Default)]
 pub struct FoundUpdate(Mutex<Option<Update>>);
 
@@ -90,7 +90,7 @@ pub async fn install_app_update(
     app: AppHandle,
     found: State<'_, FoundUpdate>,
 ) -> Result<(), UpdateError> {
-    let update = found.slot().take().ok_or(UpdateError::NoUpdate)?;
+    let update = found.slot().clone().ok_or(UpdateError::NoUpdate)?;
     let mut downloaded: u64 = 0;
     update
         .download_and_install(

@@ -3,9 +3,9 @@ name: Release
 # Builds the installers on GitHub's runners. The tag `v<version>` also puts
 # them on a draft GitHub release, which the user publishes: a version
 # `X.Y.Z` from `main` is a release, `X.Y.Z-beta.N` from `development` a
-# pre-release. With the update signing key (secrets TAURI_SIGNING_*), the
-# release also carries the signed updates and their manifest `latest.json`,
-# which update-feed.yml serves once the release is published. A pull
+# pre-release. It also carries the updates, signed with the maintainer's
+# key (secrets TAURI_SIGNING_*), and their manifest `latest.json`, which
+# update-feed.yml serves once the release is published. A pull
 # request that changes the packaging builds the installers without
 # publishing anything.
 
@@ -107,10 +107,18 @@ jobs:
         # bash also on Windows: PowerShell's npm shim can drop the `--`.
         shell: bash
         env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # The maintainer's update key only for a release tag; anything else
+          # (a pull request runs unreviewed code) signs with a throwaway key,
+          # so the signing still runs and its updates install nowhere.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ startsWith(github.ref, 'refs/tags/v') && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ startsWith(github.ref, 'refs/tags/v') && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
         run: |
           npm ci
+          if [[ "$GITHUB_REF" != refs/tags/v* ]]; then
+            npm exec -- tauri signer generate --ci -f -w "$RUNNER_TEMP/throwaway.key" -p "" > /dev/null
+            TAURI_SIGNING_PRIVATE_KEY=$(cat "$RUNNER_TEMP/throwaway.key")
+            export TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
+          fi
           npm run package -- --target ${{ matrix.target }}
       - uses: actions/upload-artifact@v7
         with:
@@ -118,20 +126,18 @@ jobs:
           path: ${{ matrix.installers }}
           if-no-files-found: error
 
-  release:
-    name: draft release
-    if: startsWith(github.ref, 'refs/tags/v')
+  manifest:
+    name: update manifest
     needs: build
     runs-on: ubuntu-latest
-    timeout-minutes: 15
-    permissions:
-      contents: write
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
         with:
           sparse-checkout: crates/leiser-desktop/scripts
       - uses: actions/download-artifact@v8
         with:
+          pattern: installers-*
           path: installers
           merge-multiple: true
       # GitHub renames asset files with other characters (an `.rpm` of a
@@ -145,15 +151,36 @@ jobs:
             done
           find installers -type f
       # Fails when an update or its signature is missing, so a release never
-      # goes out without updates.
+      # goes out without updates. Runs on pull requests too, as a check.
       - name: Write the update manifest
+        env:
+          TAG: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || 'v0.0.0-check' }}
         run: |
           node crates/leiser-desktop/scripts/update-manifest.mjs \
-            installers "$GITHUB_REF_NAME" "$GITHUB_REPOSITORY" installers/latest.json
+            installers "$TAG" "$GITHUB_REPOSITORY" installers/latest.json
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release
+          path: installers
+          if-no-files-found: error
+
+  release:
+    name: draft release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: manifest
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: release
+          path: installers
       - name: Create the draft release
         env:
           GH_TOKEN: ${{ github.token }}
-        # The artifacts keep their bundle folders (dmg/, macos/, nsis/, deb/,
+        # The artifact keeps the bundle folders (dmg/, macos/, nsis/, deb/,
         # rpm/); the release gets the files. A rerun on the same tag
         # replaces the installers of its release.
         run: |

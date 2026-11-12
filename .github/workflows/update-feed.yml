@@ -2,13 +2,15 @@ name: Update feed
 
 # Serves a published release to the installed apps (ADR 0009): copies its
 # update manifest `latest.json` to the branch `update-feed`, as `beta.json`
-# and, for a release that is not a pre-release, also as `stable.json`.
-# Installed apps read
-# https://raw.githubusercontent.com/<repo>/update-feed/<channel>.json.
+# and, for a release that is not a pre-release, also as `stable.json`. A
+# file only ever moves to a newer version, so a stable hotfix does not hide
+# a newer beta, and serving an old tag again changes nothing. Installed
+# apps read https://raw.githubusercontent.com/<repo>/update-feed/<channel>.json.
 
 on:
   release:
-    types: [published]
+    # `released` also covers a pre-release that later becomes a release.
+    types: [published, released]
   workflow_dispatch:
     inputs:
       tag:
@@ -52,14 +54,39 @@ jobs:
           fi
       - name: Publish the manifest
         working-directory: feed
+        env:
+          PRERELEASE: ${{ steps.release.outputs.prerelease }}
         run: |
-          cp ../manifest/latest.json beta.json
-          if [ "${{ steps.release.outputs.prerelease }}" = "false" ]; then
-            cp ../manifest/latest.json stable.json
-          fi
-          git add beta.json stable.json 2>/dev/null || git add beta.json
+          channels=(beta)
+          [ "$PRERELEASE" = "false" ] && channels+=(stable)
+          for channel in "${channels[@]}"; do
+            node - "../manifest/latest.json" "$channel.json" <<'JS'
+          const fs = require("node:fs");
+          const [manifest, feed] = process.argv.slice(2);
+          // X.Y.Z or X.Y.Z-beta.N, compared as semver: a release is newer
+          // than its betas.
+          const key = (version) => {
+            const [, x, y, z, beta] = /^(\d+)\.(\d+)\.(\d+)(?:-beta\.(\d+))?$/.exec(version);
+            return [+x, +y, +z, beta === undefined ? Infinity : +beta];
+          };
+          const newer = (a, b) => {
+            const [ka, kb] = [key(a), key(b)];
+            const i = ka.findIndex((part, index) => part !== kb[index]);
+            return i >= 0 && ka[i] > kb[i];
+          };
+          const next = JSON.parse(fs.readFileSync(manifest, "utf8"));
+          const current = fs.existsSync(feed) ? JSON.parse(fs.readFileSync(feed, "utf8")) : null;
+          if (current === null || newer(next.version, current.version)) {
+            fs.copyFileSync(manifest, feed);
+            console.log(`${feed}: ${next.version}`);
+          } else {
+            console.log(`${feed} keeps ${current.version}, not older ${next.version}`);
+          }
+          JS
+          done
+          git add -A
           if git diff --cached --quiet; then
-            echo "The feed already serves $TAG."
+            echo "The feed has nothing to change for $TAG."
             exit 0
           fi
           git -c user.name="github-actions[bot]" \

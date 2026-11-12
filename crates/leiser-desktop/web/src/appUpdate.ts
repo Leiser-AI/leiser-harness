@@ -1,7 +1,7 @@
 // Updates of the app itself (see the app's `app_update.rs`): looks for a
 // new version when the app starts and every few hours, and offers it in the
 // sidebar. Installing it restarts the app; running turns go on in the
-// harness service meanwhile.
+// harness service, which takes the new version as a service update.
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -58,25 +58,41 @@ function render(): void {
   button.title = title;
 }
 
+/** Read through a call, so a check after an `await` sees the current state. */
+function installing(): boolean {
+  return state.type === "installing";
+}
+
 async function check(): Promise<void> {
-  // Never replace an update that is being installed or offered again.
-  if (state.type === "installing") return;
+  if (installing()) return;
+  let update: AvailableUpdate | null;
   try {
-    const update = await invoke<AvailableUpdate | null>("check_app_update");
-    if (update === null) {
-      state = { type: "none" };
-    } else if (state.type === "failed" && state.update.version === update.version) {
-      // Keep saying why the last attempt failed; a click tries again.
-      state = { ...state, update };
-    } else {
-      state = { type: "available", update };
-    }
+    update = await invoke<AvailableUpdate | null>("check_app_update");
   } catch (error) {
     // No feed yet, no network: try again at the next check, quietly.
     console.warn("looking for an app update failed", error);
     return;
   }
+  // An install may have started while the check ran.
+  if (installing()) return;
+  if (update === null) {
+    state = { type: "none" };
+  } else if (state.type === "failed" && state.update.version === update.version) {
+    // Keep saying why the last attempt failed; a click tries again.
+    state = { ...state, update };
+  } else {
+    state = { type: "available", update };
+  }
   render();
+}
+
+/** What an `UpdateError` from the app says. */
+function reasonOf(error: unknown): string {
+  if (typeof error === "object" && error !== null && "type" in error) {
+    if ("reason" in error) return String(error.reason);
+    if (error.type === "no_update") return "No update was found to install.";
+  }
+  return String(error);
 }
 
 async function install(): Promise<void> {
@@ -88,11 +104,8 @@ async function install(): Promise<void> {
     // Restarts the app when it succeeds.
     await invoke("install_app_update");
   } catch (error) {
-    const reason = typeof error === "object" && error !== null && "reason" in error ? String(error.reason) : String(error);
-    state = { type: "failed", update, reason };
+    state = { type: "failed", update, reason: reasonOf(error) };
     render();
-    // The failed attempt used up the found update; find it again.
-    void check();
   }
 }
 
@@ -102,7 +115,10 @@ export async function start(updateButton: HTMLButtonElement): Promise<void> {
   button.addEventListener("click", () => void install());
   await listen<Progress>("app-update-progress", ({ payload }) => {
     if (state.type !== "installing") return;
-    state.percent = payload.total ? Math.min(100, Math.round((payload.downloaded / payload.total) * 100)) : null;
+    const percent = payload.total ? Math.min(100, Math.round((payload.downloaded / payload.total) * 100)) : null;
+    // Many chunks make one percent; draw only a change.
+    if (percent === state.percent) return;
+    state.percent = percent;
     render();
   });
   render();
