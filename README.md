@@ -4,7 +4,19 @@ A desktop app that runs coding agents in chats: Claude Code and Codex, on
 the logins and subscriptions you already have, each chat in its own git
 worktree. Written in Rust (Tauri) for macOS, Windows and Linux.
 
-**Download the newest version:**
+**Install** on macOS or Linux (Terminal):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Leiser-AI/leiser-harness/development/install.sh | sh
+```
+
+on Windows (PowerShell):
+
+```powershell
+irm https://raw.githubusercontent.com/Leiser-AI/leiser-harness/development/install.ps1 | iex
+```
+
+Or download the installer:
 [⬇ macOS](https://github.com/Leiser-AI/leiser-harness/releases/latest/download/leiser-harness-macos.dmg) ·
 [⬇ Windows](https://github.com/Leiser-AI/leiser-harness/releases/latest/download/leiser-harness-windows-setup.exe) ·
 [⬇ Linux (.deb)](https://github.com/Leiser-AI/leiser-harness/releases/latest/download/leiser-harness-linux.deb) ·
@@ -38,6 +50,29 @@ worktree. Written in Rust (Tauri) for macOS, Windows and Linux.
 
 ## Install
 
+### With one command (recommended)
+
+macOS and Linux, in Terminal:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Leiser-AI/leiser-harness/development/install.sh | sh
+```
+
+Windows, in PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/Leiser-AI/leiser-harness/development/install.ps1 | iex
+```
+
+It downloads the newest version, installs it and starts it (on Linux, start
+it from your app menu). Unlike a
+download in the browser, macOS and Windows then do not warn about an app
+without a paid certificate. Run it again to update; the app also updates
+itself. Read the scripts first if you like:
+[`install.sh`](install.sh), [`install.ps1`](install.ps1).
+
+### With the installer
+
 Click the download for your system; it always gets the newest version:
 
 | System                        | Download                                                          |
@@ -51,9 +86,9 @@ Older versions and release notes are on the
 [releases page](https://github.com/Leiser-AI/leiser-harness/releases).
 
 The installers are not signed with a paid certificate yet, so the system
-warns on the first start.
+warns on the first start of a downloaded installer:
 
-### macOS
+#### macOS
 
 1. Open `leiser-harness-macos.dmg` and drag **leiser-harness** into
    **Applications**.
@@ -64,14 +99,14 @@ warns on the first start.
    xattr -dr com.apple.quarantine /Applications/leiser-harness.app
    ```
 
-### Windows
+#### Windows
 
 1. Run `leiser-harness-windows-setup.exe`.
 2. If SmartScreen shows "Windows protected your PC", click **More info →
    Run anyway**. The setup installs Microsoft Edge WebView2 if it is
    missing.
 
-### Linux
+#### Linux
 
 ```bash
 # Debian, Ubuntu

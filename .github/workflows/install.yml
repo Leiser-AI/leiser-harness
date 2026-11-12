@@ -1,0 +1,77 @@
+name: Install scripts
+
+# Runs install.sh and install.ps1 against the latest release on each
+# system, when a script changes and after a release is published.
+
+on:
+  pull_request:
+    paths:
+      - install.sh
+      - install.ps1
+      - .github/workflows/install.yml
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: lint scripts
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - run: shellcheck install.sh
+      - name: PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          if (-not (Get-Module -ListAvailable PSScriptAnalyzer)) {
+            Install-Module PSScriptAnalyzer -Force -Scope CurrentUser
+          }
+          Invoke-ScriptAnalyzer -Path install.ps1 -Severity Warning, Error -EnableExit
+
+  install:
+    name: install (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install on macOS
+        if: runner.os == 'macOS'
+        env:
+          LEISER_INSTALL_DIR: ${{ runner.temp }}/apps
+          LEISER_INSTALL_NO_OPEN: "1"
+        run: |
+          sh install.sh
+          app="$LEISER_INSTALL_DIR/leiser-harness.app"
+          test -x "$app/Contents/MacOS/leiser-desktop"
+          test -x "$app/Contents/MacOS/leiser-harness-service"
+          # No quarantine: the app starts without Gatekeeper's warning.
+          if xattr "$app" | grep -q com.apple.quarantine; then
+            echo "::error::the app is quarantined"; exit 1
+          fi
+      - name: Install on Linux
+        if: runner.os == 'Linux'
+        timeout-minutes: 10
+        run: |
+          sudo apt-get update
+          sh install.sh
+          dpkg -s leiser-harness
+          test -x /usr/bin/leiser-harness-service
+      - name: Install on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          LEISER_INSTALL_NO_OPEN: "1"
+        run: |
+          ./install.ps1
+          Get-ChildItem (Join-Path $env:LOCALAPPDATA "leiser-harness")
+          if (-not (Test-Path (Join-Path $env:LOCALAPPDATA "leiser-harness\leiser-harness-service.exe"))) {
+            throw "the harness service is missing"
+          }
