@@ -13,6 +13,8 @@
 //! polls it ([`GitHost::poll_pull_request`]) with the entity tags of the
 //! last answers, so an unchanged pull request costs only `304 Not
 //! Modified` answers, which do not count against the git host's rate limit.
+//! A repository's wayfinder maps are polled the same way
+//! ([`GitHost::poll_wayfinder_maps`]) while the desktop app is connected.
 //!
 //! [`GhGitHost`] is the GitHub CLI. Tests use the testkit's fake git host.
 
@@ -26,9 +28,10 @@ use tokio::process::Command;
 use crate::installed::{self, Environment, Program};
 use serde::{Deserialize, Serialize};
 
-use crate::{CommentLocation, LoginProcess, PullRequestState};
+use crate::{CommentLocation, IssueRef, LoginProcess, PullRequestState, TicketType};
 
 mod github_poll;
+mod github_wayfinder;
 
 /// The variable that names the `gh` config directory.
 pub const GH_CONFIG_DIR: &str = "GH_CONFIG_DIR";
@@ -170,6 +173,22 @@ impl PollMemo {
     pub fn insert(&mut self, key: &str, value: &str) {
         self.0.insert(key.to_owned(), value.to_owned());
     }
+
+    /// The answer kept for the request to `path`, apart from its tag.
+    #[must_use]
+    pub fn answer(&self, path: &str) -> Option<&str> {
+        self.get(&Self::answer_key(path))
+    }
+
+    /// Keeps `answer` as the answer to the request to `path`, apart from
+    /// its tag, for when the next poll's request gets `304 Not Modified`.
+    pub fn keep_answer(&mut self, path: &str, answer: &str) {
+        self.insert(&Self::answer_key(path), answer);
+    }
+
+    fn answer_key(path: &str) -> String {
+        format!("answer {path}")
+    }
 }
 
 /// A pull request as one poll found it, with what its next poll gets
@@ -178,6 +197,47 @@ impl PollMemo {
 pub struct PolledPullRequest {
     pub activity: PullRequestActivity,
     pub memo: PollMemo,
+}
+
+/// A repository's open wayfinder maps as one poll found them, with what
+/// its next poll gets back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PolledWayfinderMaps {
+    /// Newest first.
+    pub maps: Vec<MapIssue>,
+    pub memo: PollMemo,
+}
+
+/// An open issue labelled `wayfinder:map`, with its sub-issues.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MapIssue {
+    pub number: u64,
+    pub title: String,
+    pub url: String,
+    /// The map's sub-issues, in the map's order.
+    pub tickets: Vec<TicketIssue>,
+}
+
+/// A sub-issue of a wayfinder map.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TicketIssue {
+    pub number: u64,
+    pub title: String,
+    pub url: String,
+    /// From its `wayfinder:<type>` label.
+    pub ticket_type: Option<TicketType>,
+    pub open: bool,
+    /// The logins it is assigned to.
+    pub assignees: Vec<String>,
+    /// The issues that block it, by the git host's own dependencies.
+    pub blocked_by: Vec<Blocker>,
+}
+
+/// An issue that blocks a ticket.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Blocker {
+    pub issue: IssueRef,
+    pub open: bool,
 }
 
 /// Why the git host could not do what the harness service asked.
@@ -262,6 +322,18 @@ pub trait GitHost: Send + Sync + std::fmt::Debug {
         number: u64,
         last: Option<&'a PolledPullRequest>,
     ) -> GitHostFuture<'a, Result<PolledPullRequest, GitHostError>>;
+
+    /// Polls the open wayfinder maps of the repository at `remote`: its
+    /// open issues labelled `wayfinder:map`, their sub-issues and what
+    /// blocks those. `last` is the previous poll's answer; what has not
+    /// changed since is taken from it, after conditional requests with the
+    /// entity tags in its memo.
+    fn poll_wayfinder_maps<'a>(
+        &'a self,
+        access: &'a HostAccountAccess,
+        remote: &'a str,
+        last: Option<&'a PolledWayfinderMaps>,
+    ) -> GitHostFuture<'a, Result<PolledWayfinderMaps, GitHostError>>;
 }
 
 /// The GitHub CLI `gh`, found as an installed agent CLI is (see
@@ -504,6 +576,15 @@ impl GitHost for GhGitHost {
         last: Option<&'a PolledPullRequest>,
     ) -> GitHostFuture<'a, Result<PolledPullRequest, GitHostError>> {
         Box::pin(self.poll(access, remote, number, last))
+    }
+
+    fn poll_wayfinder_maps<'a>(
+        &'a self,
+        access: &'a HostAccountAccess,
+        remote: &'a str,
+        last: Option<&'a PolledWayfinderMaps>,
+    ) -> GitHostFuture<'a, Result<PolledWayfinderMaps, GitHostError>> {
+        Box::pin(self.poll_maps(access, remote, last))
     }
 }
 

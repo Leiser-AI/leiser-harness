@@ -28,7 +28,8 @@ pub use fake_gh::{
 pub use gate::Gate;
 pub use git_host::{
     FAKE_CREDENTIAL_HELPER, FAKE_GIT_HOST_ACTIVITY_FILE, FAKE_GIT_HOST_LOGIN_FILE,
-    FAKE_GIT_HOST_MERGED_FILE, FakeGitHost, FakePoll, FakePullRequest,
+    FAKE_GIT_HOST_MERGED_FILE, FAKE_GIT_HOST_WAYFINDER_FILE, FakeGitHost, FakePoll,
+    FakePullRequest, UnknownIssue,
 };
 pub use harness_mcp_client::{HarnessMcpClient, McpClientError, ToolOutput};
 pub use keychain::MemoryKeychain;
