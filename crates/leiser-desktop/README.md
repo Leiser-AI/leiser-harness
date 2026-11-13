@@ -183,8 +183,9 @@ same command on each system.
 ## App updates
 
 `src/app_update.rs` and `web/src/appUpdate.ts`: the app looks for a new
-version in its channel's update feed (ADR 0009) when it starts and every
-four hours, and offers it as "Update to …" at the bottom of the sidebar.
+version in its channel's update feed (ADR 0009) when it starts, every few
+minutes while it runs and when its window gets the focus again, and offers
+it as "Update to …" at the bottom of the sidebar.
 Installing it restarts the app; turns keep running in the harness service,
 which takes the new program as a service update. A failed install says why
 on hover and can be retried. Debug builds (`npm run tauri dev`) never look

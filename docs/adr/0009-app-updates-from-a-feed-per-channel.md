@@ -25,6 +25,10 @@ names at `releases/latest/download/`, which GitHub resolves to the latest
 release that is not a pre-release. So a beta is published as a pre-release
 only once a stable release exists; until then it is the latest release.
 
+Amended 2026-11-13: the app looks for a new version every ten minutes
+instead of every four hours, and also when its window gets the focus again,
+so a running app offers a release within minutes.
+
 Updates are signed with a key of the maintainer; the public key is in
 `tauri.conf.json`, the private key and its password are GitHub secrets.
 Installed apps accept only updates signed with that key: losing it means
