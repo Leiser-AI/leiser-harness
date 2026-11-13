@@ -42,14 +42,25 @@ jobs:
         with:
           # All branches, to check below which one the tag is on.
           fetch-depth: 0
-      # The installers take their version from tauri.conf.json; it must
-      # match the workspace's and the tag's.
+      # The installers take their version from tauri.conf.json. Cargo.toml,
+      # package.json, package-lock.json (which holds it twice) and the tag
+      # must match it.
       - name: Check the version
         run: |
           cargo_version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
           tauri_version=$(jq -r .version crates/leiser-desktop/tauri.conf.json)
-          echo "Cargo.toml: $cargo_version, tauri.conf.json: $tauri_version"
-          [ "$cargo_version" = "$tauri_version" ] || { echo "::error::the versions differ"; exit 1; }
+          package_version=$(jq -r .version crates/leiser-desktop/package.json)
+          lock_version=$(jq -r .version crates/leiser-desktop/package-lock.json)
+          lock_root_package_version=$(jq -r '.packages[""].version' crates/leiser-desktop/package-lock.json)
+          echo "Cargo.toml: $cargo_version, tauri.conf.json: $tauri_version, package.json: $package_version, package-lock.json: $lock_version and $lock_root_package_version"
+          # Fails unless the version $2, read from $1, is tauri.conf.json's.
+          same() {
+            [ "$2" = "$tauri_version" ] || { echo "::error::$1 has the version $2, tauri.conf.json $tauri_version"; exit 1; }
+          }
+          same Cargo.toml "$cargo_version"
+          same package.json "$package_version"
+          same package-lock.json "$lock_version"
+          same 'package-lock.json (packages[""])' "$lock_root_package_version"
           [[ "$tauri_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-beta\.[0-9]+)?$ ]] || { echo "::error::the version is neither X.Y.Z nor X.Y.Z-beta.N"; exit 1; }
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             [ "$GITHUB_REF_NAME" = "v$tauri_version" ] || { echo "::error::tag $GITHUB_REF_NAME does not match v$tauri_version"; exit 1; }

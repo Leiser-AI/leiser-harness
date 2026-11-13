@@ -218,9 +218,12 @@ a GitHub release and publishes it. A beta comes from
 `development` instead, with a version `X.Y.Z-beta.N`; it is a pre-release
 once a stable release exists, and until then the latest release, so the
 download links above (`releases/latest/download/<fixed name>`) find it.
-Every release also carries its installers under those fixed names. The
-version is set in both `Cargo.toml` and
-`crates/leiser-desktop/tauri.conf.json`; the workflow checks that both and
+Every release also carries its installers under those fixed names. A new
+version is set in five files: `Cargo.toml` (the workspace's `version` and
+the `=<version>` requirements for the workspace's own crates), `Cargo.lock`
+and, in `crates/leiser-desktop/`, `tauri.conf.json`, `package.json` and
+`package-lock.json` (twice: `version` and `packages[""].version`). The
+workflow checks that `Cargo.toml`, those three files of the desktop app and
 the tag agree. The workflow then serves the release to installed apps
 through the update feed ([ADR 0009](docs/adr/0009-app-updates-from-a-feed-per-channel.md)).
 The updates are signed with the maintainer's key, stored as the secrets
