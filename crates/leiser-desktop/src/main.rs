@@ -26,6 +26,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app_update;
+#[cfg(target_os = "macos")]
+mod bundle_swap;
 mod connection;
 mod terminals;
 

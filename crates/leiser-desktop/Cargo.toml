@@ -26,3 +26,9 @@ tauri-plugin-updater = { version = "2.14.1", default-features = false, features 
 thiserror = "2.0.21"
 tokio = { version = "1.54.1", features = ["sync", "time"] }
 tracing = { version = "0.1.44", default-features = false, features = ["std"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+flate2 = "1.1.11"
+rustix = { version = "1.1.6", features = ["fs"] }
+tar = "0.4.46"
+tempfile = "3.27.0"
