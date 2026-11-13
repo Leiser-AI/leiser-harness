@@ -1,7 +1,9 @@
 name: Install scripts
 
 # Runs install.sh and install.ps1 against the latest release on each
-# system, when a script changes and after a release is published.
+# system, when a script changes and after a release is published:
+# release.yml calls it for the release it has just published, and the
+# `release` trigger covers a release someone publishes by hand.
 
 on:
   pull_request:
@@ -11,6 +13,7 @@ on:
       - .github/workflows/install.yml
   release:
     types: [published]
+  workflow_call:
   workflow_dispatch:
 
 permissions:
