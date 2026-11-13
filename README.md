@@ -139,11 +139,12 @@ are gone by then.
 The harness service keeps running after you quit the app, so turns are not
 interrupted.
 
-- **Update:** the app looks for a new version when it starts and every few
-  hours. When there is one, **Update to …** shows at the bottom of the
-  sidebar; a click installs it and restarts the app (on Linux it asks for
-  your password). Running turns go on, and the harness service moves to the
-  new version as soon as no turn runs. A beta updates to newer betas and
+- **Update:** the app looks for a new version when it starts, every few
+  minutes while it runs and when you come back to its window. When there is
+  one, **Update to …** shows at the bottom of the sidebar; a click installs
+  it and restarts the app (on Linux it asks for your password). Running
+  turns go on, and the harness service moves to the new version as soon as
+  no turn runs. A beta updates to newer betas and
   stable releases, a stable release only to stable releases. Installing a
   new version by hand over the old one works too.
 - **Stop the service:** `pkill -f leiser-harness-service` (macOS, Linux) or

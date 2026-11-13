@@ -4,10 +4,9 @@ Status: accepted
 Date: 2026-11-12
 
 The desktop app updates itself with Tauri's updater. It looks for a new
-version when it starts, every ten minutes while it runs and when its
-window gets the focus again, shows a found one in the sidebar, and on a
-click downloads it, checks its signature, installs it and restarts. The
-harness service is not stopped: the installer replaces its
+version when it starts and every four hours, shows a found one in the
+sidebar, and on a click downloads it, checks its signature, installs it and
+restarts. The harness service is not stopped: the installer replaces its
 program next to the app, and the service moves to it once no turn runs
 (ADR 0007). On Windows the installer renames the running service program
 first, since Windows cannot overwrite a running program.
@@ -25,6 +24,10 @@ Amended 2026-11-12: the README links to the newest installers under fixed
 names at `releases/latest/download/`, which GitHub resolves to the latest
 release that is not a pre-release. So a beta is published as a pre-release
 only once a stable release exists; until then it is the latest release.
+
+Amended 2026-11-13: the app looks for a new version every ten minutes
+instead of every four hours, and also when its window gets the focus again,
+so a running app offers a release within minutes.
 
 Updates are signed with a key of the maintainer; the public key is in
 `tauri.conf.json`, the private key and its password are GitHub secrets.

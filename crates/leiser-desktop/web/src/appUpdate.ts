@@ -6,13 +6,14 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 
 import { icon } from "./icons";
 
 /** How often the app looks for a new version while it runs. */
 const CHECK_EVERY_MS = 10 * 60 * 1000;
-/** A window that gets the focus looks again once the last look is this old. */
-const FOCUS_CHECK_AFTER_MS = 60 * 1000;
+/** A window that gets the focus looks again only when the last look is this old. */
+const FOCUS_CHECK_MIN_AGE_MS = 60 * 1000;
 
 interface AvailableUpdate {
   version: string;
@@ -32,8 +33,10 @@ type State =
 
 let state: State = { type: "none" };
 let button: HTMLButtonElement;
-/** When the app last looked for a new version, as `Date.now()`. */
+/** When the app last looked for a new version, as `Date.now()`; 0 after a look that failed. */
 let checkedAt = 0;
+/** The look that is under way; only one runs at a time. */
+let looking: Promise<void> | null = null;
 
 function render(): void {
   button.hidden = state.type === "none";
@@ -68,7 +71,15 @@ function installing(): boolean {
   return state.type === "installing";
 }
 
-async function check(): Promise<void> {
+/** Looks for a new version, or waits for the look that is under way. */
+function check(): Promise<void> {
+  looking ??= look().finally(() => {
+    looking = null;
+  });
+  return looking;
+}
+
+async function look(): Promise<void> {
   if (installing()) return;
   checkedAt = Date.now();
   let update: AvailableUpdate | null;
@@ -77,6 +88,8 @@ async function check(): Promise<void> {
   } catch (error) {
     // No feed yet, no network: try again at the next check, quietly.
     console.warn("looking for an app update failed", error);
+    // The next focus tries again without waiting.
+    checkedAt = 0;
     return;
   }
   // An install may have started while the check ran.
@@ -107,6 +120,8 @@ async function install(): Promise<void> {
   state = { type: "installing", update, percent: null };
   render();
   try {
+    // A look under way would replace the found update while it installs.
+    await looking;
     // Restarts the app when it succeeds.
     await invoke("install_app_update");
   } catch (error) {
@@ -128,11 +143,11 @@ export async function start(updateButton: HTMLButtonElement): Promise<void> {
     render();
   });
   render();
-  await check();
   window.setInterval(() => void check(), CHECK_EVERY_MS);
   // Coming back to the app is when the developer can take an update, and a
   // window in the background may run its timers late.
-  window.addEventListener("focus", () => {
-    if (Date.now() - checkedAt >= FOCUS_CHECK_AFTER_MS) void check();
+  await getCurrentWindow().onFocusChanged(({ payload: focused }) => {
+    if (focused && Date.now() - checkedAt >= FOCUS_CHECK_MIN_AGE_MS) void check();
   });
+  await check();
 }
