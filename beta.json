@@ -1,23 +1,23 @@
 {
-  "version": "0.2.0-beta.4",
-  "notes": "See https://github.com/Leiser-AI/leiser-harness/releases/tag/v0.2.0-beta.4",
-  "pub_date": "2026-11-13T08:40:00.363Z",
+  "version": "0.2.0-beta.5",
+  "notes": "See https://github.com/Leiser-AI/leiser-harness/releases/tag/v0.2.0-beta.5",
+  "pub_date": "2026-11-13T20:28:32.696Z",
   "platforms": {
     "darwin-aarch64": {
-      "url": "https://github.com/Leiser-AI/leiser-harness/releases/download/v0.2.0-beta.4/leiser-harness.app.tar.gz",
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSR1hVR1ZDQ2JYaG8yUlNUWWp0SllMMFpMQmRLUDVRWDIzaDhKNGdnM1lPbUZqUHRJVEJMMVE1Rnk5cEFuRnFjOXZqdTliNWUrbUMrSWVqa0hhdGd6WGdKRXRiaWFFZlF3PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0NTU5MTQyCWZpbGU6bGVpc2VyLWhhcm5lc3MuYXBwLnRhci5negl2ZXJzaW9uOjAuMi4wLWJldGEuNApldlNMeGh0ckpiekRqWXlOVS8wcmxYWGt6OHptYTJSTnM3K1RFUDBkZWpWQmk3R1Q5NWxsUjU4eE9rcjVUaTJKNDJWTXlWZGMwY3NaeC9mL0c0VnlEQT09Cg=="
+      "url": "https://github.com/Leiser-AI/leiser-harness/releases/download/v0.2.0-beta.5/leiser-harness.app.tar.gz",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSR1hVR1ZDQ2JYaGtrTmZ1MUJmQVE1Si9uOExwUnUxQUo0K2g2bVAzMTlacGViMDdvenUzdlh3bXB6WTBmMGJabHUrL0JtazVZcHJGYVVIbzBPNFQzN0JJVE53NVA0alFvPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0NjAxNjUyCWZpbGU6bGVpc2VyLWhhcm5lc3MuYXBwLnRhci5negl2ZXJzaW9uOjAuMi4wLWJldGEuNQoyOFlPWnZobVJsb0F4RWFwV1llT1FxQ1lSK3Nid0V5UHpnazBtUFFXVkw0cVBoSUpNZVJDS1N0dHo2R2JNR3BWU0JVck5Yb1ptQ3QycVZwYkJDWHBBZz09Cg=="
     },
     "darwin-x86_64": {
-      "url": "https://github.com/Leiser-AI/leiser-harness/releases/download/v0.2.0-beta.4/leiser-harness.app.tar.gz",
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSR1hVR1ZDQ2JYaG8yUlNUWWp0SllMMFpMQmRLUDVRWDIzaDhKNGdnM1lPbUZqUHRJVEJMMVE1Rnk5cEFuRnFjOXZqdTliNWUrbUMrSWVqa0hhdGd6WGdKRXRiaWFFZlF3PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0NTU5MTQyCWZpbGU6bGVpc2VyLWhhcm5lc3MuYXBwLnRhci5negl2ZXJzaW9uOjAuMi4wLWJldGEuNApldlNMeGh0ckpiekRqWXlOVS8wcmxYWGt6OHptYTJSTnM3K1RFUDBkZWpWQmk3R1Q5NWxsUjU4eE9rcjVUaTJKNDJWTXlWZGMwY3NaeC9mL0c0VnlEQT09Cg=="
+      "url": "https://github.com/Leiser-AI/leiser-harness/releases/download/v0.2.0-beta.5/leiser-harness.app.tar.gz",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSR1hVR1ZDQ2JYaGtrTmZ1MUJmQVE1Si9uOExwUnUxQUo0K2g2bVAzMTlacGViMDdvenUzdlh3bXB6WTBmMGJabHUrL0JtazVZcHJGYVVIbzBPNFQzN0JJVE53NVA0alFvPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0NjAxNjUyCWZpbGU6bGVpc2VyLWhhcm5lc3MuYXBwLnRhci5negl2ZXJzaW9uOjAuMi4wLWJldGEuNQoyOFlPWnZobVJsb0F4RWFwV1llT1FxQ1lSK3Nid0V5UHpnazBtUFFXVkw0cVBoSUpNZVJDS1N0dHo2R2JNR3BWU0JVck5Yb1ptQ3QycVZwYkJDWHBBZz09Cg=="
     },
     "windows-x86_64-nsis": {
-      "url": "https://github.com/Leiser-AI/leiser-harness/releases/download/v0.2.0-beta.4/leiser-harness_0.2.0-beta.4_x64-setup.exe",
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSR1hVR1ZDQ2JYaG4vYWF3M0p5b3VOMXhpSDNwNitZSXJ4eFF3a241Wkc2cmM5YzYxWHpjQWZTckNPVldHMVdoU016bWdGUG9Xb2xHWFVBZ2QwRDZFMXpRYytxb0ZOUXdjPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0NTU4OTY5CWZpbGU6bGVpc2VyLWhhcm5lc3NfMC4yLjAtYmV0YS40X3g2NC1zZXR1cC5leGUJdmVyc2lvbjowLjIuMC1iZXRhLjQKWS80Y3hXUTFxcmtYNXdOZ05iUkZoWUFoSDJvOTFUWGY0RTBVR0tUMVQvc29QZWk0WE1xM3FIQ2IvaEt2UndsdnhJR3loamNtNUtSTUhxbUl4QnpqRHc9PQo="
+      "url": "https://github.com/Leiser-AI/leiser-harness/releases/download/v0.2.0-beta.5/leiser-harness_0.2.0-beta.5_x64-setup.exe",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSR1hVR1ZDQ2JYaGcrekxkVnJ3Qmp5ZHJnOEI0WW1NeHpZRDNjdUZwU1VYZi9UN0czSmN4SlNnZVhXN0NaYTJkajIyUzg3Umk5bW96THNhS1JVclRzNzZaS1MrUStmTlFBPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0NjAxNDMwCWZpbGU6bGVpc2VyLWhhcm5lc3NfMC4yLjAtYmV0YS41X3g2NC1zZXR1cC5leGUJdmVyc2lvbjowLjIuMC1iZXRhLjUKb0RsRCtPdFJ3YU8zWUhva1FOK3JWWmJwbE4zTk9sSHU5YjhnL0I4QXpENVlNeUNZL3NvRnlSam1WLzIyWnVrdzFuYWo0TU93djJZb1doWWV4VFFEQVE9PQo="
     },
     "linux-x86_64-deb": {
-      "url": "https://github.com/Leiser-AI/leiser-harness/releases/download/v0.2.0-beta.4/leiser-harness_0.2.0-beta.4_amd64.deb",
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSR1hVR1ZDQ2JYaGsrRGZoejA5WmxOeEV1QWovMzFBYjZTLzNZazQ0REtXZ3FRWmNVWGJabit2dFNXc1N0TVNFQ0FBTm51Rm1welpQNDVSeFpUVkJmeHNQd1pYR0lzWVFVPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0NTU4NzUwCWZpbGU6bGVpc2VyLWhhcm5lc3NfMC4yLjAtYmV0YS40X2FtZDY0LmRlYgpwbHd6MVRFTFpRSGgvU2J6OTRLaUJ1aVhyRlpiSG5hY2hMekxDT2xKN3dEQldrc1BwTXVvVDhTRXNKMXorUUpYWmZwdU9tOEt0VFJqZDJ2Ymt6VFdBUT09Cg=="
+      "url": "https://github.com/Leiser-AI/leiser-harness/releases/download/v0.2.0-beta.5/leiser-harness_0.2.0-beta.5_amd64.deb",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSR1hVR1ZDQ2JYaHZia0ZPblpZSkdTREtEZmREMVYvbXNCK1Z2SXdSYWE1TnZ0cVgxUHMrdUN5a2Nla3AxWXFGNm4zZnErTVVBWStJVG9rUG9iWlF2dVN3SDlBS3c1c0E4PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0NjAxMjgwCWZpbGU6bGVpc2VyLWhhcm5lc3NfMC4yLjAtYmV0YS41X2FtZDY0LmRlYgpiZHBlYVBQbnJVejRGVHRvalhXcjN5L2kxSWR0Uno0bCtVbW5PL3Q2K3BiWWlQak44aGxVcWczdEhVRm5Qd3ozTjFXU0dIUHh3WWxTUXY0R3FuZW1Edz09Cg=="
     }
   }
 }
