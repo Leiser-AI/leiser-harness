@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.2.0-beta.3"
+version = "0.2.0-beta.4"
 edition = "2024"
 rust-version = "1.90"
 license-file = "LICENSE.md"
@@ -12,9 +12,9 @@ publish = false
 # The workspace's own crates, at the workspace's version: a version bump
 # changes `version` above and these requirements, nothing in the crates.
 [workspace.dependencies]
-leiser-service = { version = "=0.2.0-beta.3", path = "crates/leiser-service" }
-leiser-terminal = { version = "=0.2.0-beta.3", path = "crates/leiser-terminal" }
-leiser-testkit = { version = "=0.2.0-beta.3", path = "crates/leiser-testkit" }
+leiser-service = { version = "=0.2.0-beta.4", path = "crates/leiser-service" }
+leiser-terminal = { version = "=0.2.0-beta.4", path = "crates/leiser-terminal" }
+leiser-testkit = { version = "=0.2.0-beta.4", path = "crates/leiser-testkit" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
