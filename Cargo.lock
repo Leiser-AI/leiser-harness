@@ -2058,7 +2058,7 @@ checksum = "20870f649af7073d53e38067b2a84312175d56ea15217e1b15bc83506ec50afb"
 
 [[package]]
 name = "leiser-desktop"
-version = "0.2.0-beta.2"
+version = "0.2.0-beta.3"
 dependencies = [
  "leiser-service",
  "leiser-terminal",
@@ -2077,7 +2077,7 @@ dependencies = [
 
 [[package]]
 name = "leiser-harness-service"
-version = "0.2.0-beta.2"
+version = "0.2.0-beta.3"
 dependencies = [
  "leiser-service",
  "leiser-testkit",
@@ -2090,7 +2090,7 @@ dependencies = [
 
 [[package]]
 name = "leiser-service"
-version = "0.2.0-beta.2"
+version = "0.2.0-beta.3"
 dependencies = [
  "apple-native-keyring-store",
  "getrandom 0.4.3",
@@ -2109,7 +2109,7 @@ dependencies = [
 
 [[package]]
 name = "leiser-terminal"
-version = "0.2.0-beta.2"
+version = "0.2.0-beta.3"
 dependencies = [
  "portable-pty",
  "tempfile",
@@ -2119,7 +2119,7 @@ dependencies = [
 
 [[package]]
 name = "leiser-testkit"
-version = "0.2.0-beta.2"
+version = "0.2.0-beta.3"
 dependencies = [
  "leiser-service",
  "serde",
