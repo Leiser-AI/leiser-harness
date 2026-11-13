@@ -207,11 +207,10 @@ is not bundled and is copied only so that no file keeps an old icon. The
 command also writes sizes for app stores and phones, which the app does not
 use.
 
-Keep the shape of the icon as it is: the rounded rectangle of Apple's macOS
-app icon template (824x824 on the 1024 canvas, corner radius 185.4). macOS
-26 and later draw an icon of any other shape, even a slightly different
-rounding, small on a grey plate. The Finder shows what macOS draws for a
-built app.
+Keep the shape of the icon (`shape` in the source) as it is: the rounded
+rectangle of Apple's macOS app icon template. macOS 26 and later draw an
+icon of any other shape, even a slightly different rounding, small on a
+grey plate. The Finder shows what macOS draws for a built app.
 
 ## Styles
 

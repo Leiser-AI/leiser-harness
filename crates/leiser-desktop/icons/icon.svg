@@ -14,8 +14,7 @@
   -->
   <defs>
     <!-- Icon shape: the rounded rectangle of Apple's macOS app icon template.
-         macOS 26 and later draw an icon of any other shape, even a slightly
-         different rounding, small on a grey plate. -->
+         The desktop README says why it must stay this one ("App icon"). -->
     <rect id="shape" x="100" y="100" width="824" height="824" rx="185.4"/>
     <clipPath id="inside-shape"><use href="#shape"/></clipPath>
     <filter id="shape-shadow" color-interpolation-filters="sRGB" x="-20%" y="-20%" width="140%" height="140%">
