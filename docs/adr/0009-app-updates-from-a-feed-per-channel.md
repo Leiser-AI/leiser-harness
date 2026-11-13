@@ -4,9 +4,10 @@ Status: accepted
 Date: 2026-11-12
 
 The desktop app updates itself with Tauri's updater. It looks for a new
-version when it starts and every four hours, shows a found one in the
-sidebar, and on a click downloads it, checks its signature, installs it and
-restarts. The harness service is not stopped: the installer replaces its
+version when it starts, every ten minutes while it runs and when its
+window gets the focus again, shows a found one in the sidebar, and on a
+click downloads it, checks its signature, installs it and restarts. The
+harness service is not stopped: the installer replaces its
 program next to the app, and the service moves to it once no turn runs
 (ADR 0007). On Windows the installer renames the running service program
 first, since Windows cannot overwrite a running program.

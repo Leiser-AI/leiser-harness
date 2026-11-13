@@ -1,7 +1,8 @@
 // Updates of the app itself (see the app's `app_update.rs`): looks for a
-// new version when the app starts and every few hours, and offers it in the
-// sidebar. Installing it restarts the app; running turns go on in the
-// harness service, which takes the new version as a service update.
+// new version when the app starts, every few minutes while it runs and when
+// its window gets the focus again, and offers it in the sidebar. Installing
+// it restarts the app; running turns go on in the harness service, which
+// takes the new version as a service update.
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -9,7 +10,9 @@ import { listen } from "@tauri-apps/api/event";
 import { icon } from "./icons";
 
 /** How often the app looks for a new version while it runs. */
-const CHECK_EVERY_MS = 4 * 60 * 60 * 1000;
+const CHECK_EVERY_MS = 10 * 60 * 1000;
+/** A window that gets the focus looks again once the last look is this old. */
+const FOCUS_CHECK_AFTER_MS = 60 * 1000;
 
 interface AvailableUpdate {
   version: string;
@@ -29,6 +32,8 @@ type State =
 
 let state: State = { type: "none" };
 let button: HTMLButtonElement;
+/** When the app last looked for a new version, as `Date.now()`. */
+let checkedAt = 0;
 
 function render(): void {
   button.hidden = state.type === "none";
@@ -65,6 +70,7 @@ function installing(): boolean {
 
 async function check(): Promise<void> {
   if (installing()) return;
+  checkedAt = Date.now();
   let update: AvailableUpdate | null;
   try {
     update = await invoke<AvailableUpdate | null>("check_app_update");
@@ -124,4 +130,9 @@ export async function start(updateButton: HTMLButtonElement): Promise<void> {
   render();
   await check();
   window.setInterval(() => void check(), CHECK_EVERY_MS);
+  // Coming back to the app is when the developer can take an update, and a
+  // window in the background may run its timers late.
+  window.addEventListener("focus", () => {
+    if (Date.now() - checkedAt >= FOCUS_CHECK_AFTER_MS) void check();
+  });
 }
