@@ -184,6 +184,8 @@ async function start(chat: ChatId, terminal: ChatTerminal): Promise<void> {
       }
     }
   } catch (error) {
+    // A forgotten terminal has no screen left to write to.
+    if (terminals.get(chat) !== terminal) return;
     terminal.screen.write(
       `\x1b[31mCould not start a shell: ${String(error)}\x1b[0m\r\nPress any key to try again.\r\n`,
     );
@@ -215,6 +217,13 @@ export function forget(chat: ChatId): void {
   terminal.screen.dispose();
   terminal.element.remove();
   if (shown === chat) shown = null;
+}
+
+/** Forgets the terminal of every chat not in `chats`. */
+export function keepOnly(chats: Set<ChatId>): void {
+  for (const chat of Array.from(terminals.keys())) {
+    if (!chats.has(chat)) forget(chat);
+  }
 }
 
 function fitShown(): void {

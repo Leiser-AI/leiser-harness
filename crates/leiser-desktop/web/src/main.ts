@@ -370,6 +370,8 @@ async function readAndRender(): Promise<void> {
     ),
   );
   if (read !== readCount) return;
+  // A chat the service no longer lists has no shell left to keep.
+  terminal.keepOnly(new Set(chats.map((overview) => overview.chat)));
   renderServiceNotice(updateWaiting);
   renderSidebar(repositories, chats, checks, maps, startsIn?.repository ?? null);
   // The subscriptions dialog can open over any view.
@@ -746,7 +748,6 @@ let transcriptChat: ChatId | null = null;
 // panel or repo-check) loses its position; showing it again restores this.
 let lastScrollTop = 0;
 
-/** Keeps the transcript at its end while it follows, else where it was. */
 function keyed(item: HTMLElement, key: string): HTMLElement {
   item.dataset.key = key;
   return item;
@@ -758,9 +759,13 @@ function keyed(item: HTMLElement, key: string): HTMLElement {
  * developer did there stays: chosen answers, focus, opened or closed output.
  */
 function updateTranscript(entries: HTMLElement[]): void {
+  // Only transcript entries are kept: the cards after them act on state
+  // their text does not show, such as which subscription a button picks.
   const shown = new Map<string, HTMLElement>();
   for (const child of Array.from(transcript.children)) {
-    if (child instanceof HTMLElement && child.dataset.key !== undefined) shown.set(child.dataset.key, child);
+    if (child instanceof HTMLElement && child.dataset.key?.startsWith("entry-")) {
+      shown.set(child.dataset.key, child);
+    }
   }
   const next = entries.map((entry) => {
     const old = entry.dataset.key === undefined ? undefined : shown.get(entry.dataset.key);
@@ -768,9 +773,13 @@ function updateTranscript(entries: HTMLElement[]): void {
     keepOpenOutput(old, entry);
     return old.isEqualNode(entry) ? old : entry;
   });
+  const kept = new Set(next);
   next.forEach((entry, index) => {
     const at = transcript.children[index];
-    if (at !== entry) transcript.insertBefore(entry, at ?? null);
+    if (at === entry) return;
+    // A changed entry takes its old node's place, so the ones after it stay where they are.
+    if (at !== undefined && !kept.has(at as HTMLElement)) at.replaceWith(entry);
+    else transcript.insertBefore(entry, at ?? null);
   });
   while (transcript.children.length > next.length) transcript.lastElementChild?.remove();
 }
@@ -785,6 +794,7 @@ function keepOpenOutput(old: HTMLElement, rendered: HTMLElement): void {
   });
 }
 
+/** Keeps the transcript at its end while it follows, else where it was. */
 function placeTranscript(): void {
   if (transcript.hidden) return;
   transcript.scrollTop = followTranscript ? transcript.scrollHeight : lastScrollTop;
@@ -1041,9 +1051,7 @@ function renderChat(
   }
   const entries = view.transcript.flatMap((entry, index) => {
     const item = renderEntry(entry, context);
-    if (item === null) return [];
-    item.dataset.key = `entry-${index}`;
-    return [item];
+    return item === null ? [] : [keyed(item, `entry-${index}`)];
   });
   if (view.usageLimit !== null) {
     entries.push(keyed(limitCard(view, view.usageLimit, subscriptions, context), "usage-limit"));
