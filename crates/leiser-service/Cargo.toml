@@ -30,3 +30,6 @@ apple-native-keyring-store = { version = "1.0.2", features = ["keychain"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-native-keyring-store = { version = "1.1.0", default-features = false }
+
+[dev-dependencies]
+tempfile = "3.27.0"

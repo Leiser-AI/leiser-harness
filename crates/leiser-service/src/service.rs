@@ -14,7 +14,8 @@ use crate::cli_extensions::{self, CliExtensionError};
 use crate::git_host::{GhGitHost, GitHost};
 use crate::handoff::{self, Handoff, ReadError};
 use crate::harness_mcp::{
-    BranchNaming, ChatRead, HarnessCall, HarnessMcp, HarnessMcpError, TodoAnswer, TodoCall, Tools,
+    BranchNaming, ChatRead, HarnessCall, HarnessMcp, HarnessMcpError, Registration, TodoAnswer,
+    TodoCall, Tools,
 };
 use crate::host_accounts::{self, Binding, HostAccountError, HostAccounts};
 use crate::keychain::KeychainError;
@@ -346,7 +347,8 @@ struct Chat {
     /// turn starts.
     usage_limit: Option<LimitHit>,
     /// Messages queued when the usage limit was hit, held back so they do
-    /// not hit it too. The chat's next turn queues them.
+    /// not hit it too, or queued during setup when the first of them could
+    /// not be sent. The chat's next turn queues them.
     held: VecDeque<String>,
     /// The chat's pull request, once the developer has asked for one.
     pull_request: Option<ChatPullRequest>,
@@ -474,6 +476,9 @@ struct Session {
     open: Vec<OpenRequest>,
     /// The usage limit the running turn hit; the turn stops at it.
     limit: Option<LimitHit>,
+    /// The agent session's address on the harness MCP server, taken away
+    /// when the session ends.
+    _harness_mcp: Registration,
 }
 
 /// An approval request or a question the agent waits for an answer to.
@@ -1467,6 +1472,16 @@ impl State {
         };
         if let Err(error) = self.send_message(id, first.clone()).await {
             tracing::warn!(chat = ?id, %error, "could not send the messages queued during setup");
+            // Held back like messages at a usage limit: the chat's next
+            // turn queues them, ahead of any held there already.
+            if let Some(chat) = self.chats.get_mut(&id) {
+                queued.push_front(first);
+                queued.append(&mut chat.held);
+                chat.held = queued;
+            }
+            if let Err(error) = self.save() {
+                tracing::error!(chat = ?id, %error, "could not store the messages queued during setup");
+            }
             return;
         }
         self.emit(Event::QueuedMessageSent {
@@ -2186,9 +2201,22 @@ impl State {
             .subscriptions
             .provider(subscription)
             .ok_or(CommandError::UnknownSubscription { subscription })?;
+        let users: Vec<ChatId> = self
+            .chats
+            .iter()
+            .filter(|(_, chat)| {
+                chat.agent_cli.provider() == provider && chat.subscription() == Some(subscription)
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        // A running turn would end without a word when its config
+        // directory goes.
+        for &id in &users {
+            self.chat_between_turns(id)?;
+        }
         self.logins.remove(&subscription);
-        for chat in self.chats.values_mut() {
-            if chat.agent_cli.provider() == provider && chat.subscription() == Some(subscription) {
+        for id in users {
+            if let Some(chat) = self.chats.get_mut(&id) {
                 // Its config directory is about to go.
                 chat.session = None;
             }
@@ -2830,7 +2858,7 @@ impl State {
             Some(subscription) => Some(self.subscriptions.access(subscription)?),
             None => None,
         };
-        let harness_mcp_url = self
+        let harness_mcp = self
             .harness_mcp
             .register(
                 id,
@@ -2848,7 +2876,7 @@ impl State {
         };
         let spec = SessionSpec {
             working_directory: chat.working_directory.clone(),
-            harness_mcp_url: Some(harness_mcp_url),
+            harness_mcp_url: Some(harness_mcp.url().to_owned()),
             access: Access::Chat,
             permission_mode,
             subscription,
@@ -2877,6 +2905,7 @@ impl State {
             permission_mode,
             open: Vec::new(),
             limit: None,
+            _harness_mcp: harness_mcp,
         });
         Ok(())
     }

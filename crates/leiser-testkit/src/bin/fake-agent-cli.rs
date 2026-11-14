@@ -422,6 +422,9 @@ impl<W: Write> Turn<'_, W> {
             },
             Step::WaitForSteer => return self.wait_for_steer(),
             Step::WaitForGate { gate } => return self.wait_for_gate(&gate),
+            Step::ReportHarnessMcpUrl => AgentEvent::Message {
+                text: self.harness_mcp.ok_or(FakeError::NoHarnessMcp)?.to_owned(),
+            },
             Step::ListHarnessTools => AgentEvent::Message {
                 text: self.harness_mcp()?.list_tools()?.join(","),
             },

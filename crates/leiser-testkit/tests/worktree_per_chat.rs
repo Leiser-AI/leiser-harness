@@ -514,6 +514,51 @@ async fn the_setup_script_runs_after_the_worktree_is_created_and_before_the_agen
 }
 
 #[tokio::test]
+async fn messages_queued_during_setup_wait_on_when_the_first_cannot_be_sent() -> TestResult {
+    let gate = Gate::new()?;
+    let Step::WaitForGate { gate: gate_file } = gate.step() else {
+        return Err("a gate waits at a file".into());
+    };
+    let script = Script::new()
+        .turn([Step::EchoUserMessage])
+        .turn([Step::EchoUserMessage])
+        .turn([Step::EchoUserMessage]);
+    let harness = start_service(&script)?;
+    let service = harness.connect();
+    let repo = TestRepo::with_remote()?;
+    let setup = format!(
+        "[worktree]\nsetup_script = '''\nwhile [ ! -e \"{}\" ]; do sleep 0.01; done\n'''\n",
+        gate_file.display()
+    );
+    configure(&repo, &setup)?;
+    let repository = add_repository(&service, &repo).await?;
+    let mut events = service.subscribe();
+    let chat = start_chat(&service, repository, Checkout::NewWorktree).await?;
+    send(&service, chat, "first").await?;
+    send(&service, chat, "second").await?;
+
+    // The config breaks while the worktree is set up, so the agent cannot
+    // start when the setup is done.
+    configure(&repo, "not toml")?;
+    gate.open()?;
+    script_finished(&mut events, chat, RepositoryScript::Setup).await?;
+    // Answered once the service has tried to send the first message.
+    assert_ne!(overview(&service, chat).await?.status, ChatStatus::Working);
+    configure(&repo, &setup)?;
+
+    // The developer's next message starts the agent; the queued messages
+    // follow it, one turn each.
+    assert_eq!(send(&service, chat, "third").await?, Response::MessageSent);
+    let mut answers = Vec::new();
+    for _ in 0..3 {
+        answers.push(first_message(&mut events, chat).await?);
+    }
+    assert!(answers[0].ends_with("third"), "{answers:?}");
+    assert_eq!(answers[1..], ["first", "second"]);
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_failed_setup_script_is_reported_and_the_chat_goes_on() -> TestResult {
     let harness = start_service(&Script::new().turn([Step::message("still here")]))?;
     let service = harness.connect();

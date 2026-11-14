@@ -91,7 +91,7 @@ pub use installed::Environment;
 pub use keychain::{KEYCHAIN_SERVICE, Keychain, KeychainError, OsKeychain};
 pub use local_interface::{
     ConnectError, ENDPOINT_FILE, LOCAL_INTERFACE_VERSION, LocalClient, LocalInterface,
-    Notification, ServeError, serve,
+    MAX_CLIENT_FRAME_BYTES, Notification, ServeError, serve,
 };
 pub use program::{ArgsError, SERVICE_LOG_FILE, ServiceProgram};
 pub use protocol::{
