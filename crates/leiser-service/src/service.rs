@@ -3778,19 +3778,17 @@ async fn verify_and_push(
         .ok_or_else(|| CommandError::PushFailed {
             reason: "the repository has no remote `origin`".to_owned(),
         })?;
-    crate::git_host::refuse_credential_in_remote(&remote).map_err(|error| {
-        CommandError::HostAccountUnverified {
-            name: name.to_owned(),
-            reason: error.to_string(),
-        }
-    })?;
+    let unverified = |error: crate::git_host::GitHostError| CommandError::HostAccountUnverified {
+        name: name.to_owned(),
+        reason: error.to_string(),
+    };
+    // Checked here, not only by the git host, because git pushes below
+    // whatever `GitHost` answered.
+    crate::git_host::refuse_credential_in_remote(&remote).map_err(unverified)?;
     let actual = git_host
         .account_for_push(access, &remote)
         .await
-        .map_err(|error| CommandError::HostAccountUnverified {
-            name: name.to_owned(),
-            reason: error.to_string(),
-        })?;
+        .map_err(unverified)?;
     if actual != access.login {
         return Err(CommandError::HostAccountMismatch {
             name: name.to_owned(),

@@ -386,40 +386,45 @@ async fn a_pull_request_the_git_host_does_not_know_is_refused() -> TestResult {
 }
 
 #[tokio::test]
-async fn a_remote_with_a_password_in_its_url_is_refused() -> TestResult {
+async fn a_remote_with_a_credential_in_its_url_is_refused() -> TestResult {
     let fixture = fixture()?;
-    let remote = "https://someone:remote-secret@github.com/owner/repo.git";
 
-    let account = fixture.host.account_for_push(&fixture.access, remote).await;
-    let polled = fixture
-        .host
-        .poll_pull_request(&fixture.access, remote, 1, None)
-        .await;
+    // A token also works as the user alone.
+    for remote in [
+        "https://someone:remote-secret@github.com/owner/repo.git",
+        "https://remote-secret@github.com/owner/repo.git",
+    ] {
+        let account = fixture.host.account_for_push(&fixture.access, remote).await;
+        let polled = fixture
+            .host
+            .poll_pull_request(&fixture.access, remote, 1, None)
+            .await;
 
-    for error in [account.err(), polled.err()] {
-        assert!(
-            matches!(error, Some(GitHostError::CredentialInRemote { .. })),
-            "{error:?}"
-        );
-        let shown = format!(
-            "{error:?} {}",
-            error.as_ref().map(ToString::to_string).unwrap_or_default()
-        );
-        assert!(!shown.contains("remote-secret"), "{shown}");
+        for error in [account.err(), polled.err()] {
+            assert!(
+                matches!(error, Some(GitHostError::CredentialInRemote { .. })),
+                "{error:?}"
+            );
+            let shown = format!(
+                "{error:?} {}",
+                error.as_ref().map(ToString::to_string).unwrap_or_default()
+            );
+            assert!(!shown.contains("remote-secret"), "{shown}");
+        }
     }
     assert_eq!(fixture.gh.take_requests()?, []);
     Ok(())
 }
 
 #[tokio::test]
-async fn a_remote_on_another_git_host_is_shown_without_its_user() -> TestResult {
+async fn a_remote_the_harness_cannot_check_is_shown_without_its_user() -> TestResult {
     let fixture = fixture()?;
 
     let polled = fixture
         .host
         .poll_pull_request(
             &fixture.access,
-            "https://remote-token@gitlab.com/owner/repo.git",
+            "ssh://remote-token@gitlab.com/owner/repo.git",
             1,
             None,
         )
@@ -435,9 +440,6 @@ async fn a_remote_on_another_git_host_is_shown_without_its_user() -> TestResult 
         error.as_ref().map(ToString::to_string).unwrap_or_default()
     );
     assert!(!shown.contains("remote-token"), "{shown}");
-    assert!(
-        shown.contains("https://gitlab.com/owner/repo.git"),
-        "{shown}"
-    );
+    assert!(shown.contains("ssh://gitlab.com/owner/repo.git"), "{shown}");
     Ok(())
 }

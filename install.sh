@@ -57,7 +57,10 @@ install_macos() {
     fail "could not copy the app to $target"
   fi
   rm -rf "${target:?}/$APP"
-  mv "$staged" "$target/$APP" || fail "could not move the app into $target"
+  if ! mv "$staged" "$target/$APP"; then
+    rm -rf "$staged"
+    fail "could not move the app into $target"
+  fi
   say "Installed $target/$APP"
   if [ "${LEISER_INSTALL_NO_OPEN:-}" != 1 ]; then open "$target/$APP"; fi
 }
