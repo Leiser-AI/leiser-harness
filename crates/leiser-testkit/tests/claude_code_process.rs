@@ -17,6 +17,7 @@ use leiser_service::{
     SessionSpec,
 };
 use leiser_testkit::TestRepo;
+use tokio::sync::mpsc;
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
@@ -27,9 +28,9 @@ const DEADLINE: Duration = Duration::from_secs(30);
 /// so none is still open for writing when one runs ("text file busy").
 struct Scripts {
     _dir: tempfile::TempDir,
-    /// Asks a permission prompt for each message and keeps running after
+    /// Sends an approval request for each message and keeps running after
     /// its standard input closes, as Claude Code waiting on its prompt.
-    waits_on_its_prompt: PathBuf,
+    waits_on_approval: PathBuf,
     /// Never answers `--version`.
     hangs_on_version: PathBuf,
 }
@@ -41,9 +42,9 @@ fn write_scripts() -> TestResult<Scripts> {
     let dir = tempfile::tempdir()?;
     let version = ClaudeCodeDriver::MINIMUM_VERSION;
     let prompt = r#"{"type":"control_request","request_id":"r1","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"ls"}}}"#;
-    let waits_on_its_prompt = script(
+    let waits_on_approval = script(
         dir.path(),
-        "waits-on-its-prompt",
+        "waits-on-approval",
         &format!(
             "if [ \"$1\" = --version ]; then echo '{version} (Claude Code)'; exit 0; fi\n\
              echo '{{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s1\"}}'\n\
@@ -56,7 +57,7 @@ fn write_scripts() -> TestResult<Scripts> {
     let hangs_on_version = script(dir.path(), "hangs-on-version", "exec sleep 120\n")?;
     Ok(Scripts {
         _dir: dir,
-        waits_on_its_prompt,
+        waits_on_approval,
         hangs_on_version,
     })
 }
@@ -73,10 +74,10 @@ fn scripts() -> TestResult<&'static Scripts> {
 }
 
 #[tokio::test]
-async fn a_dropped_agent_session_ends_claude_code_even_while_it_waits_on_a_prompt() -> TestResult {
+async fn a_dropped_agent_session_ends_claude_code_even_while_it_waits_for_approval() -> TestResult {
     let scripts = scripts()?;
     let repo = TestRepo::new()?;
-    let mut session = ClaudeCodeDriver::new(&scripts.waits_on_its_prompt).start(SessionSpec {
+    let mut session = ClaudeCodeDriver::new(&scripts.waits_on_approval).start(SessionSpec {
         working_directory: repo.path().to_path_buf(),
         harness_mcp_url: None,
         access: Access::Chat,
@@ -89,30 +90,37 @@ async fn a_dropped_agent_session_ends_claude_code_even_while_it_waits_on_a_promp
             text: "hello".to_owned(),
         })
         .await?;
-    let asked = tokio::time::timeout(DEADLINE, async {
-        while let Some(event) = session.events.recv().await {
-            if matches!(event, AgentEvent::ApprovalRequested { .. }) {
-                return true;
-            }
-        }
-        false
+    let asked = wait_for(&mut session.events, |event| {
+        matches!(event, AgentEvent::ApprovalRequested { .. })
     })
-    .await?;
+    .await;
     assert!(asked, "no approval request");
 
     drop(session.input);
-    let ended = tokio::time::timeout(DEADLINE, async {
-        while let Some(event) = session.events.recv().await {
-            if event == AgentEvent::SessionEnded {
+    let ended = wait_for(&mut session.events, |event| {
+        *event == AgentEvent::SessionEnded
+    })
+    .await;
+
+    assert!(ended, "Claude Code was left running");
+    Ok(())
+}
+
+/// Whether an event that `wanted` accepts arrives within [`DEADLINE`].
+async fn wait_for(
+    events: &mut mpsc::Receiver<AgentEvent>,
+    wanted: impl Fn(&AgentEvent) -> bool,
+) -> bool {
+    tokio::time::timeout(DEADLINE, async {
+        while let Some(event) = events.recv().await {
+            if wanted(&event) {
                 return true;
             }
         }
         false
     })
-    .await;
-
-    assert_eq!(ended, Ok(true), "Claude Code was left running");
-    Ok(())
+    .await
+    .unwrap_or(false)
 }
 
 #[test]

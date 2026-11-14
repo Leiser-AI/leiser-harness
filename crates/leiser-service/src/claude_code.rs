@@ -160,8 +160,9 @@ fn sandbox_settings(ask_for_commands: bool) -> String {
 
 /// How `git push` starts: plain, or with a working directory (`-C <dir>`)
 /// or configuration (`-c <key>=<value>`) given before the subcommand.
-/// Spelled out rather than `git *push`, which would also deny commits whose
-/// message mentions pushing to a protected branch.
+/// Spelled out rather than `git *push`, which would deny every commit whose
+/// message mentions pushing to a protected branch. With `-C` or `-c` before
+/// `commit`, such a message is still denied: `*` also matches spaces.
 const GIT_PUSH: [&str; 3] = ["git push", "git -C * push", "git -c * push"];
 
 /// How `git commit` starts, with any options before the subcommand. Its
@@ -379,7 +380,7 @@ impl ClaudeCodeDriver {
         tokio::spawn(async move {
             let end = converse(stdin, stdout, input_receiver, id_sender, &event_sender).await;
             match end {
-                // It may still run, such as on a permission prompt nobody
+                // It may still run, such as on an approval request nobody
                 // answers now; it is of no use any more.
                 ReadEnd::ProtocolBroken | ReadEnd::DidNotExit => {
                     let _ = child.start_kill();
@@ -1900,11 +1901,12 @@ mod tests {
                 reason: "Invalid API key [redacted] · Fix it".to_owned()
             }]
         );
-        let reason = match events(&[silent]).as_slice() {
-            [AgentEvent::TurnFailed { reason }] => reason.clone(),
-            other => format!("{other:?}"),
-        };
-        assert!(reason.contains("error_max_turns"), "{reason}");
+        assert_eq!(
+            events(&[silent]),
+            vec![AgentEvent::TurnFailed {
+                reason: "Claude Code ended the turn with `error_max_turns`".to_owned()
+            }]
+        );
     }
 
     #[test]
