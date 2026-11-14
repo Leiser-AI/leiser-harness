@@ -413,6 +413,11 @@ pub enum DriverError {
         agent_cli: &'static str,
         output: String,
     },
+    #[error("{agent_cli} did not answer `--version` within {seconds} seconds")]
+    VersionTimeout {
+        agent_cli: &'static str,
+        seconds: u64,
+    },
     #[error(
         "{agent_cli} {found} is too old: the harness needs at least {minimum} because {reason}. \
          Update {agent_cli} and try again."

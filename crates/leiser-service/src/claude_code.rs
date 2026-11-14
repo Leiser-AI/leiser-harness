@@ -41,7 +41,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -58,6 +58,9 @@ use crate::{
 
 const AGENT_CLI: &str = "Claude Code";
 const CHANNEL_BUFFER: usize = 64;
+
+/// How long Claude Code may take to exit after its input closes.
+const EXIT_GRACE: Duration = Duration::from_secs(5);
 
 /// Claude Code's arguments for a long-running agent session.
 ///
@@ -283,7 +286,8 @@ impl ClaudeCodeDriver {
     /// # Errors
     ///
     /// Returns [`DriverError::NotInstalled`] when there is no program,
-    /// [`DriverError::Spawn`] when it cannot run and
+    /// [`DriverError::Spawn`] when it cannot run,
+    /// [`DriverError::VersionTimeout`] when it does not answer in time and
     /// [`DriverError::UnreadableVersion`] when its answer is not a version.
     pub fn version(&self) -> Result<Version, DriverError> {
         version_of(&self.program.resolve()?)
@@ -305,19 +309,13 @@ impl ClaudeCodeDriver {
 
 /// Asks `program` for its version.
 fn version_of(program: &Found) -> Result<Version, DriverError> {
-    let output = program
-        .command()
-        .arg("--version")
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .map_err(DriverError::Spawn)?;
-    let text = String::from_utf8_lossy(&output.stdout);
+    let answer = program.ask_version(AGENT_CLI)?;
+    let text = answer.text;
     // Claude Code answers `2.1.321 (Claude Code)`.
     text.split_whitespace()
         .next()
         .and_then(Version::parse)
-        .filter(|_| output.status.success())
+        .filter(|_| answer.success)
         .ok_or_else(|| DriverError::UnreadableVersion {
             agent_cli: AGENT_CLI,
             output: text.trim().to_owned(),
@@ -380,11 +378,21 @@ impl ClaudeCodeDriver {
         let (event_sender, events) = mpsc::channel(CHANNEL_BUFFER);
         tokio::spawn(async move {
             let end = converse(stdin, stdout, input_receiver, id_sender, &event_sender).await;
-            if end == ReadEnd::ProtocolBroken {
-                // The process may still wait for input; it is of no use now.
-                let _ = child.start_kill();
+            match end {
+                // It may still run, such as on a permission prompt nobody
+                // answers now; it is of no use any more.
+                ReadEnd::ProtocolBroken | ReadEnd::DidNotExit => {
+                    let _ = child.start_kill();
+                }
+                ReadEnd::Closed => {}
             }
-            let _ = child.wait().await;
+            // Claude Code may close its output and still run.
+            if tokio::time::timeout(EXIT_GRACE, child.wait())
+                .await
+                .is_err()
+            {
+                let _ = child.kill().await;
+            }
             let _ = event_sender.send(AgentEvent::SessionEnded).await;
         });
         Ok(AgentSession { id, input, events })
@@ -463,12 +471,15 @@ enum ReadEnd {
     Closed,
     /// Claude Code wrote a line that is not part of its protocol.
     ProtocolBroken,
+    /// Claude Code kept its output open for [`EXIT_GRACE`] after its
+    /// standard input closed.
+    DidNotExit,
 }
 
 /// Talks to Claude Code until it closes its output: writes the harness
 /// service's input, reads Claude Code's lines and passes their events on.
 /// When the input closes, Claude Code's standard input is closed so it
-/// exits, and its last lines are still read.
+/// exits, and its last lines are still read for [`EXIT_GRACE`].
 async fn converse(
     stdin: ChildStdin,
     stdout: ChildStdout,
@@ -493,8 +504,13 @@ async fn converse(
     {
         stdin = None;
     }
+    let mut exit_deadline = None;
     loop {
+        if stdin.is_none() && exit_deadline.is_none() {
+            exit_deadline = Some(tokio::time::Instant::now() + EXIT_GRACE);
+        }
         tokio::select! {
+            () = sleep_until_deadline(exit_deadline) => return ReadEnd::DidNotExit,
             message = input.recv(), if stdin.is_some() => {
                 let line = match message {
                     Some(SessionInput::UserMessage { text }) => Some(InputLine::user_message(text)),
@@ -547,6 +563,14 @@ async fn converse(
                 }
             }
         }
+    }
+}
+
+/// Sleeps until `deadline`, or forever without one.
+async fn sleep_until_deadline(deadline: Option<tokio::time::Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(deadline).await,
+        None => std::future::pending().await,
     }
 }
 
