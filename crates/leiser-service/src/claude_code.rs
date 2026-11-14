@@ -154,35 +154,73 @@ fn sandbox_settings(ask_for_commands: bool) -> String {
     .to_string()
 }
 
-/// The names AI attribution in a commit message uses for Claude Code and
-/// Codex, as they write them.
-const AI_ATTRIBUTION_NAMES: [&str; 2] = ["Claude", "Codex"];
+/// How `git push` starts: plain, or with a working directory (`-C <dir>`)
+/// or configuration (`-c <key>=<value>`) given before the subcommand.
+/// Spelled out rather than `git *push`, which would also deny commits whose
+/// message mentions pushing to a protected branch.
+const GIT_PUSH: [&str; 3] = ["git push", "git -C * push", "git -c * push"];
+
+/// How `git commit` starts, with any options before the subcommand. Its
+/// rules name AI attribution, so a broader match does no harm.
+const GIT_COMMIT: &str = "git *commit";
+
+/// The co-author trailer without its first letter, as `Co-authored-by` and
+/// `co-authored-by`, and in title case.
+const CO_AUTHOR_TRAILERS: [&str; 2] = ["o-authored-by", "o-Authored-By"];
+
+/// Spellings of [`crate::hard_blocks::AI_NAMES`] other than lower case and
+/// capitalised.
+const AI_BRAND_SPELLINGS: [&str; 2] = ["ChatGPT", "OpenAI"];
+
+/// The ways a commit message may spell the names in
+/// [`crate::hard_blocks::AI_NAMES`]: deny rules match case-sensitively.
+fn ai_name_spellings() -> Vec<String> {
+    let mut spellings = Vec::new();
+    for name in crate::hard_blocks::AI_NAMES {
+        let mut capitalised = name.to_owned();
+        if let Some(first) = capitalised.get_mut(..1) {
+            first.make_ascii_uppercase();
+        }
+        spellings.push(name.to_owned());
+        spellings.push(capitalised);
+        spellings.extend(
+            AI_BRAND_SPELLINGS
+                .iter()
+                .filter(|brand| brand.eq_ignore_ascii_case(name))
+                .map(|&brand| brand.to_owned()),
+        );
+    }
+    spellings
+}
 
 /// The hard blocks as Claude Code deny rules: `git push` to a protected
 /// branch, a force push, and a commit whose message or author carries AI
-/// attribution. A `*` matches any text; a trailing ` *` also matches
-/// nothing.
+/// attribution, also with `-C` or `-c` before the subcommand. A `*`
+/// matches any text; a trailing ` *` also matches nothing. Rules match
+/// case-sensitively, so names and trailers come in their common spellings.
 fn deny_rules() -> Vec<String> {
     let mut rules = Vec::new();
-    for branch in crate::hard_blocks::PROTECTED_BRANCHES {
-        for target in [format!(" {branch}"), format!(":{branch}")] {
-            rules.push(format!("Bash(git push *{target})"));
-            rules.push(format!("Bash(git push *{target} *)"));
+    for push in GIT_PUSH {
+        for branch in crate::hard_blocks::PROTECTED_BRANCHES {
+            for target in [format!(" {branch}"), format!(":{branch}")] {
+                rules.push(format!("Bash({push} *{target})"));
+                rules.push(format!("Bash({push} *{target} *)"));
+            }
+            rules.push(format!("Bash({push} *refs/heads/{branch})"));
+            rules.push(format!("Bash({push} *refs/heads/{branch} *)"));
         }
-        rules.push(format!("Bash(git push *refs/heads/{branch})"));
-        rules.push(format!("Bash(git push *refs/heads/{branch} *)"));
-    }
-    for force in ["-f*", "* -f*", "*--force*", "*--mirror*", "* +*"] {
-        rules.push(format!("Bash(git push {force})"));
-    }
-    for name in AI_ATTRIBUTION_NAMES {
-        for trailer in ["Co-authored-by", "Co-Authored-By"] {
-            rules.push(format!("Bash(git commit *{trailer}: {name}*)"));
+        for force in ["-f*", "* -f*", "*--force*", "*--mirror*", "* +*"] {
+            rules.push(format!("Bash({push} {force})"));
         }
-        rules.push(format!("Bash(git commit *Generated with*{name}*)"));
+    }
+    for name in ai_name_spellings() {
+        for trailer in CO_AUTHOR_TRAILERS {
+            rules.push(format!("Bash({GIT_COMMIT} *{trailer}: {name}*)"));
+        }
+        rules.push(format!("Bash({GIT_COMMIT} *Generated with*{name}*)"));
     }
     for email in ["noreply@anthropic.com", "noreply@openai.com"] {
-        rules.push(format!("Bash(git commit *{email}*)"));
+        rules.push(format!("Bash({GIT_COMMIT} *{email}*)"));
     }
     rules
 }
@@ -1318,6 +1356,15 @@ mod tests {
                 "git commit -m \"Fix\n\nCo-authored-by: Codex <codex@example.invalid>\"",
                 "git commit -m \"Fix\n\n🤖 Generated with [Claude Code](https://claude.com)\"",
                 "git commit --amend --author \"Claude <noreply@anthropic.com>\"",
+                "git -C /repo push origin main",
+                "git -C ../other push -u origin HEAD:development",
+                "git -c push.default=current push origin main",
+                "git -C /repo push --force origin feat/x",
+                "git commit -m \"Fix\n\nco-authored-by: Claude <noreply@anthropic.com>\"",
+                "git commit -m \"Fix\n\nCo-authored-by: Copilot <c@example.invalid>\"",
+                "git commit -m \"Fix\n\nCo-authored-by: ChatGPT <c@example.invalid>\"",
+                "git commit -m \"Fix\n\nGenerated with OpenAI Codex\"",
+                "git -C /repo commit -m \"Fix\n\nCo-Authored-By: Claude <c@example.invalid>\"",
             ] {
                 assert!(
                     denied(spec, command)?,
@@ -1332,6 +1379,9 @@ mod tests {
                 "git commit -m \"Fix the main menu\"",
                 "git commit -m \"Fix\n\nCo-authored-by: Ada <ada@example.invalid>\"",
                 "git status",
+                "git -C /repo push origin feat/main-menu",
+                "git commit -m \"Never push to main in tests\"",
+                "git -C /repo commit -m \"Fix\n\nco-authored-by: Ada <ada@example.invalid>\"",
             ] {
                 assert!(
                     !denied(spec, command)?,
