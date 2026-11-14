@@ -414,6 +414,10 @@ impl Lines {
             let newline = available.iter().position(|&byte| byte == b'\n');
             let part = &available[..newline.unwrap_or(available.len())];
             if self.line.len() + part.len() > self.max_bytes {
+                tracing::warn!(
+                    max_bytes = self.max_bytes,
+                    "closed a connection whose frame is too long"
+                );
                 return None;
             }
             self.line.extend_from_slice(part);

@@ -171,7 +171,7 @@ impl HarnessMcp {
         Ok(Registration {
             url,
             token,
-            chats: Arc::downgrade(&self.chats),
+            shared: Arc::downgrade(&self.chats),
         })
     }
 }
@@ -182,7 +182,7 @@ impl HarnessMcp {
 pub(crate) struct Registration {
     url: String,
     token: String,
-    chats: Weak<Shared>,
+    shared: Weak<Shared>,
 }
 
 impl Registration {
@@ -193,8 +193,8 @@ impl Registration {
 
 impl Drop for Registration {
     fn drop(&mut self) {
-        if let Some(chats) = self.chats.upgrade() {
-            chats
+        if let Some(shared) = self.shared.upgrade() {
+            shared
                 .chats
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)

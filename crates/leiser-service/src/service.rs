@@ -386,6 +386,30 @@ enum Opening {
     AutoFix { pull_request: u64, message: String },
 }
 
+/// Why a turn did not start.
+#[derive(Debug)]
+struct TurnNotStarted {
+    error: CommandError,
+    /// Whether the developer's message is in the transcript already: it is
+    /// recorded before it goes to the agent session, which can still fail.
+    recorded: bool,
+}
+
+impl From<CommandError> for TurnNotStarted {
+    fn from(error: CommandError) -> Self {
+        Self {
+            error,
+            recorded: false,
+        }
+    }
+}
+
+impl From<TurnNotStarted> for CommandError {
+    fn from(not_started: TurnNotStarted) -> Self {
+        not_started.error
+    }
+}
+
 /// A chat's checkpoints.
 #[derive(Default)]
 struct ChatCheckpoints {
@@ -1467,15 +1491,24 @@ impl State {
         let Setup::Running { mut queued } = std::mem::replace(&mut chat.setup, Setup::Done) else {
             return;
         };
+        let turn_running = chat.turn_running();
         let Some(first) = queued.pop_front() else {
             return;
         };
-        if let Err(error) = self.send_message(id, first.clone()).await {
+        let sent = if turn_running {
+            Err(TurnNotStarted::from(CommandError::TurnRunning { chat: id }))
+        } else {
+            self.start_turn(id, Opening::Message(first.clone())).await
+        };
+        if let Err(TurnNotStarted { error, recorded }) = sent {
             tracing::warn!(chat = ?id, %error, "could not send the messages queued during setup");
             // Held back like messages at a usage limit: the chat's next
-            // turn queues them, ahead of any held there already.
+            // turn queues them, ahead of any held there already. A first
+            // message already in the transcript is not sent twice.
             if let Some(chat) = self.chats.get_mut(&id) {
-                queued.push_front(first);
+                if !recorded {
+                    queued.push_front(first);
+                }
                 queued.append(&mut chat.held);
                 chat.held = queued;
             }
@@ -1636,7 +1669,7 @@ impl State {
     /// Starts a turn of the chat, which runs none and is set up, with a
     /// checkpoint before it. The checkpoint comes before the agent session
     /// opens: an agent CLI may start working, or end, as soon as it runs.
-    async fn start_turn(&mut self, id: ChatId, opening: Opening) -> Result<(), CommandError> {
+    async fn start_turn(&mut self, id: ChatId, opening: Opening) -> Result<(), TurnNotStarted> {
         self.check_not_removed(id)?;
         let title = match &opening {
             Opening::Message(text) => text.clone(),
@@ -1655,7 +1688,7 @@ impl State {
 
     /// Starts a turn: with the developer's message, or continuing after a
     /// usage limit. Messages held back at the limit are queued behind it.
-    async fn open_turn(&mut self, id: ChatId, opening: Opening) -> Result<(), CommandError> {
+    async fn open_turn(&mut self, id: ChatId, opening: Opening) -> Result<(), TurnNotStarted> {
         let chat = self
             .chats
             .get(&id)
@@ -1681,7 +1714,7 @@ impl State {
         {
             self.open_session(id)?;
         }
-        let transcript = self.store.transcript(id.0)?;
+        let transcript = self.store.transcript(id.0).map_err(CommandError::from)?;
         let entries_before = transcript.len();
         let first_message = !transcript
             .iter()
@@ -1692,10 +1725,12 @@ impl State {
         };
         // Quotes the chat up to, not including, this message.
         let handoff = pending.and_then(|pending| handoff::render(&transcript, pending));
+        let recorded = matches!(opening, Opening::Message(_));
         let text = match opening {
             Opening::Message(text) => {
                 // Recorded first, so the developer's text is never lost.
-                self.append_user_message(id, &text)?;
+                self.append_user_message(id, &text)
+                    .map_err(CommandError::from)?;
                 text
             }
             Opening::Continue => CONTINUE_NOTE.to_owned(),
@@ -1721,7 +1756,7 @@ impl State {
             ..
         }) = self.chats.get_mut(&id)
         else {
-            return Err(CommandError::UnknownChat { chat: id });
+            return Err(CommandError::UnknownChat { chat: id }.into());
         };
         session.turn = Turn::Running {
             queued: std::mem::take(held),
@@ -1748,7 +1783,7 @@ impl State {
                 }
                 chat.usage_limit = limit;
             }
-            return Err(error);
+            return Err(TurnNotStarted { error, recorded });
         }
         if (handoff.take().is_some() || was_done || stopped_at_limit)
             && let Err(error) = self.save()
@@ -2677,7 +2712,9 @@ impl State {
             subscription,
             automatic,
         });
-        self.start_turn(id, Opening::Continue).await
+        self.start_turn(id, Opening::Continue)
+            .await
+            .map_err(CommandError::from)
     }
 
     /// The subscription a chat on `from` moves to by itself at a usage
