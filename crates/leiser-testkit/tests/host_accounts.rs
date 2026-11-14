@@ -398,6 +398,38 @@ async fn a_push_before_the_host_account_signed_in_is_blocked() -> TestResult {
 }
 
 #[tokio::test]
+async fn a_push_to_a_remote_with_a_password_in_its_url_is_blocked_without_showing_it() -> TestResult
+{
+    let bound = bound_with_commit().await?;
+    log_in(&bound.service, bound.host_account).await?;
+    let branch = branch(&bound.service, bound.chat).await?;
+    bound.repo.git(&[
+        "remote",
+        "set-url",
+        "origin",
+        "https://someone:remote-secret@git.example.invalid/owner/repo.git",
+    ])?;
+
+    let pushed = bound
+        .service
+        .execute(Command::Push { chat: bound.chat })
+        .await;
+
+    assert!(
+        matches!(pushed, Err(CommandError::HostAccountUnverified { .. })),
+        "{pushed:?}"
+    );
+    let shown = format!("{pushed:?}");
+    assert!(!shown.contains("remote-secret"), "{shown}");
+    assert!(
+        shown.contains("git.example.invalid/owner/repo.git"),
+        "{shown}"
+    );
+    assert_eq!(bound.repo.remote_branch(&branch)?, None);
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_push_from_an_unbound_repository_is_blocked() -> TestResult {
     let harness = start_service(&committing())?;
     let service = harness.connect();

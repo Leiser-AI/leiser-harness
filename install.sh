@@ -38,33 +38,45 @@ fetch() {
 install_macos() {
   target=${LEISER_INSTALL_DIR:-/Applications}
   fetch leiser-harness-macos.dmg
-  volume="$work/volume"
-  hdiutil attach -nobrowse -quiet -mountpoint "$volume" "$work/leiser-harness-macos.dmg" ||
+  hdiutil attach -nobrowse -quiet -mountpoint "$work/volume" "$work/leiser-harness-macos.dmg" ||
     fail "could not open the disk image"
+  # Set only once mounted: cleanup detaches it, and a failed detach keeps
+  # the work directory.
+  volume="$work/volume"
   # A running app would keep its old files; the harness service keeps
   # running and takes the new version once no turn runs.
   if [ -z "${LEISER_INSTALL_DIR:-}" ] && pgrep -x leiser-desktop >/dev/null; then
     osascript -e 'quit app id "ai.leiser.harness"' 2>/dev/null || true
   fi
   mkdir -p "$target"
+  # Copy next to the old app first, so a failed copy keeps the old one.
+  staged="${target:?}/.$APP.new"
+  rm -rf "$staged"
+  if ! ditto "$volume/$APP" "$staged"; then
+    rm -rf "$staged"
+    fail "could not copy the app to $target"
+  fi
   rm -rf "${target:?}/$APP"
-  ditto "$volume/$APP" "$target/$APP" || fail "could not copy the app to $target"
+  mv "$staged" "$target/$APP" || fail "could not move the app into $target"
   say "Installed $target/$APP"
   if [ "${LEISER_INSTALL_NO_OPEN:-}" != 1 ]; then open "$target/$APP"; fi
 }
 
 install_linux() {
   [ "$(uname -m)" = x86_64 ] || fail "the Linux packages are for x86_64 only, not $(uname -m)"
+  # A root shell (such as a container) often has no sudo.
+  SUDO=
+  [ "$(id -u)" -eq 0 ] || SUDO=sudo
   if command -v apt-get >/dev/null 2>&1; then
     fetch leiser-harness-linux.deb
-    sudo apt-get update
-    sudo apt-get install -y "$work/leiser-harness-linux.deb"
+    $SUDO apt-get update
+    $SUDO apt-get install -y "$work/leiser-harness-linux.deb"
   elif command -v dnf >/dev/null 2>&1; then
     # Betas come without an .rpm (RPM versions cannot hold their `-`).
     curl -fsIL -o /dev/null "$DOWNLOAD/leiser-harness-linux.rpm" ||
       fail "there is no .rpm yet: it comes with the first stable release. Until then, use a Debian- or Ubuntu-based system."
     fetch leiser-harness-linux.rpm
-    sudo dnf install -y "$work/leiser-harness-linux.rpm"
+    $SUDO dnf install -y "$work/leiser-harness-linux.rpm"
   else
     fail "this installs with apt (Debian, Ubuntu) or dnf (Fedora); see https://github.com/Leiser-AI/leiser-harness#install"
   fi

@@ -57,8 +57,11 @@ jobs:
         run: |
           git init -q feed
           cd feed
-          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-          if git fetch -q --depth 1 origin update-feed; then
+          git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+          # The token goes in a header, not the remote URL, so git never
+          # prints or stores it as part of the URL.
+          auth="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          if git -c http.extraheader="$auth" fetch -q --depth 1 origin update-feed; then
             git checkout -q -b update-feed FETCH_HEAD
           else
             git checkout -q --orphan update-feed
@@ -101,4 +104,5 @@ jobs:
           git -c user.name="github-actions[bot]" \
               -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
               commit -q -m "Serve $TAG"
-          git push -q origin update-feed
+          auth="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          git -c http.extraheader="$auth" push -q origin update-feed
