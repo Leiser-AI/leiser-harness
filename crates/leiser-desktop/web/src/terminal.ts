@@ -69,6 +69,8 @@ export function isOpen(): boolean {
 export function toggle(chat: ChatId | null, directory?: string): void {
   wanted = !wanted;
   show(chat, directory);
+  // Only opening the panel takes the keyboard; switching chats leaves it in the composer.
+  if (wanted && chat !== null) terminals.get(chat)?.screen.focus();
   onChange();
 }
 
@@ -89,7 +91,6 @@ export function show(chat: ChatId | null, directory?: string): void {
     for (const [other, { element }] of terminals) element.hidden = other !== chat;
     shown = chat;
     fitShown();
-    terminal.screen.focus();
   }
   endButton.disabled = terminal.shell === null;
   if (terminal.run === 0) {
@@ -162,14 +163,26 @@ async function start(chat: ChatId, terminal: ChatTerminal): Promise<void> {
     if (shown === chat) endButton.disabled = true;
   });
   try {
-    const shell = await invoke<number>("open_terminal", {
-      chat,
-      rows: terminal.screen.rows,
-      cols: terminal.screen.cols,
-      events,
-    });
+    const rows = terminal.screen.rows;
+    const cols = terminal.screen.cols;
+    const shell = await invoke<number>("open_terminal", { chat, rows, cols, events });
+    if (terminals.get(chat) !== terminal) {
+      // The chat's terminal was forgotten while its shell started.
+      void invoke("close_terminal", { terminal: shell }).catch(() => {});
+      return;
+    }
     // A shell that exited at once is already gone.
-    if (!exited) terminal.shell = shell;
+    if (!exited) {
+      terminal.shell = shell;
+      // The screen may have resized while the shell started.
+      if (terminal.screen.rows !== rows || terminal.screen.cols !== cols) {
+        void invoke("resize_terminal", {
+          terminal: shell,
+          rows: terminal.screen.rows,
+          cols: terminal.screen.cols,
+        }).catch(() => {});
+      }
+    }
   } catch (error) {
     terminal.screen.write(
       `\x1b[31mCould not start a shell: ${String(error)}\x1b[0m\r\nPress any key to try again.\r\n`,
@@ -190,6 +203,18 @@ function end(chat: ChatId): void {
   endButton.disabled = true;
   terminal.screen.write("\r\n\x1b[2m[Shell ended. Press any key to start a new one.]\x1b[0m\r\n");
   void invoke("close_terminal", { terminal: shell }).catch(() => {});
+}
+
+/** Ends the chat's shell and drops its screen, for a chat with no checkout left. */
+export function forget(chat: ChatId): void {
+  const terminal = terminals.get(chat);
+  if (!terminal) return;
+  terminals.delete(chat);
+  terminal.run++;
+  if (terminal.shell !== null) void invoke("close_terminal", { terminal: terminal.shell }).catch(() => {});
+  terminal.screen.dispose();
+  terminal.element.remove();
+  if (shown === chat) shown = null;
 }
 
 function fitShown(): void {
