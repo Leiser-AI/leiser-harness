@@ -48,6 +48,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, ChildStdout, Command};
 use tokio::sync::{mpsc, oneshot};
 
+use crate::driver::redact_api_keys;
 use crate::installed::{self, Found, Program};
 use crate::{
     Access, AgentCli, AgentEvent, AgentSession, AgentSessionId, Answer, Driver, DriverError,
@@ -578,6 +579,9 @@ struct Parser {
     open: HashMap<String, OpenPrompt>,
     /// Lines Claude Code waits for, to write before reading on.
     replies: Vec<InputLine>,
+    /// Whether the running turn hit a usage limit, so its failed result
+    /// ends it instead of failing it.
+    usage_limited: bool,
 }
 
 /// A `can_use_tool` request waiting for the developer's answer.
@@ -618,13 +622,14 @@ impl Parser {
                 // The developer's own message, replayed.
                 UserContent::Text(_) => Vec::new(),
             },
-            OutputLine::Result {
-                terminal_reason:
-                    Some(TerminalReason::AbortedStreaming | TerminalReason::AbortedTools),
-            } => vec![AgentEvent::TurnInterrupted],
-            OutputLine::Result { .. } => vec![AgentEvent::TurnEnded],
+            OutputLine::Result(result) => {
+                let usage_limited = std::mem::take(&mut self.usage_limited);
+                vec![result.into_event(usage_limited)]
+            }
             OutputLine::RateLimitEvent { rate_limit_info } => {
-                rate_limit_info.into_event(now).into_iter().collect()
+                let event = rate_limit_info.into_event(now);
+                self.usage_limited |= event.is_some();
+                event.into_iter().collect()
             }
             OutputLine::ControlRequest {
                 request_id,
@@ -896,10 +901,7 @@ enum OutputLine {
         parent_tool_use_id: Option<String>,
     },
     /// Ends every turn, also a failed or interrupted one.
-    Result {
-        #[serde(default)]
-        terminal_reason: Option<TerminalReason>,
-    },
+    Result(ResultLine),
     RateLimitEvent {
         rate_limit_info: RateLimitInfo,
     },
@@ -971,6 +973,69 @@ impl AskedQuestion {
                 })
                 .collect(),
             multi_select: self.multi_select,
+        }
+    }
+}
+
+/// The `result` line that ends a turn.
+#[derive(Debug, Deserialize)]
+struct ResultLine {
+    /// `success`, or the kind of error, such as `error_max_turns`.
+    #[serde(default)]
+    subtype: Option<String>,
+    /// Set when the turn failed, also with subtype `success`, as for a
+    /// rejected API key.
+    #[serde(default)]
+    is_error: bool,
+    /// The agent's last message, or the error message of a failed turn.
+    #[serde(default)]
+    result: Option<String>,
+    /// The error messages of an error subtype.
+    #[serde(default)]
+    errors: Vec<ResultError>,
+    #[serde(default)]
+    terminal_reason: Option<TerminalReason>,
+}
+
+/// One of a result's errors; only text is shown.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum ResultError {
+    Text(String),
+    Other(serde::de::IgnoredAny),
+}
+
+impl ResultLine {
+    /// The event that ends the turn. A failed turn that hit a usage limit
+    /// (`usage_limited`) ends: the usage limit already says why.
+    fn into_event(self, usage_limited: bool) -> AgentEvent {
+        if let Some(TerminalReason::AbortedStreaming | TerminalReason::AbortedTools) =
+            self.terminal_reason
+        {
+            return AgentEvent::TurnInterrupted;
+        }
+        if !self.is_error || usage_limited {
+            return AgentEvent::TurnEnded;
+        }
+        let errors: Vec<String> = self
+            .errors
+            .into_iter()
+            .filter_map(|error| match error {
+                ResultError::Text(text) => Some(text),
+                ResultError::Other(_) => None,
+            })
+            .filter(|text| !text.trim().is_empty())
+            .collect();
+        let reason = if !errors.is_empty() {
+            errors.join("; ")
+        } else if let Some(result) = self.result.filter(|result| !result.trim().is_empty()) {
+            result
+        } else {
+            let subtype = self.subtype.unwrap_or_else(|| "error".to_owned());
+            format!("{AGENT_CLI} ended the turn with `{subtype}`")
+        };
+        AgentEvent::TurnFailed {
+            reason: redact_api_keys(&reason),
         }
     }
 }
@@ -1782,12 +1847,61 @@ mod tests {
     }
 
     #[test]
-    fn every_result_ends_the_turn_also_a_failed_one() {
+    fn a_successful_result_ends_the_turn() {
         let success = r#"{"type":"result","subtype":"success","is_error":false,"result":"ok","terminal_reason":"completed"}"#;
-        let failure = r#"{"type":"result","subtype":"error_during_execution","is_error":true,"errors":["x"]}"#;
 
         assert_eq!(events(&[success]), vec![AgentEvent::TurnEnded]);
-        assert_eq!(events(&[failure]), vec![AgentEvent::TurnEnded]);
+    }
+
+    #[test]
+    fn a_failed_result_fails_the_turn_with_its_errors() {
+        let failure = r#"{"type":"result","subtype":"error_during_execution","is_error":true,"errors":["Overloaded","Try again"]}"#;
+
+        assert_eq!(
+            events(&[failure]),
+            vec![AgentEvent::TurnFailed {
+                reason: "Overloaded; Try again".to_owned()
+            }]
+        );
+    }
+
+    #[test]
+    fn a_failed_result_without_errors_fails_with_its_result_text_and_no_api_key() {
+        let rejected_key = r#"{"type":"result","subtype":"success","is_error":true,"result":"Invalid API key sk-ant-api03-abc_DEF-123 · Fix it"}"#;
+        let silent = r#"{"type":"result","subtype":"error_max_turns","is_error":true}"#;
+
+        assert_eq!(
+            events(&[rejected_key]),
+            vec![AgentEvent::TurnFailed {
+                reason: "Invalid API key [redacted] · Fix it".to_owned()
+            }]
+        );
+        let reason = match events(&[silent]).as_slice() {
+            [AgentEvent::TurnFailed { reason }] => reason.clone(),
+            other => format!("{other:?}"),
+        };
+        assert!(reason.contains("error_max_turns"), "{reason}");
+    }
+
+    #[test]
+    fn a_turn_at_its_usage_limit_ends_after_the_usage_limit() {
+        let rejected = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","rateLimitType":"five_hour"}}"#;
+        let failure = r#"{"type":"result","subtype":"success","is_error":true,"result":"Usage limit reached"}"#;
+        let next = r#"{"type":"result","subtype":"error_during_execution","is_error":true,"errors":["x"]}"#;
+
+        assert_eq!(
+            events(&[rejected, failure, next]),
+            vec![
+                AgentEvent::UsageLimitReached {
+                    limit: "5-hour limit".to_owned(),
+                    resets_in_seconds: None
+                },
+                AgentEvent::TurnEnded,
+                AgentEvent::TurnFailed {
+                    reason: "x".to_owned()
+                },
+            ]
+        );
     }
 
     #[test]

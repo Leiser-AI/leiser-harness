@@ -10,6 +10,7 @@ use super::wire::{
     TurnError, TurnInterruptParams, TurnStartParams, TurnStarted, TurnStatus, TurnSteerParams,
     UserInput, UserInputAnswer, UserInputResponse, WireError,
 };
+use crate::driver::redact_api_keys;
 use crate::{AgentEvent, Answer, PermissionMode, Question, QuestionOption};
 
 /// Codex's own sandbox, in every permission mode: writes only inside the
@@ -648,40 +649,6 @@ fn question(question: wire::UserInputQuestion) -> Question {
         // Codex's questions take one answer each.
         multi_select: false,
     }
-}
-
-/// Replaces API keys in an error message from Codex: the error for a
-/// rejected key quotes it. Keys are the words that start with `sk-`, the
-/// prefix of every key the provider issues.
-fn redact_api_keys(message: &str) -> String {
-    const PREFIX: &str = "sk-";
-    let mut redacted = String::with_capacity(message.len());
-    let mut rest = message;
-    while let Some(start) = rest.find(PREFIX) {
-        let starts_word = rest[..start]
-            .chars()
-            .next_back()
-            .is_none_or(|before| !is_key_char(before));
-        redacted.push_str(&rest[..start]);
-        let key = &rest[start..];
-        let end = key[PREFIX.len()..]
-            .find(|c: char| !is_key_char(c))
-            .map_or(key.len(), |end| PREFIX.len() + end);
-        if starts_word {
-            redacted.push_str("[redacted]");
-        } else {
-            redacted.push_str(&key[..end]);
-        }
-        rest = &key[end..];
-    }
-    redacted.push_str(rest);
-    redacted
-}
-
-/// A character that can be part of an API key, including the `*` that
-/// masks part of a quoted key.
-fn is_key_char(c: char) -> bool {
-    c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '*')
 }
 
 fn text_input(text: String) -> UserInput {
