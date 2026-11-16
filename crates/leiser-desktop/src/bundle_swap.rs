@@ -2,9 +2,9 @@
 //!
 //! The updater plugin exchanges the whole `.app` folder with the new one.
 //! This exchanges only the bundle's `Contents` instead, in one atomic step
-//! and without an admin prompt: the `.app` folder stays the same. The
-//! second Dock tile after an update came from how the app restarted, not
-//! from the folder; see `relaunch.rs`.
+//! and without an admin prompt: the `.app` folder stays the same. Keeping
+//! the folder alone did not keep the app in one Dock tile; how the app
+//! restarts did that, see `relaunch.rs`.
 
 use std::fs::{File, FileTimes};
 use std::io;

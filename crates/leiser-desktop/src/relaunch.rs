@@ -17,9 +17,12 @@ use std::process::{Command, Stdio};
 /// bundle anyway, in tenths of a second.
 const WAIT_TENTHS: u32 = 300;
 
-/// Waits for `pid` to exit, then runs `open` with `bundle`.
+/// Waits for `pid` to exit, then runs `open` with `bundle`. The short
+/// sleep after the loop gives Launch Services a moment to let go of the
+/// exited instance.
 const SCRIPT: &str = r#"i=0
 while kill -0 "$1" 2>/dev/null && [ "$i" -lt "$2" ]; do sleep 0.1; i=$((i + 1)); done
+sleep 0.5
 exec "$3" "$4""#;
 
 /// Starts a process, detached from this one, that opens `bundle` once this
@@ -59,7 +62,11 @@ mod tests {
         let open = folder.join("open");
         std::fs::write(
             &open,
-            format!("#!/bin/sh\nprintf '%s' \"$1\" > '{}'\n", marker.display()),
+            // Written beside the marker and moved, so the marker never shows half written.
+            format!(
+                "#!/bin/sh\nprintf '%s' \"$1\" > '{0}.tmp' && mv '{0}.tmp' '{0}'\n",
+                marker.display()
+            ),
         )
         .unwrap();
         std::fs::set_permissions(&open, std::os::unix::fs::PermissionsExt::from_mode(0o755))
@@ -101,11 +108,11 @@ mod tests {
         let folder = tempfile::tempdir().unwrap();
         let marker = folder.path().join("opened");
         let open = fake_open(folder.path(), &marker);
-        let mut gone = Command::new("/usr/bin/true").spawn().unwrap();
-        gone.wait().unwrap();
+        // Above every process ID macOS hands out, so no process has it.
+        let gone = i32::MAX as u32;
 
         let started = Instant::now();
-        let mut waiting = waiting_open(gone.id(), Path::new("/Applications/Demo.app"), &open)
+        let mut waiting = waiting_open(gone, Path::new("/Applications/Demo.app"), &open)
             .spawn()
             .unwrap();
 

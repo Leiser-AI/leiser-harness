@@ -87,7 +87,7 @@ pub async fn check_app_update(
 }
 
 /// Downloads and installs the update the last check found, then restarts
-/// the app. Reports the download as `app-update-progress` events.
+/// the app (on macOS: exits and opens it again once it has exited). Reports the download as `app-update-progress` events.
 #[tauri::command]
 pub async fn install_app_update(
     app: AppHandle,
