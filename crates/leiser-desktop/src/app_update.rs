@@ -5,8 +5,9 @@
 //! The UI asks `check_app_update` now and then and offers a found update;
 //! `install_app_update` downloads it, checks its signature against the
 //! public key in `tauri.conf.json`, installs it and restarts the app. On
-//! macOS it installs into the running bundle (`bundle_swap.rs`), so the
-//! Dock keeps the app as one; the plugin's own install is the fallback. The
+//! macOS it installs into the running bundle (`bundle_swap.rs`), the
+//! plugin's own install being the fallback, and opens the app again only
+//! once it has exited (`relaunch.rs`), so the Dock keeps it as one. The
 //! harness service is not stopped for it: the installer replaces its
 //! program next to the app, which is a service update (ADR 0007).
 //!
@@ -107,14 +108,21 @@ pub async fn install_app_update(
         .await?;
     #[cfg(target_os = "macos")]
     if let Some(bundle) = crate::bundle_swap::running_bundle() {
-        match crate::bundle_swap::install(&bundle, &archive) {
-            Ok(()) => app.restart(),
+        if let Err(error) = crate::bundle_swap::install(&bundle, &archive) {
             // For example a folder the developer cannot write to, which
             // the plugin installs to with an admin prompt.
+            tracing::warn!(%error, "installing into the bundle failed; using the updater's install");
+            update.install(&archive)?;
+        }
+        // Tauri's restart would start a second instance, a second Dock tile.
+        match crate::relaunch::after_exit(&bundle) {
+            Ok(()) => app.exit(0),
             Err(error) => {
-                tracing::warn!(%error, "installing into the bundle failed; using the updater's install");
+                tracing::warn!(%error, "could not open the app after exit; restarting it");
+                app.restart()
             }
         }
+        return Ok(());
     }
     update.install(&archive)?;
     app.restart()
