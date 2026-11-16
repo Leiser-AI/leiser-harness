@@ -10,7 +10,9 @@ use leiser_service::{
     AgentCli, AgentEvent, ChatId, ChatSettings, Checkout, Command, CommandError, Event, Response,
     ServiceHandle,
 };
-use leiser_testkit::{FakeDriver, Script, Step, TestRepo, TestService, collect_turn};
+use leiser_testkit::{
+    FakeDriver, HarnessMcpClient, McpClientError, Script, Step, TestRepo, TestService, collect_turn,
+};
 use serde_json::json;
 use tokio::sync::broadcast;
 
@@ -127,6 +129,36 @@ fn split_echo<'a>(echo: &'a str, message: &str) -> TestResult<&'a str> {
 
 fn long_message(number: usize) -> String {
     format!("message {number}: {}", "x".repeat(4_000))
+}
+
+/// Whether the harness MCP server still answers at `url`.
+async fn harness_mcp_answers(url: String) -> TestResult<bool> {
+    // The client blocks; the server runs on this test's runtime.
+    let connected = tokio::task::spawn_blocking(move || HarnessMcpClient::connect(&url)).await?;
+    match connected {
+        Ok(_) => Ok(true),
+        Err(McpClientError::Status(404)) => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
+#[tokio::test]
+async fn an_ended_agent_session_loses_its_harness_mcp_address() -> TestResult {
+    let script = Script::new().turn([Step::ReportHarnessMcpUrl]);
+    let harness = start_service(&script, &script)?;
+    let service = harness.connect();
+    let repo = TestRepo::new()?;
+    let chat = start_chat(&service, &repo).await?;
+    let mut events = service.subscribe();
+    let claude_url = answer(&service, &mut events, chat, "where").await?;
+    assert!(harness_mcp_answers(claude_url.clone()).await?);
+
+    change(&service, chat, AgentCli::Codex).await?;
+    let codex_url = answer(&service, &mut events, chat, "where now").await?;
+
+    assert!(!harness_mcp_answers(claude_url).await?);
+    assert!(harness_mcp_answers(codex_url).await?);
+    Ok(())
 }
 
 #[tokio::test]

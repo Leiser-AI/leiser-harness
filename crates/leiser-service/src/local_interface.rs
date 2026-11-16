@@ -32,7 +32,8 @@
 //! The service skips every other line of text and keeps the connection: a
 //! frame of a type it does not know, an `execute` frame without such an
 //! id, a second hello, text that is not JSON. Nothing answers those. A
-//! line that is not UTF-8 ends the connection.
+//! line that is not UTF-8 or longer than [`MAX_CLIENT_FRAME_BYTES`] ends
+//! the connection.
 //!
 //! A harness service built before `UnreadableCommand` existed skips an
 //! `execute` frame whose command it cannot read as well, so its client
@@ -46,7 +47,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{broadcast, mpsc, oneshot};
@@ -67,6 +68,11 @@ const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
 const FRAME_BUFFER: usize = 256;
 /// Notifications waiting for the client's reader.
 const NOTIFICATION_BUFFER: usize = 256;
+/// The longest frame the service reads from a client, newline excluded. A
+/// longer one ends the connection, so a process that sends no newline
+/// cannot fill the service's memory. A frame is a command, and the largest
+/// command is a message the developer typed or pasted.
+pub const MAX_CLIENT_FRAME_BYTES: usize = 16 * 1024 * 1024;
 
 /// Where a running harness service listens, as stored in [`ENDPOINT_FILE`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -224,7 +230,7 @@ fn same_token(given: &str, expected: &str) -> bool {
 
 async fn connection(stream: TcpStream, service: ServiceHandle, token: Arc<str>) {
     let (read, mut write) = stream.into_split();
-    let mut lines = BufReader::new(read).lines();
+    let mut lines = Lines::new(read, MAX_CLIENT_FRAME_BYTES);
     let hello = tokio::time::timeout(HELLO_TIMEOUT, next_frame::<ClientFrame>(&mut lines)).await;
     let Ok(Some(ClientFrame::Hello {
         protocol,
@@ -308,7 +314,7 @@ async fn forward_events(
 }
 
 async fn read_requests(
-    mut lines: Lines<BufReader<OwnedReadHalf>>,
+    mut lines: Lines,
     service: ServiceHandle,
     frames: mpsc::Sender<ServiceFrame>,
 ) {
@@ -352,17 +358,80 @@ async fn run(
     service.execute(command).await
 }
 
-/// The next frame that parses; `None` once the connection is closed.
-/// Lines that do not parse are skipped.
-async fn next_frame<T: for<'de> Deserialize<'de>>(
-    lines: &mut Lines<BufReader<OwnedReadHalf>>,
-) -> Option<T> {
+/// The next frame that parses; `None` once the connection is closed or
+/// ends with a line that is too long or not UTF-8. Lines that do not parse
+/// are skipped.
+async fn next_frame<T: for<'de> Deserialize<'de>>(lines: &mut Lines) -> Option<T> {
     loop {
-        let line = lines.next_line().await.ok()??;
+        let line = lines.next_line().await?;
         match serde_json::from_str(&line) {
             Ok(frame) => return Some(frame),
-            Err(error) => tracing::debug!(%error, "skipped a frame that does not parse"),
+            // Only where and what kind of error: its text can quote the
+            // line, which may hold a prompt.
+            Err(error) => tracing::debug!(
+                category = ?error.classify(),
+                line = error.line(),
+                column = error.column(),
+                "skipped a frame that does not parse"
+            ),
         }
+    }
+}
+
+/// The lines of one side of a connection, each at most `max_bytes` long.
+#[derive(Debug)]
+struct Lines {
+    read: BufReader<OwnedReadHalf>,
+    max_bytes: usize,
+    /// The line read so far. Kept across calls, so that a `next_line`
+    /// cancelled in a `select!` loses nothing.
+    line: Vec<u8>,
+}
+
+impl Lines {
+    fn new(read: OwnedReadHalf, max_bytes: usize) -> Self {
+        Self {
+            read: BufReader::new(read),
+            max_bytes,
+            line: Vec::new(),
+        }
+    }
+
+    /// The next line without its line ending; `None` once the connection
+    /// is closed or fails, or the line is longer than `max_bytes` or not
+    /// UTF-8. Cancel-safe.
+    async fn next_line(&mut self) -> Option<String> {
+        loop {
+            let available = self.read.fill_buf().await.ok()?;
+            if available.is_empty() {
+                // The connection closed; a last line without a newline
+                // still counts.
+                if self.line.is_empty() {
+                    return None;
+                }
+                break;
+            }
+            let newline = available.iter().position(|&byte| byte == b'\n');
+            let part = &available[..newline.unwrap_or(available.len())];
+            if self.line.len() + part.len() > self.max_bytes {
+                tracing::warn!(
+                    max_bytes = self.max_bytes,
+                    "closed a connection whose frame is too long"
+                );
+                return None;
+            }
+            self.line.extend_from_slice(part);
+            let used = part.len() + usize::from(newline.is_some());
+            self.read.consume(used);
+            if newline.is_some() {
+                break;
+            }
+        }
+        let mut line = std::mem::take(&mut self.line);
+        if line.last() == Some(&b'\r') {
+            line.pop();
+        }
+        String::from_utf8(line).ok()
     }
 }
 
@@ -448,7 +517,10 @@ impl LocalClient {
             Err(error) => return Err(error.into()),
         };
         let (read, mut write) = stream.into_split();
-        let mut lines = BufReader::new(read).lines();
+        // No limit on the service's frames: a chat's answer holds its whole
+        // transcript, and the service is the one in the developer's own
+        // endpoint file.
+        let mut lines = Lines::new(read, usize::MAX);
         let hello = ClientFrame::Hello {
             protocol: LOCAL_INTERFACE_VERSION,
             token: endpoint.token,
@@ -532,7 +604,7 @@ impl LocalClient {
 }
 
 async fn read_frames(
-    mut lines: Lines<BufReader<OwnedReadHalf>>,
+    mut lines: Lines,
     pending: Arc<Mutex<Option<Pending>>>,
     notifications: mpsc::Sender<Notification>,
 ) {

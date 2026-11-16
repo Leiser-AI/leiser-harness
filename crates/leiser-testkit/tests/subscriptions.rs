@@ -13,7 +13,7 @@ use leiser_service::{
     Response, ServiceHandle, SignIn, SubscriptionId, SubscriptionKind, SubscriptionOverview,
 };
 use leiser_testkit::{
-    FAKE_LOGIN_FILE, FakeDriver, FakeLogin, Script, Step, TestRepo, TestService, UNSET,
+    FAKE_LOGIN_FILE, FakeDriver, FakeLogin, Gate, Script, Step, TestRepo, TestService, UNSET,
     collect_turn, next_event,
 };
 use tokio::sync::broadcast;
@@ -787,6 +787,42 @@ async fn a_chat_on_a_removed_subscription_does_not_move_to_another_by_itself() -
         result,
         Err(CommandError::UnknownSubscription { subscription: work })
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn removing_a_subscription_a_running_turn_uses_is_refused() -> TestResult {
+    let gate = Gate::new()?;
+    let harness = claude_service(&Script::new().turn([gate.step(), Step::message("done")]))?;
+    let service = harness.connect();
+    let work = add(&service, Provider::Anthropic, "Work", api_key(API_KEY)).await?;
+    let repo = TestRepo::new()?;
+    set_defaults(&repo, "[subscriptions]\nanthropic = \"Work\"\n")?;
+    let chat = start_chat(&service, &repo).await?;
+    let mut events = service.subscribe();
+    service
+        .execute(Command::SendMessage {
+            chat,
+            text: "work on it".to_owned(),
+        })
+        .await?;
+
+    let result = service
+        .execute(Command::RemoveSubscription { subscription: work })
+        .await;
+
+    assert_eq!(result, Err(CommandError::TurnRunning { chat }));
+    assert!(overview(&service, work).await.is_ok());
+    gate.open()?;
+    let messages: Vec<_> = collect_turn(&mut events, chat)
+        .await?
+        .into_iter()
+        .filter_map(|event| match event {
+            AgentEvent::Message { text } => Some(text),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(messages, ["done"]);
     Ok(())
 }
 

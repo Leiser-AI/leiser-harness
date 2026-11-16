@@ -8,7 +8,8 @@ use std::time::Duration;
 
 use leiser_service::{
     AgentEvent, ChatId, ChatSettings, ChatStatus, Checkout, Command, CommandError, ConnectError,
-    ENDPOINT_FILE, Event, LOCAL_INTERFACE_VERSION, LocalClient, Notification, Response,
+    ENDPOINT_FILE, Event, LOCAL_INTERFACE_VERSION, LocalClient, MAX_CLIENT_FRAME_BYTES,
+    Notification, Response,
 };
 use leiser_testkit::{Gate, Script, Step, TestRepo, TestService};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
@@ -207,6 +208,25 @@ async fn frames_that_ask_for_no_reply_are_skipped() -> TestResult {
             "id": 2,
             "result": { "ok": { "type": "chats", "chats": [] } },
         })
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_frame_over_the_limit_ends_the_connection() -> TestResult {
+    let service = start_service(&Script::new())?;
+    let _interface = leiser_service::serve(service.connect(), service.data_dir()).await?;
+    let mut app = RawClient::connect(service.data_dir()).await?;
+
+    // Bytes without a newline, as a process that wants to fill the
+    // service's memory would send them. The write fails once the service
+    // has closed the connection.
+    let flood = vec![b'x'; MAX_CLIENT_FRAME_BYTES + 1024 * 1024];
+    let _ = app.write.write_all(&flood).await;
+
+    assert!(
+        app.closed().await?,
+        "the service kept a connection with an oversize frame open"
     );
     Ok(())
 }
@@ -415,6 +435,16 @@ impl RawClient {
     /// The service's next line; `None` once it closed the connection.
     async fn next_line(&mut self) -> TestResult<Option<String>> {
         Ok(tokio::time::timeout(TIMEOUT, self.lines.next_line()).await??)
+    }
+
+    /// Whether the service closes the connection, rather than sending a
+    /// line, before the timeout. A closed connection may also end with a
+    /// reset, when the service left bytes unread.
+    async fn closed(&mut self) -> TestResult<bool> {
+        match tokio::time::timeout(TIMEOUT, self.lines.next_line()).await? {
+            Ok(Some(_)) => Ok(false),
+            Ok(None) | Err(_) => Ok(true),
+        }
     }
 
     async fn next_frame(&mut self) -> TestResult<serde_json::Value> {

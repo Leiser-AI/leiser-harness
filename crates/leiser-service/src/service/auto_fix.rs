@@ -20,7 +20,9 @@ use std::fmt::Write as _;
 use std::time::Duration;
 
 use super::polls::PollError;
-use super::{Background, ChatPullRequest, Opening, Place, Setup, State, verify_and_push};
+use super::{
+    Background, ChatPullRequest, Opening, Place, Setup, State, TurnNotStarted, verify_and_push,
+};
 use crate::git_host::{
     CheckOutcome, CommitId, Mergeable, PolledPullRequest, PullRequestActivity, PullRequestComment,
 };
@@ -717,7 +719,7 @@ impl State {
         if let Some(chat) = self.chats.get_mut(&id) {
             chat.auto_fix.fixing(head_before);
         }
-        if let Err(error) = self.start_turn(id, opening).await {
+        if let Err(TurnNotStarted { error, .. }) = self.start_turn(id, opening).await {
             // The attempt counts; the next poll tries again.
             tracing::warn!(chat = ?id, %error, "could not start an auto-fix turn");
             if let Some(chat) = self.chats.get_mut(&id) {

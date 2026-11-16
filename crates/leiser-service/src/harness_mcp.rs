@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::convert::Infallible;
 use std::fmt::Write as _;
 use std::net::{Ipv4Addr, SocketAddr};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::time::Duration;
 
 use http_body_util::{BodyExt, Full, Limited};
@@ -149,8 +149,13 @@ impl HarnessMcp {
     }
 
     /// Gives an agent session its own address, through which it reads
-    /// `chat` and uses `tools` on it.
-    pub(crate) fn register(&self, chat: ChatId, tools: Tools) -> Result<String, HarnessMcpError> {
+    /// `chat` and uses `tools` on it, until the returned [`Registration`]
+    /// is dropped.
+    pub(crate) fn register(
+        &self,
+        chat: ChatId,
+        tools: Tools,
+    ) -> Result<Registration, HarnessMcpError> {
         let mut bytes = [0_u8; 16];
         getrandom::fill(&mut bytes).map_err(HarnessMcpError::Token)?;
         let token = bytes.iter().fold(String::new(), |mut token, byte| {
@@ -162,8 +167,39 @@ impl HarnessMcp {
             .chats
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(token, Access { chat, tools });
-        Ok(url)
+            .insert(token.clone(), Access { chat, tools });
+        Ok(Registration {
+            url,
+            token,
+            shared: Arc::downgrade(&self.chats),
+        })
+    }
+}
+
+/// An agent session's address on the harness MCP server. Dropping it,
+/// when the agent session ends, takes the address away.
+#[derive(Debug)]
+pub(crate) struct Registration {
+    url: String,
+    token: String,
+    shared: Weak<Shared>,
+}
+
+impl Registration {
+    pub(crate) fn url(&self) -> &str {
+        &self.url
+    }
+}
+
+impl Drop for Registration {
+    fn drop(&mut self) {
+        if let Some(shared) = self.shared.upgrade() {
+            shared
+                .chats
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .remove(&self.token);
+        }
     }
 }
 

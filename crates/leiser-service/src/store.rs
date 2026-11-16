@@ -173,8 +173,9 @@ pub(crate) struct ChatV3 {
     /// turn starts.
     #[serde(default)]
     pub usage_limit: Option<UsageLimitV3>,
-    /// Messages queued when the usage limit was hit; they go out after the
-    /// chat's next turn.
+    /// Messages queued when the usage limit was hit, or during setup when
+    /// the first of them could not be sent; they go out after the chat's
+    /// next turn.
     #[serde(default)]
     pub held: Vec<String>,
     /// Whether the harness removed the chat's worktree after its pull
@@ -608,6 +609,17 @@ impl Store {
 
     /// Appends an entry to a chat's transcript.
     pub fn append(&self, chat: u64, entry: &TranscriptEntry) -> Result<(), StorageError> {
+        self.append_with(chat, entry, File::write_all)
+    }
+
+    /// [`Store::append`] with the write itself passed in, so a test can make
+    /// it fail halfway.
+    fn append_with(
+        &self,
+        chat: u64,
+        entry: &TranscriptEntry,
+        write: impl FnOnce(&mut File, &[u8]) -> io::Result<()>,
+    ) -> Result<(), StorageError> {
         let path = self.transcript_path(chat);
         let io_error = |source| StorageError::Io {
             path: path.clone(),
@@ -617,12 +629,31 @@ impl Store {
         line.push(b'\n');
         // One write per line: a crash can only cut off the last line,
         // which `repair_transcript` removes on the next start.
-        OpenOptions::new()
+        let mut file = OpenOptions::new()
             .create(true)
             .append(true)
             .open(&path)
-            .and_then(|mut file| file.write_all(&line))
-            .map_err(io_error)
+            .map_err(io_error)?;
+        let complete = file.metadata().map_err(io_error)?.len();
+        let Err(error) = write(&mut file, &line) else {
+            return Ok(());
+        };
+        drop(file);
+        // A failed write (a full disk) can leave part of the line behind;
+        // the next entry would run into it. Cut it off again. The append
+        // handle cannot shorten the file on every platform, so reopen it.
+        if let Err(repair) = OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .and_then(|file| file.set_len(complete))
+        {
+            tracing::warn!(
+                path = %path.display(),
+                error = %repair,
+                "could not cut off a partly written transcript line"
+            );
+        }
+        Err(io_error(error))
     }
 
     /// Reads a chat's transcript; a chat without one has an empty one.
@@ -841,5 +872,38 @@ fn parse_state(path: &Path, bytes: &[u8]) -> Result<Stored, StorageError> {
             found,
             supported: VERSION,
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn message(text: &str) -> TranscriptEntry {
+        TranscriptEntry::UserMessage {
+            text: text.to_owned(),
+        }
+    }
+
+    /// A write that stops halfway through the line, as on a full disk.
+    fn half_then_disk_full(file: &mut File, line: &[u8]) -> io::Result<()> {
+        file.write_all(&line[..line.len() / 2])?;
+        Err(io::Error::new(io::ErrorKind::StorageFull, "disk full"))
+    }
+
+    #[test]
+    fn a_failed_append_leaves_no_fragment_for_the_next_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, _) = Store::open(dir.path(), AgentCli::ClaudeCode).unwrap();
+        store.append(1, &message("first")).unwrap();
+
+        let failed = store.append_with(1, &message("lost"), half_then_disk_full);
+        assert!(matches!(failed, Err(StorageError::Io { .. })));
+        store.append(1, &message("after")).unwrap();
+
+        assert_eq!(
+            store.transcript(1).unwrap(),
+            [message("first"), message("after")]
+        );
     }
 }

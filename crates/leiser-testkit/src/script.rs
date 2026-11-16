@@ -103,6 +103,8 @@ pub enum Step {
     /// Waits until the file at `gate` exists, as a long turn would; see
     /// [`Gate`](crate::Gate).
     WaitForGate { gate: PathBuf },
+    /// Answers with the address of the harness MCP server it was given.
+    ReportHarnessMcpUrl,
     /// Answers with the names of the harness MCP server's tools, joined
     /// by commas.
     ListHarnessTools,
