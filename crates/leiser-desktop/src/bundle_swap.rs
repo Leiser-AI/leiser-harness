@@ -1,11 +1,10 @@
 //! Installs a macOS app update into the running app's bundle.
 //!
 //! The updater plugin exchanges the whole `.app` folder with the new one.
-//! The Dock keeps an app it holds by the folder's file id, not its path,
-//! so after such an update its entry points at the old folder, which is
-//! then deleted, and the restarted app shows up as a second app beside it.
-//! This exchanges only the bundle's `Contents` instead: the `.app` folder,
-//! and with it the Dock's entry, stays the same.
+//! This exchanges only the bundle's `Contents` instead, in one atomic step
+//! and without an admin prompt: the `.app` folder stays the same. Keeping
+//! the folder alone did not keep the app in one Dock tile; how the app
+//! restarts did that, see `relaunch.rs`.
 
 use std::fs::{File, FileTimes};
 use std::io;

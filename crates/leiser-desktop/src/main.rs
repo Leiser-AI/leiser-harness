@@ -29,6 +29,8 @@ mod app_update;
 #[cfg(target_os = "macos")]
 mod bundle_swap;
 mod connection;
+#[cfg(target_os = "macos")]
+mod relaunch;
 mod terminals;
 
 use std::path::PathBuf;
