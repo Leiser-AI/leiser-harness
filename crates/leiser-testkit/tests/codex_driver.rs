@@ -42,6 +42,9 @@ async fn codex_starts_only_at_or_above_the_minimum_version_and_says_why_not() ->
     let unreadable = fake_codex(dir.path(), "odd", "something else 1.2.3")?;
     let minimum = fake_codex(dir.path(), "minimum", "codex-cli 0.100.0")?;
     let current = fake_codex(dir.path(), "current", "codex-cli 0.167.1")?;
+    let hanging = dir.path().join("hanging");
+    std::fs::write(&hanging, "#!/bin/sh\nexec sleep 120\n")?;
+    std::fs::set_permissions(&hanging, std::fs::Permissions::from_mode(0o755))?;
 
     let error = CodexDriver::new(&too_old).start(spec.clone()).err();
     let Some(DriverError::UnsupportedVersion {
@@ -76,5 +79,12 @@ async fn codex_starts_only_at_or_above_the_minimum_version_and_says_why_not() ->
         CodexDriver::new(&current).version()?,
         Version::new(0, 167, 1)
     );
+    let started = std::time::Instant::now();
+    let result = CodexDriver::new(&hanging).version();
+    assert!(
+        matches!(result, Err(DriverError::VersionTimeout { .. })),
+        "expected VersionTimeout, got {result:?}"
+    );
+    assert!(started.elapsed() < std::time::Duration::from_secs(30));
     Ok(())
 }

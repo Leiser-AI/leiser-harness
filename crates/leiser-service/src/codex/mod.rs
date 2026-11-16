@@ -111,7 +111,8 @@ impl CodexDriver {
     /// # Errors
     ///
     /// Returns [`DriverError::NotInstalled`] when there is no program,
-    /// [`DriverError::Spawn`] when it cannot run and
+    /// [`DriverError::Spawn`] when it cannot run,
+    /// [`DriverError::VersionTimeout`] when it does not answer in time and
     /// [`DriverError::UnreadableVersion`] when its answer is not a version.
     pub fn version(&self) -> Result<Version, DriverError> {
         version_of(&self.program.resolve()?)
@@ -133,14 +134,8 @@ impl CodexDriver {
 
 /// Asks `program` for its version.
 fn version_of(program: &Found) -> Result<Version, DriverError> {
-    let output = program
-        .command()
-        .arg("--version")
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .map_err(DriverError::Spawn)?;
-    let text = String::from_utf8_lossy(&output.stdout);
+    let answer = program.ask_version(AGENT_CLI)?;
+    let text = answer.text;
     // Codex answers `codex-cli 0.167.1`.
     let mut words = text.split_whitespace();
     words
@@ -148,7 +143,7 @@ fn version_of(program: &Found) -> Result<Version, DriverError> {
         .filter(|program| program.starts_with("codex"))
         .and(words.next())
         .and_then(Version::parse)
-        .filter(|_| output.status.success())
+        .filter(|_| answer.success)
         .ok_or_else(|| DriverError::UnreadableVersion {
             agent_cli: AGENT_CLI,
             output: text.trim().chars().take(200).collect(),

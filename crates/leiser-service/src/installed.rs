@@ -40,11 +40,20 @@
 use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
-use std::time::Duration;
+use std::process::Stdio;
+use std::sync::{Arc, OnceLock, mpsc};
+use std::time::{Duration, Instant};
 
 use crate::{DriverError, Version};
+
+/// How long an agent CLI may take to answer `--version`. Generous: a
+/// cold start of a Node.js program on a slow disk can take seconds.
+const VERSION_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How often [`Found::ask_version`] looks whether the program exited.
+const VERSION_POLL: Duration = Duration::from_millis(10);
 
 /// The variables an installed driver reads.
 const VARIABLES: [&str; 6] = [
@@ -272,6 +281,67 @@ impl Found {
         }
         command
     }
+
+    /// Runs the program with `--version`. A program that takes longer than
+    /// [`VERSION_TIMEOUT`] is killed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DriverError::Spawn`] when the program cannot run and
+    /// [`DriverError::VersionTimeout`] when it does not answer in time.
+    pub(crate) fn ask_version(
+        &self,
+        agent_cli: &'static str,
+    ) -> Result<VersionAnswer, DriverError> {
+        let mut child = self
+            .command()
+            .arg("--version")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(DriverError::Spawn)?;
+        let deadline = Instant::now() + VERSION_TIMEOUT;
+        let timed_out = |mut child: std::process::Child| {
+            let _ = child.kill();
+            // Reaps the program without waiting for it.
+            std::thread::spawn(move || child.wait());
+            DriverError::VersionTimeout {
+                agent_cli,
+                seconds: VERSION_TIMEOUT.as_secs(),
+            }
+        };
+        let mut stdout = child.stdout.take().ok_or(DriverError::MissingStreams)?;
+        let (sender, receiver) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut output = Vec::new();
+            let _ = stdout.read_to_end(&mut output);
+            let _ = sender.send(output);
+        });
+        let Ok(output) = receiver.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+        else {
+            return Err(timed_out(child));
+        };
+        let status = loop {
+            match child.try_wait().map_err(DriverError::Spawn)? {
+                Some(status) => break status,
+                None if Instant::now() >= deadline => return Err(timed_out(child)),
+                None => std::thread::sleep(VERSION_POLL),
+            }
+        };
+        Ok(VersionAnswer {
+            text: String::from_utf8_lossy(&output).into_owned(),
+            success: status.success(),
+        })
+    }
+}
+
+/// What a program printed for `--version`.
+#[derive(Debug)]
+pub(crate) struct VersionAnswer {
+    pub(crate) text: String,
+    /// Whether the program exited successfully.
+    pub(crate) success: bool,
 }
 
 impl Program {

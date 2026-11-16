@@ -413,6 +413,11 @@ pub enum DriverError {
         agent_cli: &'static str,
         output: String,
     },
+    #[error("{agent_cli} did not answer `--version` within {seconds} seconds")]
+    VersionTimeout {
+        agent_cli: &'static str,
+        seconds: u64,
+    },
     #[error(
         "{agent_cli} {found} is too old: the harness needs at least {minimum} because {reason}. \
          Update {agent_cli} and try again."
@@ -435,4 +440,38 @@ fn and_in(paths: &[PathBuf]) -> String {
         .map(|path| path.display().to_string())
         .collect();
     format!(" and in {}", paths.join(", "))
+}
+
+/// Replaces API keys in an agent CLI's error message: the error for a
+/// rejected key quotes it. Keys are the words that start with `sk-`, the
+/// prefix of the API keys of both agent CLIs' providers.
+pub(crate) fn redact_api_keys(message: &str) -> String {
+    const PREFIX: &str = "sk-";
+    let mut redacted = String::with_capacity(message.len());
+    let mut rest = message;
+    while let Some(start) = rest.find(PREFIX) {
+        let starts_word = rest[..start]
+            .chars()
+            .next_back()
+            .is_none_or(|before| !is_key_char(before));
+        redacted.push_str(&rest[..start]);
+        let key = &rest[start..];
+        let end = key[PREFIX.len()..]
+            .find(|c: char| !is_key_char(c))
+            .map_or(key.len(), |end| PREFIX.len() + end);
+        if starts_word {
+            redacted.push_str("[redacted]");
+        } else {
+            redacted.push_str(&key[..end]);
+        }
+        rest = &key[end..];
+    }
+    redacted.push_str(rest);
+    redacted
+}
+
+/// A character that can be part of an API key, including the `*` that
+/// masks part of a quoted key.
+fn is_key_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '*')
 }
