@@ -260,6 +260,13 @@ pub enum GitHostError {
          over HTTPS to the host account's git host {git_host}"
     )]
     UnsupportedRemote { remote: String, git_host: String },
+    /// `remote` is shown without its user part.
+    #[error(
+        "`origin` is {remote} with a user, token or password in its URL, \
+         which the harness does not push with: remove it from the URL and \
+         let the host account sign in"
+    )]
+    CredentialInRemote { remote: String },
     #[error("the git host refused: {reason}")]
     Refused { reason: String },
     #[error("the git host's answer is not what the harness expects: {answer:?}")]
@@ -481,9 +488,10 @@ impl GitHost for GhGitHost {
         remote: &'a str,
     ) -> GitHostFuture<'a, Result<String, GitHostError>> {
         Box::pin(async move {
+            refuse_credential_in_remote(remote)?;
             if https_host(remote).as_deref() != Some(access.git_host.as_str()) {
                 return Err(GitHostError::UnsupportedRemote {
-                    remote: remote.to_owned(),
+                    remote: shown_remote(remote),
                     git_host: access.git_host.clone(),
                 });
             }
@@ -591,16 +599,16 @@ impl GitHost for GhGitHost {
 /// `owner/name` of the repository at an `https://` remote URL on
 /// `git_host`.
 fn https_repository(remote: &str, git_host: &str) -> Result<String, GitHostError> {
+    refuse_credential_in_remote(remote)?;
     let unsupported = || GitHostError::UnsupportedRemote {
-        remote: remote.to_owned(),
+        remote: shown_remote(remote),
         git_host: git_host.to_owned(),
     };
     if https_host(remote).as_deref() != Some(git_host) {
         return Err(unsupported());
     }
-    let path = remote
-        .strip_prefix("https://")
-        .and_then(|rest| rest.split_once('/'))
+    let path = UrlParts::of(remote)
+        .and_then(|url| url.host_and_path.split_once('/'))
         .map(|(_, path)| path.trim_end_matches('/'))
         .ok_or_else(unsupported)?;
     let path = path.strip_suffix(".git").unwrap_or(path);
@@ -613,12 +621,74 @@ fn https_repository(remote: &str, git_host: &str) -> Result<String, GitHostError
     }
 }
 
+/// Refuses an HTTP(S) remote URL with a user part (`user`, `token` or
+/// `user:password`): git would push with a credential in it instead of
+/// the host account's, and the host account needs no user there.
+///
+/// # Errors
+///
+/// Returns [`GitHostError::CredentialInRemote`] when `remote` has one.
+pub(crate) fn refuse_credential_in_remote(remote: &str) -> Result<(), GitHostError> {
+    match UrlParts::of(remote) {
+        Some(url)
+            if url.user.is_some()
+                && (url.scheme.eq_ignore_ascii_case("https")
+                    || url.scheme.eq_ignore_ascii_case("http")) =>
+        {
+            Err(GitHostError::CredentialInRemote {
+                remote: shown_remote(remote),
+            })
+        }
+        _ => Ok(()),
+    }
+}
+
+/// `remote` as errors and logs may show it: a `scheme://` URL without
+/// the user part before its host.
+fn shown_remote(remote: &str) -> String {
+    match UrlParts::of(remote) {
+        Some(UrlParts {
+            scheme,
+            user: Some(_),
+            host_and_path,
+        }) => format!("{scheme}://{host_and_path}"),
+        _ => remote.to_owned(),
+    }
+}
+
+/// A `scheme://` URL split around the user part before its host.
+struct UrlParts<'a> {
+    scheme: &'a str,
+    /// `user` or `user:password`.
+    user: Option<&'a str>,
+    /// Everything after the user part and its `@`.
+    host_and_path: &'a str,
+}
+
+impl<'a> UrlParts<'a> {
+    /// `None` for anything but a `scheme://` URL, such as `git@host:path`.
+    fn of(remote: &'a str) -> Option<Self> {
+        let (scheme, rest) = remote.split_once("://")?;
+        let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+        Some(match authority.rsplit_once('@') {
+            Some((user, _)) => Self {
+                scheme,
+                user: Some(user),
+                host_and_path: &rest[user.len() + 1..],
+            },
+            None => Self {
+                scheme,
+                user: None,
+                host_and_path: rest,
+            },
+        })
+    }
+}
+
 /// The host of an `https://` remote URL, without user and port.
 fn https_host(remote: &str) -> Option<String> {
-    let rest = remote.strip_prefix("https://")?;
-    let authority = rest.split('/').next()?;
-    let host = authority.rsplit('@').next()?;
-    let host = host.split(':').next()?;
+    let url = UrlParts::of(remote).filter(|url| url.scheme == "https")?;
+    let host = url.host_and_path.split(['/', '?', '#', ':']).next()?;
     (!host.is_empty()).then(|| host.to_ascii_lowercase())
 }
 
@@ -629,7 +699,7 @@ fn shell_quote(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{https_host, https_repository, shell_quote};
+    use super::{https_host, https_repository, shell_quote, shown_remote};
 
     #[test]
     fn finds_the_host_of_https_remotes_only() {
@@ -653,12 +723,30 @@ mod tests {
             Some("owner/repo".to_owned())
         );
         assert_eq!(
-            https_repository("https://someone@github.com/owner/repo/", "github.com").ok(),
+            https_repository("https://github.com/owner/repo/", "github.com").ok(),
             Some("owner/repo".to_owned())
         );
+        assert!(https_repository("https://someone@github.com/owner/repo", "github.com").is_err());
         assert!(https_repository("https://github.com/owner", "github.com").is_err());
         assert!(https_repository("https://gitlab.com/owner/repo", "github.com").is_err());
         assert!(https_repository("git@github.com:owner/repo.git", "github.com").is_err());
+    }
+
+    #[test]
+    fn shows_remotes_without_their_user() {
+        assert_eq!(
+            shown_remote("https://someone:secret@github.com/owner/repo.git"),
+            "https://github.com/owner/repo.git"
+        );
+        assert_eq!(
+            shown_remote("https://token@github.com/a@b"),
+            "https://github.com/a@b"
+        );
+        assert_eq!(
+            shown_remote("git@github.com:owner/repo.git"),
+            "git@github.com:owner/repo.git"
+        );
+        assert_eq!(shown_remote("/tmp/origin.git"), "/tmp/origin.git");
     }
 
     #[test]
