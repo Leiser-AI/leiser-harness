@@ -117,7 +117,7 @@ function describe(error: CommandError): string {
     case "worktree":
       return `Could not create the chat's worktree: ${error.reason}`;
     case "repository_config":
-      return `The repository's .leiser/config.toml is invalid: ${error.reason}`;
+      return `The repository's .leiser/config.toml cannot be used: ${error.reason}`;
     case "turn_running":
       return "A turn is running; queue the message or interrupt the turn.";
     case "no_turn_running":
@@ -126,8 +126,6 @@ function describe(error: CommandError): string {
       return "The agent no longer waits for this answer.";
     case "answer_does_not_fit":
       return "This answer does not fit the request.";
-    case "repository_config":
-      return `Could not read the repository's .leiser/config.toml: ${error.reason}`;
     case "agent_cli_not_configured":
       return `${AGENT_CLI_NAMES[error.agent_cli]} is not set up in the harness service.`;
     case "agent_cli":
@@ -222,8 +220,6 @@ function describe(error: CommandError): string {
       return `Could not set up the subscription: ${error.reason}`;
     case "keychain":
       return `The OS keychain failed: ${error.reason}`;
-    case "repository_config":
-      return `The repository's config is invalid: ${error.reason}`;
     case "unknown_checkpoint":
       return `Turn ${error.turn} has no checkpoint ${error.moment} it.`;
     case "checkpoint":

@@ -294,7 +294,30 @@ async function ofKnownChat<T>(read: Promise<T>): Promise<T | null> {
   }
 }
 
-async function refresh(): Promise<void> {
+// At most one refresh reads at a time. Every call that arrives while one
+// runs shares a single follow-up refresh, so a burst of service events
+// costs two reads instead of one per event, and each caller still sees
+// state read after its call.
+let refreshRunning: Promise<void> | null = null;
+let refreshQueued: Promise<void> | null = null;
+
+function refresh(): Promise<void> {
+  if (refreshRunning === null) {
+    refreshRunning = refreshNow().finally(() => {
+      refreshRunning = null;
+    });
+    return refreshRunning;
+  }
+  refreshQueued ??= refreshRunning
+    .catch(() => undefined)
+    .then(() => {
+      refreshQueued = null;
+      return refresh();
+    });
+  return refreshQueued;
+}
+
+async function refreshNow(): Promise<void> {
   try {
     await readAndRender();
   } finally {
@@ -347,6 +370,8 @@ async function readAndRender(): Promise<void> {
     ),
   );
   if (read !== readCount) return;
+  // A chat the service no longer lists has no shell left to keep.
+  terminal.keepOnly(new Set(chats.map((overview) => overview.chat)));
   renderServiceNotice(updateWaiting);
   renderSidebar(repositories, chats, checks, maps, startsIn?.repository ?? null);
   // The subscriptions dialog can open over any view.
@@ -723,6 +748,52 @@ let transcriptChat: ChatId | null = null;
 // panel or repo-check) loses its position; showing it again restores this.
 let lastScrollTop = 0;
 
+function keyed(item: HTMLElement, key: string): HTMLElement {
+  item.dataset.key = key;
+  return item;
+}
+
+/**
+ * Puts the new entries of the shown chat in place without rebuilding the
+ * ones that did not change. An unchanged entry keeps its node, so what the
+ * developer did there stays: chosen answers, focus, opened or closed output.
+ */
+function updateTranscript(entries: HTMLElement[]): void {
+  // Only transcript entries are kept: the cards after them act on state
+  // their text does not show, such as which subscription a button picks.
+  const shown = new Map<string, HTMLElement>();
+  for (const child of Array.from(transcript.children)) {
+    if (child instanceof HTMLElement && child.dataset.key?.startsWith("entry-")) {
+      shown.set(child.dataset.key, child);
+    }
+  }
+  const next = entries.map((entry) => {
+    const old = entry.dataset.key === undefined ? undefined : shown.get(entry.dataset.key);
+    if (old === undefined) return entry;
+    keepOpenOutput(old, entry);
+    return old.isEqualNode(entry) ? old : entry;
+  });
+  const kept = new Set(next);
+  next.forEach((entry, index) => {
+    const at = transcript.children[index];
+    if (at === entry) return;
+    // A changed entry takes its old node's place, so the ones after it stay where they are.
+    if (at !== undefined && !kept.has(at as HTMLElement)) at.replaceWith(entry);
+    else transcript.insertBefore(entry, at ?? null);
+  });
+  while (transcript.children.length > next.length) transcript.lastElementChild?.remove();
+}
+
+/** The output the developer opened or closed in an entry stays so in its new render. */
+function keepOpenOutput(old: HTMLElement, rendered: HTMLElement): void {
+  const before = old.querySelectorAll("details");
+  const after = rendered.querySelectorAll("details");
+  if (before.length !== after.length) return;
+  after.forEach((details, index) => {
+    details.open = before[index]?.open ?? details.open;
+  });
+}
+
 /** Keeps the transcript at its end while it follows, else where it was. */
 function placeTranscript(): void {
   if (transcript.hidden) return;
@@ -960,6 +1031,8 @@ function renderChat(
     ),
   );
   const removed = view.place === "removed_worktree";
+  // A removed worktree has no directory left for a shell to run in.
+  if (removed) terminal.forget(chat);
   terminal.show(removed ? null : chat, checkout);
   checkPullRequestOnce(chat, view);
   const context: ChatContext = {
@@ -976,26 +1049,31 @@ function renderChat(
   for (const entry of view.transcript) {
     if (entry.type === "answer") context.answers.set(entry.request, entry.answer);
   }
-  const entries = view.transcript.flatMap((entry) => renderEntry(entry, context) ?? []);
+  const entries = view.transcript.flatMap((entry, index) => {
+    const item = renderEntry(entry, context);
+    return item === null ? [] : [keyed(item, `entry-${index}`)];
+  });
   if (view.usageLimit !== null) {
-    entries.push(limitCard(view, view.usageLimit, subscriptions, context));
+    entries.push(keyed(limitCard(view, view.usageLimit, subscriptions, context), "usage-limit"));
   }
   const cleanup = cleanupCard(chat, view);
-  if (cleanup !== null) entries.push(cleanup);
+  if (cleanup !== null) entries.push(keyed(cleanup, "cleanup"));
   // A turn that waits for an answer shows its card instead.
   if (turnRuns && !waitsForAnswer) {
     const working = el("li", "working");
     working.append(el("span", "chat-status working"), "Working…");
-    entries.push(working);
+    entries.push(keyed(working, "working"));
   }
   if (entries.length === 0) {
-    entries.push(el("li", "empty", "Send a message to start the agent."));
+    entries.push(keyed(el("li", "empty", "Send a message to start the agent."), "empty"));
   }
   if (overview.chat !== transcriptChat) {
     transcriptChat = overview.chat;
     followTranscript = true;
+    transcript.replaceChildren(...entries);
+  } else {
+    updateTranscript(entries);
   }
-  transcript.replaceChildren(...entries);
   placeTranscript();
   selectedOpenRequests = view.openRequests;
   selectedWorking = turnRuns;
@@ -1060,16 +1138,7 @@ function cleanupCard(chat: ChatId, view: ChatView): HTMLElement | null {
   );
   const remove = el("button", "primary", "Remove worktree and branch");
   remove.type = "button";
-  remove.addEventListener("click", () =>
-    act(async () => {
-      remove.disabled = true;
-      try {
-        await service.removeWorktree(chat);
-      } finally {
-        await refresh();
-      }
-    }),
-  );
+  onceAtATime(remove, `remove-worktree:${chat}`, () => service.removeWorktree(chat));
   const actions = el("div", "card-actions");
   actions.append(remove);
   body.append(actions);
@@ -1240,18 +1309,11 @@ function chatActions(
     pullRequest === null
       ? "Push the chat's branch to origin, after checking the host account"
       : `Push the chat's branch to origin, updating pull request #${pullRequest.number}`;
-  push.addEventListener("click", () =>
-    act(async () => {
-      push.disabled = true;
-      lastPush = null;
-      try {
-        const branch = await service.push(overview.chat);
-        lastPush = { chat: overview.chat, branch };
-      } finally {
-        await refresh();
-      }
-    }),
-  );
+  onceAtATime(push, `push:${overview.chat}`, async () => {
+    lastPush = null;
+    const branch = await service.push(overview.chat);
+    lastPush = { chat: overview.chat, branch };
+  });
   actions.push(push);
   if (lastPush !== null && lastPush.chat === overview.chat) {
     actions.push(el("span", "top-bar-note", `pushed ${lastPush.branch}`));
@@ -1300,6 +1362,28 @@ function chatActions(
   return actions;
 }
 
+// The actions that run now, by kind and chat. A render while one runs
+// builds a new button; it stays disabled until the action ends, so a
+// second click cannot start the same action twice.
+const runningActions = new Set<string>();
+
+function onceAtATime(button: HTMLButtonElement, key: string, run: () => Promise<unknown>): void {
+  button.disabled = runningActions.has(key);
+  button.addEventListener("click", () =>
+    act(async () => {
+      if (runningActions.has(key)) return;
+      runningActions.add(key);
+      button.disabled = true;
+      try {
+        await run();
+      } finally {
+        runningActions.delete(key);
+        await refresh();
+      }
+    }),
+  );
+}
+
 /** The switch for auto-fix of the chat's open pull request. */
 function autoFixAction(chat: ChatId, number: number, autoFix: AutoFix): HTMLButtonElement {
   const label = { on: "Auto-fix on", off: "Auto-fix off", stopped: "Auto-fix stopped" }[autoFix.type];
@@ -1311,16 +1395,7 @@ function autoFixAction(chat: ChatId, number: number, autoFix: AutoFix): HTMLButt
       : autoFix.type === "stopped"
         ? `${autoFixStopText(autoFix.reason)} Click to switch it on again.`
         : `Click to let the harness fix pull request #${number} by itself.`;
-  button.addEventListener("click", () =>
-    act(async () => {
-      button.disabled = true;
-      try {
-        await service.setAutoFix(chat, autoFix.type !== "on");
-      } finally {
-        await refresh();
-      }
-    }),
-  );
+  onceAtATime(button, `auto-fix:${chat}`, () => service.setAutoFix(chat, autoFix.type !== "on"));
   return button;
 }
 
