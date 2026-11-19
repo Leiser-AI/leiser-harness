@@ -1,13 +1,14 @@
 //! The git host interface: how the harness service signs a host account
 //! in and finds out which account a push signs in as.
 //!
-//! Every host account gets a `gh` config directory of its own
-//! (`GH_CONFIG_DIR`), in which the git host's login runs. A bound
-//! repository's local git config sends credentials for the git host to
-//! that directory only ([`GitHost::credential_helper`]), so a push from the
-//! repository, by the harness or in a terminal, signs in as that account.
-//! Before it pushes, the harness service asks the git host who the push
-//! signs in as ([`GitHost::account_for_push`]) and blocks a mismatch.
+//! Every host account gets a CLI config directory of its own
+//! (`GH_CONFIG_DIR` for GitHub, `GLAB_CONFIG_DIR` for GitLab), in which
+//! the git host's login runs. A bound repository's local git config sends
+//! credentials for the git host to that directory only
+//! ([`GitHost::credential_helper`]), so a push from the repository, by the
+//! harness or in a terminal, signs in as that account. Before it pushes,
+//! the harness service asks the git host who the push signs in as
+//! ([`GitHost::account_for_push`]) and blocks a mismatch.
 //!
 //! While auto-fix watches a chat's open pull request, the harness service
 //! polls it ([`GitHost::poll_pull_request`]) with the entity tags of the
@@ -16,22 +17,32 @@
 //! A repository's wayfinder maps are polled the same way
 //! ([`GitHost::poll_wayfinder_maps`]) while the desktop app is connected.
 //!
-//! [`GhGitHost`] is the GitHub CLI. Tests use the testkit's fake git host.
+//! [`GhGitHost`] is the GitHub CLI, [`GlabGitHost`] is the GitLab CLI, and
+//! [`GitHosts`] dispatches to the right one by [`GitHostKind`]. Tests use
+//! the testkit's fake git host or fake CLI binaries.
 
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
+use std::sync::Arc;
 
 use tokio::process::Command;
 
 use crate::installed::{self, Environment, Program};
 use serde::{Deserialize, Serialize};
 
-use crate::{CommentLocation, IssueRef, LoginProcess, PullRequestState, TicketType};
+use crate::{CommentLocation, GitHostKind, IssueRef, LoginProcess, PullRequestState, TicketType};
 
 mod github_poll;
 mod github_wayfinder;
+mod gitlab;
+mod gitlab_poll;
+mod gitlab_wayfinder;
+mod http;
+
+pub use gitlab::{GLAB_CONFIG_DIR, GlabGitHost};
 
 /// The variable that names the `gh` config directory.
 pub const GH_CONFIG_DIR: &str = "GH_CONFIG_DIR";
@@ -42,11 +53,14 @@ pub type GitHostFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 /// What the git host needs to act as one host account.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostAccountAccess {
-    /// The git host's name, such as `github.com`.
+    /// Which kind of git host this host account lives on.
+    pub kind: GitHostKind,
+    /// The git host's name, such as `github.com` or `gitlab.example.com`.
     pub git_host: String,
     /// The account the host account stands for.
     pub login: String,
-    /// The host account's own `gh` config directory.
+    /// The host account's own CLI config directory (`GH_CONFIG_DIR` or
+    /// `GLAB_CONFIG_DIR`).
     pub config_dir: PathBuf,
 }
 
@@ -343,6 +357,93 @@ pub trait GitHost: Send + Sync + std::fmt::Debug {
     ) -> GitHostFuture<'a, Result<PolledWayfinderMaps, GitHostError>>;
 }
 
+/// Dispatches each git host operation to the [`GitHost`] for the host
+/// account's [`GitHostKind`]: GitHub (`gh`) or GitLab (`glab`).
+#[derive(Debug, Clone)]
+pub struct GitHosts {
+    github: Arc<dyn GitHost>,
+    gitlab: Arc<dyn GitHost>,
+}
+
+impl GitHosts {
+    #[must_use]
+    pub fn new(github: Arc<dyn GitHost>, gitlab: Arc<dyn GitHost>) -> Self {
+        Self { github, gitlab }
+    }
+
+    /// The developer's installed `gh` and `glab`.
+    #[must_use]
+    pub fn installed() -> Self {
+        Self::new(
+            Arc::new(GhGitHost::installed()),
+            Arc::new(GlabGitHost::installed()),
+        )
+    }
+
+    fn host(&self, access: &HostAccountAccess) -> &dyn GitHost {
+        match access.kind {
+            GitHostKind::GitHub => self.github.as_ref(),
+            GitHostKind::GitLab => self.gitlab.as_ref(),
+        }
+    }
+}
+
+impl GitHost for GitHosts {
+    fn login(&self, access: &HostAccountAccess) -> Result<LoginProcess, GitHostError> {
+        self.host(access).login(access)
+    }
+
+    fn credential_helper(&self, access: &HostAccountAccess) -> Result<String, GitHostError> {
+        self.host(access).credential_helper(access)
+    }
+
+    fn account_for_push<'a>(
+        &'a self,
+        access: &'a HostAccountAccess,
+        remote: &'a str,
+    ) -> GitHostFuture<'a, Result<String, GitHostError>> {
+        self.host(access).account_for_push(access, remote)
+    }
+
+    fn open_pull_request<'a>(
+        &'a self,
+        access: &'a HostAccountAccess,
+        remote: &'a str,
+        request: &'a NewPullRequest,
+    ) -> GitHostFuture<'a, Result<OpenedPullRequest, GitHostError>> {
+        self.host(access).open_pull_request(access, remote, request)
+    }
+
+    fn pull_request_state<'a>(
+        &'a self,
+        access: &'a HostAccountAccess,
+        remote: &'a str,
+        number: u64,
+    ) -> GitHostFuture<'a, Result<PullRequestState, GitHostError>> {
+        self.host(access).pull_request_state(access, remote, number)
+    }
+
+    fn poll_pull_request<'a>(
+        &'a self,
+        access: &'a HostAccountAccess,
+        remote: &'a str,
+        number: u64,
+        last: Option<&'a PolledPullRequest>,
+    ) -> GitHostFuture<'a, Result<PolledPullRequest, GitHostError>> {
+        self.host(access)
+            .poll_pull_request(access, remote, number, last)
+    }
+
+    fn poll_wayfinder_maps<'a>(
+        &'a self,
+        access: &'a HostAccountAccess,
+        remote: &'a str,
+        last: Option<&'a PolledWayfinderMaps>,
+    ) -> GitHostFuture<'a, Result<PolledWayfinderMaps, GitHostError>> {
+        self.host(access).poll_wayfinder_maps(access, remote, last)
+    }
+}
+
 /// The GitHub CLI `gh`, found as an installed agent CLI is (see
 /// `installed.rs`), or the program `LEISER_GH` names.
 #[derive(Debug, Clone)]
@@ -351,6 +452,9 @@ pub struct GhGitHost {
 }
 
 impl GhGitHost {
+    /// The variable that overrides where `gh` is found.
+    pub const PROGRAM_VARIABLE: &'static str = installed::GH.variable;
+
     /// The `gh` at `program`, a path or a name looked up on `PATH`.
     #[must_use]
     pub fn new(program: impl Into<PathBuf>) -> Self {
@@ -362,10 +466,16 @@ impl GhGitHost {
     /// The developer's installed `gh`.
     #[must_use]
     pub fn installed() -> Self {
+        Self::installed_in(Environment::current())
+    }
+
+    /// `gh` looked up in `environment`.
+    #[must_use]
+    pub fn installed_in(environment: Environment) -> Self {
         Self {
             program: Program::Installed {
                 install: &installed::GH,
-                environment: Environment::current(),
+                environment,
             },
         }
     }
@@ -489,7 +599,7 @@ impl GitHost for GhGitHost {
     ) -> GitHostFuture<'a, Result<String, GitHostError>> {
         Box::pin(async move {
             refuse_credential_in_remote(remote)?;
-            if https_host(remote).as_deref() != Some(access.git_host.as_str()) {
+            if !https_host_matches(remote, &access.git_host) {
                 return Err(GitHostError::UnsupportedRemote {
                     remote: shown_remote(remote),
                     git_host: access.git_host.clone(),
@@ -599,25 +709,82 @@ impl GitHost for GhGitHost {
 /// `owner/name` of the repository at an `https://` remote URL on
 /// `git_host`.
 fn https_repository(remote: &str, git_host: &str) -> Result<String, GitHostError> {
+    let path = https_project_path(remote, git_host)?;
+    let mut parts = path.split('/');
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(owner), Some(name), None) => Ok(format!("{owner}/{name}")),
+        _ => Err(GitHostError::UnsupportedRemote {
+            remote: shown_remote(remote),
+            git_host: git_host.to_owned(),
+        }),
+    }
+}
+
+/// `namespace/.../project` path of the project at an `https://` remote URL
+/// on `git_host`, supporting nested GitLab subgroups.
+fn https_project_path(remote: &str, git_host: &str) -> Result<String, GitHostError> {
     refuse_credential_in_remote(remote)?;
     let unsupported = || GitHostError::UnsupportedRemote {
         remote: shown_remote(remote),
         git_host: git_host.to_owned(),
     };
-    if https_host(remote).as_deref() != Some(git_host) {
+    if !https_host_matches(remote, git_host) {
         return Err(unsupported());
     }
     let path = UrlParts::of(remote)
         .and_then(|url| url.host_and_path.split_once('/'))
-        .map(|(_, path)| path.trim_end_matches('/'))
+        .map(|(_, path)| path)
         .ok_or_else(unsupported)?;
+    if path.contains(['?', '#']) {
+        return Err(unsupported());
+    }
+    let path = path.trim_end_matches('/');
     let path = path.strip_suffix(".git").unwrap_or(path);
-    let mut parts = path.split('/');
-    match (parts.next(), parts.next(), parts.next()) {
-        (Some(owner), Some(name), None) if !owner.is_empty() && !name.is_empty() => {
-            Ok(format!("{owner}/{name}"))
+    let segments: Vec<&str> = path.split('/').collect();
+    let valid = segments.len() >= 2
+        && segments
+            .iter()
+            .all(|segment| !segment.is_empty() && *segment != "." && *segment != "..");
+    if valid {
+        Ok(segments.join("/"))
+    } else {
+        Err(unsupported())
+    }
+}
+
+/// Percent-encodes a project path for a single URL path segment (such as
+/// `org/team/repo` -> `org%2Fteam%2Frepo` for GitLab's `projects/:id`).
+fn encode_path_segment(segment: &str) -> String {
+    let mut encoded = String::with_capacity(segment.len());
+    for byte in segment.bytes() {
+        if matches!(
+            byte,
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~'
+        ) {
+            encoded.push(char::from(byte));
+        } else {
+            let _ = write!(encoded, "%{byte:02X}");
         }
-        _ => Err(unsupported()),
+    }
+    encoded
+}
+
+/// Whether `remote` is an `https://` URL on `git_host`. When `git_host`
+/// includes a port (such as `gitlab.example.com:8443`), the port must
+/// match too.
+fn https_host_matches(remote: &str, git_host: &str) -> bool {
+    if git_host.contains(':') {
+        let Some(url) = UrlParts::of(remote).filter(|url| url.scheme == "https") else {
+            return false;
+        };
+        let authority = url
+            .host_and_path
+            .split(['/', '?', '#'])
+            .next()
+            .unwrap_or_default();
+        !authority.is_empty() && authority.eq_ignore_ascii_case(git_host)
+    } else {
+        https_host(remote).is_some_and(|host| host.eq_ignore_ascii_case(git_host))
     }
 }
 
@@ -699,7 +866,10 @@ fn shell_quote(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{https_host, https_repository, shell_quote, shown_remote};
+    use super::{
+        encode_path_segment, https_host, https_host_matches, https_project_path, https_repository,
+        shell_quote, shown_remote,
+    };
 
     #[test]
     fn finds_the_host_of_https_remotes_only() {
@@ -726,10 +896,57 @@ mod tests {
             https_repository("https://github.com/owner/repo/", "github.com").ok(),
             Some("owner/repo".to_owned())
         );
+        assert!(https_repository("https://github.com/a/b/c.git", "github.com").is_err());
         assert!(https_repository("https://someone@github.com/owner/repo", "github.com").is_err());
         assert!(https_repository("https://github.com/owner", "github.com").is_err());
         assert!(https_repository("https://gitlab.com/owner/repo", "github.com").is_err());
         assert!(https_repository("git@github.com:owner/repo.git", "github.com").is_err());
+    }
+
+    #[test]
+    fn finds_nested_gitlab_project_paths_and_encodes_them() {
+        assert_eq!(
+            https_project_path(
+                "https://gitlab.example.com/org/team/sub/repo.git",
+                "gitlab.example.com"
+            )
+            .ok(),
+            Some("org/team/sub/repo".to_owned())
+        );
+        assert_eq!(
+            https_project_path(
+                "https://gitlab.example.com:8443/org/repo/",
+                "gitlab.example.com:8443"
+            )
+            .ok(),
+            Some("org/repo".to_owned())
+        );
+        assert!(!https_host_matches(
+            "https://gitlab.example.com/org/repo.git",
+            "gitlab.example.com:8443"
+        ));
+        assert!(
+            https_project_path("https://gitlab.example.com/org//repo", "gitlab.example.com")
+                .is_err()
+        );
+        assert!(
+            https_project_path(
+                "https://gitlab.example.com/org/../repo",
+                "gitlab.example.com"
+            )
+            .is_err()
+        );
+        assert!(
+            https_project_path(
+                "https://gitlab.example.com/only-group",
+                "gitlab.example.com"
+            )
+            .is_err()
+        );
+        assert_eq!(
+            encode_path_segment("org/team/my-repo.rs"),
+            "org%2Fteam%2Fmy-repo.rs"
+        );
     }
 
     #[test]

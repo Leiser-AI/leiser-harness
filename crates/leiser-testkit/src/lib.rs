@@ -10,6 +10,7 @@
 
 mod fake_driver;
 mod fake_gh;
+mod fake_glab;
 mod gate;
 mod git_host;
 mod harness_mcp_client;
@@ -24,6 +25,9 @@ pub use fake_driver::{
 };
 pub use fake_gh::{
     FAKE_GH_ANSWERS_FILE, FAKE_GH_REQUESTS_FILE, FakeGh, FakeGhAnswer, FakeGhRequest,
+};
+pub use fake_glab::{
+    FAKE_GLAB_ANSWERS_FILE, FAKE_GLAB_REQUESTS_FILE, FakeGlab, FakeGlabAnswer, FakeGlabRequest,
 };
 pub use gate::Gate;
 pub use git_host::{

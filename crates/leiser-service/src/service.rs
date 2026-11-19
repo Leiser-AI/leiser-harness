@@ -11,7 +11,7 @@ use tokio::task::JoinHandle;
 
 use crate::checkpoint::{self, CheckpointError};
 use crate::cli_extensions::{self, CliExtensionError};
-use crate::git_host::{GhGitHost, GitHost};
+use crate::git_host::{GitHost, GitHosts};
 use crate::handoff::{self, Handoff, ReadError};
 use crate::harness_mcp::{
     BranchNaming, ChatRead, HarnessCall, HarnessMcp, HarnessMcpError, Registration, TodoAnswer,
@@ -37,11 +37,11 @@ mod wayfinder;
 use crate::{
     Access, AgentCli, AgentEvent, AgentSessionId, Answer, Branch, ChatId, ChatOverview,
     ChatSettings, ChatStatus, Checkout, CheckpointMoment, Command, CommandError, CommitAuthor,
-    DiffRange, Driver, Event, HostAccountBinding, HostAccountId, Keychain, LoginAnswer,
-    LoginOutcome, LoginProcess, OptOuts, OsKeychain, PermissionMode, Provider, QueueReason,
-    RepoCheck, RepositoryId, RepositoryOverview, RepositoryScript, Response, SessionInput,
-    SessionSpec, SignIn, StartOn, SubscriptionAccess, SubscriptionId, SubscriptionKind, TodoId,
-    TranscriptEntry, TurnCheckpoints, UsageLimit, script,
+    DiffRange, Driver, Event, GitHostKind, HostAccountBinding, HostAccountId, Keychain,
+    LoginAnswer, LoginOutcome, LoginProcess, OptOuts, OsKeychain, PermissionMode, Provider,
+    QueueReason, RepoCheck, RepositoryId, RepositoryOverview, RepositoryScript, Response,
+    SessionInput, SessionSpec, SignIn, StartOn, SubscriptionAccess, SubscriptionId,
+    SubscriptionKind, TodoId, TranscriptEntry, TurnCheckpoints, UsageLimit, script,
 };
 use auto_fix::{AutoFixWork, ChatAutoFix};
 use pull_requests::{ChatPullRequest, PullRequestWork};
@@ -78,7 +78,7 @@ pub struct ServiceConfig {
     keychain: Arc<dyn Keychain>,
     codex_home: Option<PathBuf>,
     repo_check: Option<Arc<dyn Driver>>,
-    /// `None` is the developer's installed `gh`.
+    /// `None` is the developer's installed `gh` and `glab`.
     git_host: Option<Arc<dyn GitHost>>,
     /// How often auto-fix polls an open pull request.
     pull_request_poll_interval: Duration,
@@ -129,7 +129,7 @@ impl ServiceConfig {
     }
 
     /// Signs host accounts in and checks pushes on `git_host` instead of
-    /// the developer's installed GitHub CLI `gh`.
+    /// the developer's installed GitHub (`gh`) and GitLab (`glab`) CLIs.
     #[must_use]
     pub fn with_git_host(mut self, git_host: Arc<dyn GitHost>) -> Self {
         self.git_host = Some(git_host);
@@ -790,7 +790,7 @@ impl State {
             logins: BTreeMap::new(),
             git_host: config
                 .git_host
-                .unwrap_or_else(|| Arc::new(GhGitHost::installed())),
+                .unwrap_or_else(|| Arc::new(GitHosts::installed())),
             pull_request_poll_interval: config.pull_request_poll_interval,
             wayfinder_poll_interval: config.wayfinder_poll_interval,
             wayfinder: BTreeMap::new(),
@@ -2003,7 +2003,7 @@ impl State {
                 .flat_map(|session| &session.open)
                 .map(|request| request.id.clone())
                 .collect(),
-            host_account,
+            host_account: Box::new(host_account),
             commit_author,
             usage_limit: chat.usage_limit.as_ref().map(LimitHit::shown),
             place: chat.place.shown(),
@@ -2329,10 +2329,11 @@ impl State {
         match command {
             Command::AddHostAccount {
                 name,
+                kind,
                 git_host,
                 login,
                 author,
-            } => self.add_host_account(&name, &git_host, &login, &author),
+            } => self.add_host_account(&name, kind, &git_host, &login, &author),
             Command::RemoveHostAccount { host_account } => self.remove_host_account(host_account),
             Command::LogInHostAccount { host_account } => self
                 .log_in_host_account(host_account)
@@ -2346,6 +2347,7 @@ impl State {
     fn add_host_account(
         &mut self,
         name: &str,
+        kind: GitHostKind,
         git_host: &str,
         login: &str,
         author: &CommitAuthor,
@@ -2372,7 +2374,7 @@ impl State {
         }
         let host_account = HostAccountId(self.next_id());
         self.host_accounts
-            .add(host_account, name, git_host, login, author)?;
+            .add(host_account, name, kind, git_host, login, author)?;
         if let Err(error) = self.save() {
             self.host_accounts.remove(host_account);
             return Err(error);
@@ -2450,6 +2452,7 @@ impl State {
         };
         HostAccountBinding::Bound {
             host_account,
+            kind: self.host_accounts.kind(host_account).unwrap_or_default(),
             git_host: self
                 .host_accounts
                 .git_host(host_account)

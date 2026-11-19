@@ -5,6 +5,7 @@ export type RepositoryId = number;
 export type ChatId = number;
 export type SubscriptionId = number;
 export type HostAccountId = number;
+export type GitHostKind = "github" | "gitlab";
 
 export type Provider = "anthropic" | "openai";
 export type SubscriptionKind = "login" | "api_key";
@@ -67,6 +68,7 @@ export type Command =
   | {
       type: "add_host_account";
       name: string;
+      kind: GitHostKind;
       git_host: string;
       login: string;
       author: CommitAuthor;
@@ -322,6 +324,7 @@ export interface CommitAuthor {
 export interface HostAccountOverview {
   host_account: HostAccountId;
   name: string;
+  kind: GitHostKind;
   git_host: string;
   login: string;
   author: CommitAuthor;
@@ -332,7 +335,14 @@ export interface HostAccountOverview {
 /** The host account a repository's `.leiser/config.toml` binds it to. */
 export type HostAccountBinding =
   | { type: "unbound" }
-  | { type: "bound"; host_account: HostAccountId; name: string; git_host: string; login: string }
+  | {
+      type: "bound";
+      host_account: HostAccountId;
+      name: string;
+      kind: GitHostKind;
+      git_host: string;
+      login: string;
+    }
   | { type: "unknown"; name: string }
   | { type: "unreadable"; reason: string };
 

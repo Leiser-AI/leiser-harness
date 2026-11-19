@@ -10,17 +10,13 @@
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 
+use super::http::{ConditionalAnswer, log_tail, parse_conditional_output};
 use super::{
     CheckOutcome, CommitId, GhGitHost, GitHostError, HostAccountAccess, Mergeable, PollMemo,
     PolledPullRequest, PullRequestActivity, PullRequestCheck, PullRequestComment, https_repository,
-    refused,
 };
 use crate::{CommentLocation, PullRequestState};
 
-/// How much of a failed check's log the agent gets: its last lines, at
-/// most this many and this many bytes.
-const LOG_LINES: usize = 80;
-const LOG_BYTES: usize = 8_000;
 /// The length of one page of a list.
 const PER_PAGE: u64 = 100;
 /// The memo keys under which the comment counts of the last fresh answer
@@ -30,12 +26,6 @@ const COMMENTS: &str = "comments";
 const REVIEW_COMMENTS: &str = "review-comments";
 /// The start of the ids of checks that are commit statuses.
 const STATUS: &str = "status-";
-
-/// An answer to a conditional request.
-enum Answer {
-    NotModified,
-    Fresh { tag: Option<String>, body: String },
-}
 
 #[derive(Deserialize)]
 struct PullJson {
@@ -481,14 +471,14 @@ impl<'a> Requests<'a> {
             .conditional(self.access, self.repository, path, known)
             .await?
         {
-            Answer::NotModified => {
+            ConditionalAnswer::NotModified => {
                 let tag = known.ok_or_else(|| GitHostError::UnexpectedAnswer {
                     answer: format!("304 for {path} without a tag"),
                 })?;
                 self.memo.insert(path, tag);
                 Ok(Fetched::Unchanged)
             }
-            Answer::Fresh { tag, body } => {
+            ConditionalAnswer::Fresh { tag, body } => {
                 if let Some(tag) = tag {
                     self.memo.insert(path, &tag);
                 }
@@ -527,23 +517,13 @@ impl GhGitHost {
         repository: &str,
         path: &str,
         tag: Option<&str>,
-    ) -> Result<Answer, GitHostError> {
+    ) -> Result<ConditionalAnswer, GitHostError> {
         let mut args = vec!["--include".to_owned()];
         if let Some(tag) = tag {
             args.extend(["--header".to_owned(), format!("If-None-Match: {tag}")]);
         }
         let output = self.run_api(access, repository, path, &args).await?;
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let (head, body) = split_response(&stdout);
-        // `gh` exits with an error on a 304 too.
-        match status(head) {
-            Some(304) => Ok(Answer::NotModified),
-            Some(200..=299) if output.status.success() => Ok(Answer::Fresh {
-                tag: header(head, "etag").map(str::to_owned),
-                body: body.to_owned(),
-            }),
-            _ => Err(refused(&output, head.lines().next().unwrap_or_default())),
-        }
+        parse_conditional_output(&output)
     }
 }
 
@@ -637,90 +617,9 @@ fn writers_comments(comments: Vec<CommentJson>, source: CommentSource) -> Vec<Pu
         .collect()
 }
 
-/// The status line and headers, and the body, of `gh api --include`'s
-/// output.
-fn split_response(output: &str) -> (&str, &str) {
-    for separator in ["\r\n\r\n", "\n\n"] {
-        if let Some(split) = output.split_once(separator) {
-            return split;
-        }
-    }
-    (output, "")
-}
-
-/// The status code in the status line, such as `HTTP/2.0 304 Not Modified`.
-fn status(head: &str) -> Option<u16> {
-    head.lines().next()?.split_whitespace().nth(1)?.parse().ok()
-}
-
-/// A header's value; names are compared without case.
-fn header<'h>(head: &'h str, name: &str) -> Option<&'h str> {
-    head.lines().skip(1).find_map(|line| {
-        let (key, value) = line.split_once(':')?;
-        key.trim()
-            .eq_ignore_ascii_case(name)
-            .then(|| value.trim())
-            .filter(|value| !value.is_empty())
-    })
-}
-
-/// The last lines of a GitHub Actions log, without their timestamps.
-fn log_tail(log: &str) -> String {
-    let lines: Vec<&str> = log.lines().map(without_timestamp).collect();
-    let mut tail = lines[lines.len().saturating_sub(LOG_LINES)..].join("\n");
-    if tail.len() > LOG_BYTES {
-        let mut start = tail.len() - LOG_BYTES;
-        while !tail.is_char_boundary(start) {
-            start += 1;
-        }
-        tail = tail.split_off(start);
-    }
-    tail
-}
-
-/// A log line without the timestamp GitHub Actions starts it with, such
-/// as `2026-11-11T10:00:00.1234567Z`.
-fn without_timestamp(line: &str) -> &str {
-    match line.split_once(' ') {
-        Some((stamp, rest))
-            if stamp.len() >= 20
-                && stamp.ends_with('Z')
-                && stamp.as_bytes().get(4) == Some(&b'-')
-                && stamp.as_bytes().get(10) == Some(&b'T') =>
-        {
-            rest
-        }
-        _ => line,
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{CommentSource, LOG_LINES, header, log_tail, split_response, status};
-
-    #[test]
-    fn reads_status_tag_and_body_of_an_included_answer() {
-        let output =
-            "HTTP/2.0 200 OK\r\nContent-Type: application/json\r\nEtag: W/\"abc\"\r\n\r\n{\"a\":1}";
-        let (head, body) = split_response(output);
-        assert_eq!(status(head), Some(200));
-        assert_eq!(header(head, "etag"), Some("W/\"abc\""));
-        assert_eq!(body, "{\"a\":1}");
-        let (head, body) = split_response("HTTP/2.0 304 Not Modified\r\nEtag: \"abc\"\r\n\r\n");
-        assert_eq!(status(head), Some(304));
-        assert_eq!(body, "");
-    }
-
-    #[test]
-    fn keeps_the_end_of_a_log_without_timestamps() {
-        let log = (0..200).fold(String::new(), |log, line| {
-            log + &format!("2026-11-11T10:00:00.1234567Z line {line}\n")
-        });
-        let tail = log_tail(&log);
-        assert_eq!(tail.lines().count(), LOG_LINES);
-        assert_eq!(tail.lines().last(), Some("line 199"));
-        assert_eq!(log_tail("plain line"), "plain line");
-    }
+    use super::CommentSource;
 
     #[test]
     fn tells_comment_ids_apart_by_where_they_come_from() {
