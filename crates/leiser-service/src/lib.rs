@@ -23,6 +23,9 @@
 //! and Should findings of its report. It never fixes them. A repository's
 //! `.leiser/config.toml` can switch single checks off.
 //!
+//! Three agent CLIs are supported: Claude Code, Codex and the Gemini CLI,
+//! each on the subscriptions of its provider.
+//!
 //! The CLI extensions an agent CLI loads from a repository (skills, MCP
 //! servers, hooks, instruction files) can be listed, read and saved in the
 //! agent CLI's own files; they are not part of the harness (ADR 0003).
@@ -52,6 +55,7 @@ mod claude_code;
 mod cli_extensions;
 mod codex;
 mod driver;
+mod gemini;
 mod git;
 mod git_host;
 mod handoff;
@@ -77,9 +81,10 @@ pub use claude_code::ClaudeCodeDriver;
 pub use codex::CodexDriver;
 pub use driver::{
     ANTHROPIC_API_KEY, Access, AgentSession, AgentSessionId, CLAUDE_CONFIG_DIR, CODEX_HOME, Driver,
-    DriverError, HARNESS_MCP_SERVER, LoginProcess, OPENAI_API_KEY, SessionInput, SessionSpec,
-    SubscriptionAccess, SubscriptionEnvironment,
+    DriverError, GEMINI_API_KEY, GEMINI_CLI_HOME, HARNESS_MCP_SERVER, LoginProcess, OPENAI_API_KEY,
+    SessionInput, SessionSpec, SubscriptionAccess, SubscriptionEnvironment,
 };
+pub use gemini::GeminiDriver;
 pub use git_host::{
     Blocker, CheckOutcome, CommitId, GH_CONFIG_DIR, GhGitHost, GitHost, GitHostError,
     GitHostFuture, HostAccountAccess, MapIssue, Mergeable, NewPullRequest, OpenedPullRequest,

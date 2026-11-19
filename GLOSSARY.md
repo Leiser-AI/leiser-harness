@@ -6,7 +6,7 @@ the developer's own subscriptions.
 ## Language
 
 **Provider**:
-A company that offers models, such as Anthropic or OpenAI.
+A company that offers models, such as Anthropic, OpenAI or Google.
 _Avoid_: vendor, lab, backend
 
 **Subscription**:
@@ -17,7 +17,7 @@ _Avoid_: abo, account, plan, credential
 
 **Agent CLI**:
 An existing coding agent program from a provider that the harness runs,
-such as Claude Code or Codex.
+such as Claude Code, Codex or the Gemini CLI.
 _Avoid_: backend, engine, runner, adapter
 
 **CLI extension**:

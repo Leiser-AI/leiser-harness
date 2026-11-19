@@ -57,7 +57,9 @@ use crate::{
 ///   chat's permission mode (Auto), transcript entries for the
 ///   developer's answers and for continuing on another subscription,
 ///   whether a subscription is interchangeable (no), and a chat's usage
-///   limit and the messages it holds back (none).
+///   limit and the messages it holds back (none). Also the Gemini CLI
+///   and Google as an agent CLI and a provider: data that names them is
+///   refused by an older harness service as unreadable, never changed.
 const VERSION: u32 = 3;
 
 const STATE_FILE: &str = "state.json";

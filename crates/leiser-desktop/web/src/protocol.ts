@@ -6,13 +6,13 @@ export type ChatId = number;
 export type SubscriptionId = number;
 export type HostAccountId = number;
 
-export type Provider = "anthropic" | "openai";
+export type Provider = "anthropic" | "openai" | "google";
 export type SubscriptionKind = "login" | "api_key";
 export type SignIn = { type: "login" } | { type: "api_key"; api_key: string };
 export type LoginOutcome = { type: "signed_in" } | { type: "failed"; reason: string };
 export type TodoId = number;
 
-export type AgentCli = "claude_code" | "codex";
+export type AgentCli = "claude_code" | "codex" | "gemini";
 export type Checkout =
   | { type: "main" }
   | { type: "new_worktree" }

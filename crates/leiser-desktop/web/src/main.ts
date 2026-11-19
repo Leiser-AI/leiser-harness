@@ -1575,10 +1575,14 @@ function renderWayfinder(repository: RepositoryOverview, maps: WayfinderMap[]): 
   wayfinderView.replaceChildren(intro, legend, scroller);
 }
 
-/** How each agent CLI's prompt invokes a skill by name. */
+/**
+ * How each agent CLI's prompt invokes a skill by name. The Gemini CLI has
+ * no syntax for it: its model activates a skill when the prompt asks.
+ */
 const SKILL_PREFIXES: Record<AgentCli, string> = {
   claude_code: "/",
   codex: "$",
+  gemini: "Use the skill ",
 };
 
 /**

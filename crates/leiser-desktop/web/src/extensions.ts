@@ -9,7 +9,7 @@ import type { AgentCli, CliExtension, CliExtensionKind, RepositoryId, Unreadable
 import * as service from "./service";
 import { AGENT_CLI_NAMES } from "./service";
 
-const AGENT_CLIS: AgentCli[] = ["claude_code", "codex"];
+const AGENT_CLIS: AgentCli[] = ["claude_code", "codex", "gemini"];
 
 const KINDS: { type: CliExtensionKind["type"]; title: string; icon: IconName }[] = [
   { type: "instruction_file", title: "Instruction files", icon: "file" },

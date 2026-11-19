@@ -47,6 +47,15 @@ const CODEX_SKILLS: [&str; 2] = [".agents/skills", ".codex/skills"];
 const CODEX_CONFIG: &str = ".codex/config.toml";
 const CODEX_HOOKS: &str = ".codex/hooks.json";
 
+/// The Gemini CLI's context file when its settings name none.
+const GEMINI_INSTRUCTIONS: &str = "GEMINI.md";
+/// The Gemini CLI's workspace settings: context file names, MCP servers
+/// and hooks. JSON with comments.
+const GEMINI_SETTINGS: &str = ".gemini/settings.json";
+/// Where the Gemini CLI finds workspace skills; `.agents` wins over
+/// `.gemini` for a skill in both.
+const GEMINI_SKILLS: [&str; 2] = [".agents/skills", ".gemini/skills"];
+
 const SKILL_FILE: &str = "SKILL.md";
 
 /// What the agent CLIs load for one repository.
@@ -86,13 +95,14 @@ pub(crate) enum CliExtensionError {
     },
 }
 
-/// Finds every CLI extension Claude Code and Codex load for the repository
-/// at `root`.
+/// Finds every CLI extension Claude Code, Codex and the Gemini CLI load
+/// for the repository at `root`.
 pub(crate) fn list(root: &Path) -> Listing {
     let finder = Finder::new(root);
     let mut listing = Listing::default();
     finder.claude_code(&mut listing);
     finder.codex(&mut listing);
+    finder.gemini(&mut listing);
     listing
 }
 
@@ -152,6 +162,11 @@ fn read_text(path: &Path) -> io::Result<String> {
 
 /// Whether the agent CLI can still parse `text` as the file at `path`.
 fn check_syntax(path: &Path, text: &str) -> Result<(), String> {
+    if path.ends_with(GEMINI_SETTINGS) {
+        return serde_json::from_str::<serde::de::IgnoredAny>(&strip_json_comments(text))
+            .map(drop)
+            .map_err(|error| error.to_string());
+    }
     match path.extension().and_then(|extension| extension.to_str()) {
         Some("json") => serde_json::from_str::<serde::de::IgnoredAny>(text)
             .map(drop)
@@ -305,8 +320,63 @@ impl Finder {
         found.into(listing);
     }
 
-    /// Lists an instruction file of Claude Code and, following its `@`
-    /// imports, the files it imports.
+    fn gemini(&self, listing: &mut Listing) {
+        let agent_cli = AgentCli::Gemini;
+        let mut found = Found::new(agent_cli);
+
+        let settings_file = self.existing(Path::new(GEMINI_SETTINGS));
+        let settings = settings_file.as_ref().map(|file| {
+            read_text(&file.real)
+                .map_err(|error| error.to_string())
+                .and_then(|text| {
+                    serde_json::from_str::<GeminiSettings>(&strip_json_comments(&text))
+                        .map_err(|error| error.to_string())
+                })
+        });
+        let context_names = match &settings {
+            Some(Ok(settings)) => settings.context.file_name.names(),
+            _ => vec![GEMINI_INSTRUCTIONS.to_owned()],
+        };
+        // The Gemini CLI loads the context files of the working directory
+        // and its parents, and those of every directory its tools touch.
+        let names: Vec<&str> = context_names.iter().map(String::as_str).collect();
+        let instructions = names.iter().map(PathBuf::from).chain(self.tracked(&names));
+        for path in instructions {
+            self.instruction_file(&mut found, &path, None, 0);
+        }
+
+        for directory in GEMINI_SKILLS {
+            for (path, skill) in self.skills(Path::new(directory)) {
+                self.skill(&mut found, &path, skill);
+            }
+        }
+
+        if let (Some(file), Some(settings)) = (&settings_file, settings) {
+            match settings {
+                Ok(settings) => {
+                    for (name, server) in settings.mcp_servers {
+                        found.push(
+                            file,
+                            name,
+                            CliExtensionKind::McpServer {
+                                launch: server.launch(),
+                            },
+                        );
+                    }
+                    HooksFile {
+                        hooks: settings.hooks,
+                    }
+                    .push_hooks(&mut found, file);
+                }
+                Err(reason) => found.unreadable(file, reason),
+            }
+        }
+
+        found.into(listing);
+    }
+
+    /// Lists an instruction file of Claude Code or the Gemini CLI and,
+    /// following its `@` imports, the files it imports.
     fn instruction_file(
         &self,
         found: &mut Found,
@@ -659,6 +729,57 @@ fn unquote(value: &str) -> &str {
     value
 }
 
+/// `text` with `//` and `/* */` comments replaced by spaces, outside
+/// strings, as the Gemini CLI reads its settings.
+fn strip_json_comments(text: &str) -> String {
+    let mut stripped = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    let mut in_string = false;
+    while let Some(c) = chars.next() {
+        if in_string {
+            stripped.push(c);
+            if c == '\\' {
+                if let Some(escaped) = chars.next() {
+                    stripped.push(escaped);
+                }
+            } else if c == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match (c, chars.peek()) {
+            ('"', _) => {
+                in_string = true;
+                stripped.push(c);
+            }
+            ('/', Some('/')) => {
+                for c in chars.by_ref() {
+                    if c == '\n' {
+                        stripped.push('\n');
+                        break;
+                    }
+                }
+            }
+            ('/', Some('*')) => {
+                chars.next();
+                let mut previous = ' ';
+                for c in chars.by_ref() {
+                    if previous == '*' && c == '/' {
+                        break;
+                    }
+                    if c == '\n' {
+                        stripped.push('\n');
+                    }
+                    previous = c;
+                }
+                stripped.push(' ');
+            }
+            _ => stripped.push(c),
+        }
+    }
+    stripped
+}
+
 fn parse_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T, String> {
     let text = read_text(path).map_err(|error| error.to_string())?;
     serde_json::from_str(&text).map_err(|error| error.to_string())
@@ -686,19 +807,69 @@ struct CodexConfig {
     hooks: BTreeMap<String, HookEvent>,
 }
 
+/// The Gemini CLI's `.gemini/settings.json`, as far as CLI extensions go.
+#[derive(Debug, Default, Deserialize)]
+struct GeminiSettings {
+    #[serde(default)]
+    context: GeminiContext,
+    #[serde(rename = "mcpServers", default)]
+    mcp_servers: BTreeMap<String, McpServer>,
+    #[serde(default)]
+    hooks: BTreeMap<String, HookEvent>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct GeminiContext {
+    #[serde(rename = "fileName", default)]
+    file_name: ContextFileName,
+}
+
+/// `context.fileName`: one name or several.
+#[derive(Debug, Default, Deserialize)]
+#[serde(untagged)]
+enum ContextFileName {
+    #[default]
+    Default,
+    One(String),
+    Several(Vec<String>),
+}
+
+impl ContextFileName {
+    fn names(&self) -> Vec<String> {
+        let names = match self {
+            Self::Default => Vec::new(),
+            Self::One(name) => vec![name.clone()],
+            Self::Several(names) => names.clone(),
+        };
+        // Names only: a path would leave the directory it is looked for in.
+        let names: Vec<String> = names
+            .into_iter()
+            .filter(|name| !name.is_empty() && !name.contains(['/', '\\']))
+            .collect();
+        if names.is_empty() {
+            vec![GEMINI_INSTRUCTIONS.to_owned()]
+        } else {
+            names
+        }
+    }
+}
+
 /// How an MCP server is started or reached; the same keys in Claude Code's
-/// JSON and Codex's TOML.
+/// and the Gemini CLI's JSON and Codex's TOML. The Gemini CLI names a
+/// streamable HTTP server's address `httpUrl`.
 #[derive(Debug, Deserialize)]
 struct McpServer {
     command: Option<String>,
     #[serde(default)]
     args: Vec<String>,
     url: Option<String>,
+    #[serde(rename = "httpUrl")]
+    http_url: Option<String>,
 }
 
 impl McpServer {
     fn launch(self) -> Option<String> {
-        match (self.command, self.url) {
+        match (self.command, self.url.or(self.http_url)) {
             (Some(command), _) => Some(
                 std::iter::once(command)
                     .chain(self.args)
@@ -795,6 +966,16 @@ mod tests {
                 description: Some("Test-driven development.".to_owned()),
             }
         );
+    }
+
+    #[test]
+    fn comments_are_stripped_outside_strings() -> serde_json::Result<()> {
+        let text = "{\n  // a comment\n  \"url\": \"http://x//y\", /* block\n */ \"n\": 1\n}";
+
+        let value: serde_json::Value = serde_json::from_str(&strip_json_comments(text))?;
+
+        assert_eq!(value, serde_json::json!({"url": "http://x//y", "n": 1}));
+        Ok(())
     }
 
     #[test]

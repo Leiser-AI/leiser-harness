@@ -30,6 +30,11 @@ pub const ANTHROPIC_API_KEY: &str = "ANTHROPIC_API_KEY";
 pub const CODEX_HOME: &str = "CODEX_HOME";
 /// The variable the Codex driver's API key provider reads its key from.
 pub const OPENAI_API_KEY: &str = "OPENAI_API_KEY";
+/// The Gemini CLI's home: it keeps its config in `.gemini` below it, one
+/// per Google subscription.
+pub const GEMINI_CLI_HOME: &str = "GEMINI_CLI_HOME";
+/// The Gemini CLI's API key for the Gemini API.
+pub const GEMINI_API_KEY: &str = "GEMINI_API_KEY";
 
 /// Variables that would sign Claude Code in with something other than the
 /// chosen subscription; they rank above a login.
@@ -40,6 +45,14 @@ const CLAUDE_CODE_SIGN_INS: [&str; 3] = [
 ];
 /// The same for Codex.
 const CODEX_SIGN_INS: [&str; 3] = [OPENAI_API_KEY, "CODEX_API_KEY", "OPENAI_BASE_URL"];
+/// The same for the Gemini CLI: other keys, and the switches to Vertex AI
+/// and Code Assist that rank above a login.
+const GEMINI_SIGN_INS: [&str; 4] = [
+    GEMINI_API_KEY,
+    "GOOGLE_API_KEY",
+    "GOOGLE_GENAI_USE_VERTEXAI",
+    "GOOGLE_GENAI_USE_GCA",
+];
 
 /// The name the agent CLI must give the harness MCP server, so agents see
 /// its tools as, for example, `mcp__leiser__read_chat` in Claude Code.
@@ -83,7 +96,7 @@ pub enum Access {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubscriptionAccess {
     /// The agent CLI's config directory: Claude Code's `CLAUDE_CONFIG_DIR`,
-    /// Codex's `CODEX_HOME`.
+    /// Codex's `CODEX_HOME`, the Gemini CLI's `GEMINI_CLI_HOME`.
     pub home: PathBuf,
     /// The API key of an API key subscription, from the OS keychain;
     /// `None` for a login subscription, whose login is kept in `home`.
@@ -95,16 +108,18 @@ impl SubscriptionAccess {
     /// inherited variables that would sign the agent CLI in otherwise.
     #[must_use]
     pub fn environment(&self, agent_cli: AgentCli) -> SubscriptionEnvironment {
-        let (home, api_key, sign_ins) = match agent_cli {
-            AgentCli::ClaudeCode => (CLAUDE_CONFIG_DIR, ANTHROPIC_API_KEY, CLAUDE_CODE_SIGN_INS),
-            AgentCli::Codex => (CODEX_HOME, OPENAI_API_KEY, CODEX_SIGN_INS),
+        let (home, api_key, sign_ins): (_, _, &[&'static str]) = match agent_cli {
+            AgentCli::ClaudeCode => (CLAUDE_CONFIG_DIR, ANTHROPIC_API_KEY, &CLAUDE_CODE_SIGN_INS),
+            AgentCli::Codex => (CODEX_HOME, OPENAI_API_KEY, &CODEX_SIGN_INS),
+            AgentCli::Gemini => (GEMINI_CLI_HOME, GEMINI_API_KEY, &GEMINI_SIGN_INS),
         };
         let mut set = vec![(home, self.home.clone().into_os_string())];
         if let Some(key) = &self.api_key {
             set.push((api_key, OsString::from(key.expose())));
         }
         let remove = sign_ins
-            .into_iter()
+            .iter()
+            .copied()
             .filter(|name| !set.iter().any(|(set, _)| set == name))
             .collect();
         SubscriptionEnvironment { set, remove }
@@ -231,7 +246,7 @@ const PROMPT_WAIT: Duration = Duration::from_millis(100);
 
 /// Passes the stream's lines on. Keeps reading when nobody listens, so the
 /// login never blocks on a full pipe.
-async fn forward_lines(mut stream: impl AsyncRead + Unpin, lines: mpsc::Sender<String>) {
+pub(crate) async fn forward_lines(mut stream: impl AsyncRead + Unpin, lines: mpsc::Sender<String>) {
     let mut pending: Vec<u8> = Vec::new();
     let mut buffer = [0_u8; 1024];
     loop {

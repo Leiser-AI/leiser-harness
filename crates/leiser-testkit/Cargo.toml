@@ -15,6 +15,10 @@ name = "fake-agent-cli"
 path = "src/bin/fake-agent-cli.rs"
 
 [[bin]]
+name = "fake-gemini"
+path = "src/bin/fake-gemini.rs"
+
+[[bin]]
 name = "fake-gh"
 path = "src/bin/fake-gh.rs"
 
