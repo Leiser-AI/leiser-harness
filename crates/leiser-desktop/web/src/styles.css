@@ -6,6 +6,7 @@
 
 @import "./tokens.css";
 @import "./components.css";
+@import "./queue.css";
 
 /* ---- Window layout: sidebar | top bar over chat | side panels ---- */
 

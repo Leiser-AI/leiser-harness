@@ -1,0 +1,12 @@
+{
+  "version": 3,
+  "next_id": 10,
+  "repositories": [
+    {
+      "id": 1,
+      "path": "/nonexistent/queue-fixture"
+    }
+  ],
+  "subscriptions": [],
+  "chats": []
+}

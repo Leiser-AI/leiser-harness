@@ -123,6 +123,18 @@ not in the harness service (ADR 0008): they end with "End shell", when the
 shell exits, and when the app quits. The PTY code is in
 `crates/leiser-terminal`; the screen is xterm.js.
 
+Each repository has a task queue (sidebar: "Task queue"): prompts and
+issues the harness service runs by itself, each in a chat in a new
+worktree, as many at once as the queue allows (1 by default, up to 8). The
+view groups tasks into needs attention (a failed or interrupted turn, a
+usage limit, an approval request), running, queued and done (turn ended,
+pull request open, cancelled). Tasks can be added, moved, cancelled and
+removed, the queue paused and resumed, and every task's chat opened. When
+a task's turn ends or its chat opens its pull request, the next task
+starts; while every subscription a task could run on is at a usage limit,
+the queue waits until a limit resets or the developer resumes it. The
+queue is kept in `queue.json` in the data directory.
+
 ## Run it
 
 Needs Node.js (LTS) and, on Linux, WebKitGTK (see `.github/workflows/ci.yml`).
