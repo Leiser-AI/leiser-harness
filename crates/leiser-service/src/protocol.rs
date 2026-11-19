@@ -6,6 +6,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::queue::{QueueAnswer, QueueCommand, QueueError};
+
 /// A repository added to the harness.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct RepositoryId(pub(crate) u64);
@@ -471,6 +473,11 @@ pub enum Command {
     /// a change is reported as [`Event::WayfinderMapsChanged`]. The first
     /// read of a repository that was not polled yet starts a poll.
     ReadWayfinderMaps { repository: RepositoryId },
+    /// Reads or changes a repository's task queue: tasks the harness
+    /// service runs by itself, each in a chat in a new worktree, as slots
+    /// free up. Answers with [`Response::Queue`]; every change is also
+    /// reported as [`Event::QueueChanged`].
+    Queue { command: QueueCommand },
     /// Reads a chat's todo list.
     ListTodos { chat: ChatId },
     /// Adds a todo at the end of the chat's todo list. Its text is trimmed
@@ -754,6 +761,9 @@ pub enum Response {
     },
     WayfinderMaps {
         maps: WayfinderMaps,
+    },
+    Queue {
+        answer: QueueAnswer,
     },
     Todos {
         todos: Vec<Todo>,
@@ -1484,6 +1494,8 @@ pub enum CommandError {
     Keychain { reason: String },
     #[error("repo-check is not set up in the harness service")]
     RepoCheckNotConfigured,
+    #[error("{error}")]
+    Queue { error: QueueError },
     #[error("repo-check is already running in repository {repository:?}")]
     RepoCheckRunning { repository: RepositoryId },
     #[error("{} holds no CLI extension of this repository", file.display())]
@@ -1701,6 +1713,10 @@ pub enum Event {
     /// read for the first time; read them with
     /// [`Command::ReadWayfinderMaps`].
     WayfinderMapsChanged { repository: RepositoryId },
+    /// The repository's task queue changed: a task was added, moved,
+    /// started or finished, or the queue paused; read it with
+    /// [`QueueCommand::Read`].
+    QueueChanged { repository: RepositoryId },
     /// An update of the harness service waits until no turn runs. Then the
     /// service restarts on the new version and resumes every agent session.
     ServiceUpdateWaiting,
@@ -1734,6 +1750,7 @@ impl Event {
             | Self::RepoCheckStarted { .. }
             | Self::RepoCheckFinished { .. }
             | Self::WayfinderMapsChanged { .. }
+            | Self::QueueChanged { .. }
             | Self::ServiceUpdateWaiting => None,
         }
     }

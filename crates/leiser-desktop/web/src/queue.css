@@ -1,0 +1,143 @@
+/*
+ * The task queue view (`queue.ts`): the queue's status and settings, the
+ * form that adds a task, and the tasks by where they are.
+ */
+
+.queue {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--space-6) var(--space-4);
+}
+
+.queue > * {
+  max-width: var(--content-width);
+  margin-inline: auto;
+}
+
+.queue-header {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
+}
+
+.queue-status,
+.queue-settings,
+.queue-form-options {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.queue-settings {
+  align-items: flex-end;
+  gap: var(--space-3);
+}
+
+.queue-intro {
+  margin: 0;
+  font-size: var(--text-sm);
+}
+
+.queue-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-bottom: var(--space-6);
+  padding: var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-sunken);
+}
+
+.queue-prompt {
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  font: inherit;
+}
+
+.queue-issue {
+  max-width: 220px;
+}
+
+.queue-form-options button[type="submit"] {
+  margin-left: auto;
+}
+
+.queue-section + .queue-section {
+  margin-top: var(--space-5);
+}
+
+.queue-list {
+  margin: var(--space-2) 0 0;
+  padding: 0;
+  list-style: none;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+.queue-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+}
+
+.queue-item + .queue-item {
+  border-top: 1px solid var(--color-border);
+}
+
+.queue-item.needs_attention .queue-item-note {
+  color: var(--color-warning);
+}
+
+.queue-item-text {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: var(--space-half);
+  min-width: 0;
+}
+
+.queue-item-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: var(--weight-medium);
+}
+
+.queue-item-note {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--color-text-muted);
+  font-size: var(--text-sm);
+}
+
+.queue-item-badges,
+.queue-item-actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+/* The chevron points right; up and down turn it. */
+.queue-up .icon {
+  transform: rotate(-90deg);
+}
+
+.queue-down .icon {
+  transform: rotate(90deg);
+}
+
+.queue-link .chat-title {
+  flex: none;
+  color: var(--color-text-muted);
+}
+
+.chat-link.queue-link.selected .chat-title {
+  color: var(--color-text);
+}

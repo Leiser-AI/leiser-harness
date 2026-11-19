@@ -27,6 +27,9 @@ import type {
   PermissionMode,
   Provider,
   PullRequest,
+  QueueAnswer,
+  QueueCommand,
+  QueueError,
   QueueReason,
   RepoCheck,
   RepositoryId,
@@ -194,6 +197,8 @@ function describe(error: CommandError): string {
       return `Not saved: the agent CLI could not read ${error.file} any more. ${error.reason}`;
     case "cli_extension_file_access":
       return `Could not access ${error.file}: ${error.reason}`;
+    case "queue":
+      return describeQueueError(error.error);
     case "service_stopped":
       return "The harness service has stopped.";
     case "unreadable_command":
@@ -477,6 +482,31 @@ export async function runRepoCheck(repository: RepositoryId): Promise<void> {
 export async function readRepoCheck(repository: RepositoryId): Promise<RepoCheck> {
   const response = await execute({ type: "read_repo_check", repository });
   return response.type === "repo_check" ? response.check : unexpected(response);
+}
+
+function describeQueueError(error: QueueError): string {
+  switch (error.type) {
+    case "unknown_item":
+      return "This task is no longer in the queue.";
+    case "empty_prompt":
+      return "A task needs a prompt.";
+    case "invalid_issue":
+      return "Enter the number of an issue, starting at 1.";
+    case "invalid_concurrency":
+      return `A queue runs 1 to ${error.max} tasks at once.`;
+    case "not_queued":
+      return "Only queued tasks can be moved.";
+    case "still_active":
+      return "The task is still queued or running; cancel it first.";
+    case "finished":
+      return "The task is finished already.";
+  }
+}
+
+/** Runs a command on a repository's task queue; answers with the queue after it. */
+export async function queueCommand(command: QueueCommand): Promise<QueueAnswer> {
+  const response = await execute({ type: "queue", command });
+  return response.type === "queue" ? response.answer : unexpected(response);
 }
 
 /** The repository's open wayfinder maps, as the harness last read them. */

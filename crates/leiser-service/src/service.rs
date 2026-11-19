@@ -32,6 +32,7 @@ use crate::worktree::{self, WorktreeError};
 mod auto_fix;
 mod polls;
 mod pull_requests;
+mod queue;
 mod wayfinder;
 
 use crate::{
@@ -45,6 +46,7 @@ use crate::{
 };
 use auto_fix::{AutoFixWork, ChatAutoFix};
 use pull_requests::{ChatPullRequest, PullRequestWork};
+use queue::QueueWork;
 use wayfinder::{RepositoryMaps, WayfinderWork};
 
 /// Commands waiting for the command loop. Small, so callers feel back
@@ -84,6 +86,8 @@ pub struct ServiceConfig {
     pull_request_poll_interval: Duration,
     /// How often repositories' wayfinder maps are polled.
     wayfinder_poll_interval: Duration,
+    /// How often the task queue looks whether usage limits have reset.
+    queue_interval: Duration,
 }
 
 impl ServiceConfig {
@@ -109,7 +113,16 @@ impl ServiceConfig {
             git_host: None,
             pull_request_poll_interval: auto_fix::POLL_INTERVAL,
             wayfinder_poll_interval: wayfinder::POLL_INTERVAL,
+            queue_interval: queue::TICK_INTERVAL,
         }
+    }
+
+    /// Lets the task queue look every `interval`, instead of every 30
+    /// seconds, whether usage limits it waits for have reset.
+    #[must_use]
+    pub fn with_queue_interval(mut self, interval: Duration) -> Self {
+        self.queue_interval = interval;
+        self
     }
 
     /// Polls repositories' wayfinder maps every `interval` instead of
@@ -589,6 +602,7 @@ enum Background {
     PullRequest(PullRequestWork),
     AutoFix(AutoFixWork),
     Wayfinder(WayfinderWork),
+    Queue(QueueWork),
 }
 
 /// A repository's `repo-check`, once it has run or runs.
@@ -727,6 +741,10 @@ struct State {
     wayfinder_poll_interval: Duration,
     /// Repositories' wayfinder maps, once read.
     wayfinder: BTreeMap<RepositoryId, RepositoryMaps>,
+    /// Every repository's task queue.
+    queue: crate::queue::Queue,
+    /// How often the task queue looks whether usage limits have reset.
+    queue_interval: Duration,
     host_accounts: HostAccounts,
     host_account_logins: BTreeMap<HostAccountId, Login>,
     next_id: u64,
@@ -767,6 +785,7 @@ impl State {
         );
         let host_accounts = HostAccounts::load(stored.host_accounts, store.host_accounts_dir());
         let checkpoints = stored_checkpoints(&store, chats.keys())?;
+        let queue = crate::queue::Queue::load(&store)?;
         let status_changes = chats
             .values()
             .map(|chat| chat.shown.1)
@@ -794,6 +813,8 @@ impl State {
             pull_request_poll_interval: config.pull_request_poll_interval,
             wayfinder_poll_interval: config.wayfinder_poll_interval,
             wayfinder: BTreeMap::new(),
+            queue,
+            queue_interval: config.queue_interval,
             host_accounts,
             host_account_logins: BTreeMap::new(),
             next_id: stored.next_id,
@@ -833,6 +854,8 @@ impl State {
         polls.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut map_polls = tokio::time::interval(self.wayfinder_poll_interval);
         map_polls.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut queue_ticks = tokio::time::interval(self.queue_interval);
+        queue_ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tokio::select! {
                 biased;
@@ -843,6 +866,7 @@ impl State {
                 Some(finished) = background.recv() => self.on_background(finished).await,
                 _ = polls.tick() => self.poll_pull_requests(),
                 _ = map_polls.tick() => self.poll_wayfinder_maps(),
+                _ = queue_ticks.tick() => self.queue.wake(),
                 // Never closes: the harness MCP server holds a sender.
                 Some(call) = calls.recv() => self.on_call(call),
                 Some(()) = updates.recv(), if !self.update_waiting => {
@@ -853,6 +877,9 @@ impl State {
                 else => break,
             }
             self.note_status_changes();
+            // Before the update check: a task that just ended frees its
+            // slot, and none starts while the update waits.
+            self.run_queue().await;
             // Checked after every step, so a turn that ends and starts the
             // next queued message keeps the update waiting.
             if self.update_waiting && self.nothing_running() {
@@ -947,6 +974,7 @@ impl State {
             Command::RunRepoCheck { repository } => self.run_repo_check(repository),
             Command::ReadRepoCheck { repository } => self.read_repo_check(repository),
             Command::ReadWayfinderMaps { repository } => self.read_wayfinder_maps(repository),
+            Command::Queue { command } => self.execute_queue(command).await,
             command @ (Command::ListTodos { .. }
             | Command::AddTodo { .. }
             | Command::SetTodoDone { .. }
@@ -965,14 +993,24 @@ impl State {
                 self.save_cli_extension_file(repository, file, text, previous)
                     .await
             }
+            command @ (Command::ListCheckpoints { .. }
+            | Command::ReadDiff { .. }
+            | Command::RestoreCheckpoint { .. }) => self.execute_checkpoint(command).await,
+        };
+        // The caller may have stopped waiting; nothing to do then.
+        let _ = reply.send(result);
+    }
+
+    async fn execute_checkpoint(&mut self, command: Command) -> Result<Response, CommandError> {
+        match command {
             Command::ListCheckpoints { chat } => self.list_checkpoints(chat).await,
             Command::ReadDiff { chat, range } => self.read_diff(chat, range).await,
             Command::RestoreCheckpoint { chat, turn, moment } => {
                 self.restore(chat, turn, moment).await
             }
-        };
-        // The caller may have stopped waiting; nothing to do then.
-        let _ = reply.send(result);
+            // `execute` sends only the commands above here.
+            _ => Err(CommandError::ServiceStopped),
+        }
     }
 
     fn execute_todo(&mut self, command: Command) -> Result<Response, CommandError> {
@@ -1404,6 +1442,7 @@ impl State {
             Background::PullRequest(work) => self.pull_request_finished(work),
             Background::AutoFix(work) => self.auto_fix_finished(work).await,
             Background::Wayfinder(work) => self.wayfinder_polled(work),
+            Background::Queue(work) => self.queue_work_finished(work).await,
         }
     }
 

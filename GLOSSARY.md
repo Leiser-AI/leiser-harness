@@ -87,6 +87,15 @@ review comment comes in, then pushing the agent's fix. On by default, set
 per chat; merging stays with the developer.
 _Avoid_: autopilot, PR bot, watcher
 
+**Task queue**:
+A repository's line of tasks, each a prompt or an issue, that the harness
+service runs by itself: each task in a chat of its own in a new worktree,
+as many at once as the developer allows. It starts the next task when a
+task's turn ends or its chat opens its pull request, and waits while every
+subscription a task could run on is at a usage limit. Not the messages a
+chat queues behind its running turn.
+_Avoid_: backlog, job queue, batch
+
 **Wayfinder map**:
 A plan for work too big for one chat, kept on the git host as an issue
 labelled `wayfinder:map` whose sub-issues are its tickets. The desktop app

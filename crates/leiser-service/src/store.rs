@@ -24,6 +24,9 @@
 //!   themselves live in the repository, under hidden refs (see
 //!   `checkpoint.rs`). Added in version 3 without a version bump, as the
 //!   todo lists were.
+//! - `queue.json`: every repository's task queue, replaced atomically on
+//!   every change. It has its own storage version (see `queue.rs`) and was
+//!   added without a version bump of `state.json`.
 //!
 //! The stored types are separate from the protocol types, except for
 //! [`TranscriptEntry`] and the `repo-check` report. A change that old data no longer parses with bumps
@@ -756,6 +759,34 @@ impl Store {
             .open(&path)
             .and_then(|file| file.set_len(u64::try_from(complete).map_err(io::Error::other)?))
             .map_err(io_error)
+    }
+
+    /// The path of a file directly in the data directory.
+    pub fn file_path(&self, name: &str) -> PathBuf {
+        self.dir.join(name)
+    }
+
+    /// Reads a file directly in the data directory; `None` when there is
+    /// none.
+    pub fn read_file(&self, name: &str) -> Result<Option<Vec<u8>>, StorageError> {
+        let path = self.file_path(name);
+        match fs::read(&path) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(source) => Err(StorageError::Io { path, source }),
+        }
+    }
+
+    /// Replaces a file directly in the data directory atomically with
+    /// `value` as JSON.
+    pub fn write_json(&self, name: &str, value: &impl Serialize) -> Result<(), StorageError> {
+        let path = self.file_path(name);
+        let mut bytes = serde_json::to_vec_pretty(value).map_err(|source| StorageError::Io {
+            path: path.clone(),
+            source: source.into(),
+        })?;
+        bytes.push(b'\n');
+        replace(&path, &bytes)
     }
 
     /// The directory that holds one directory per subscription.

@@ -46,6 +46,11 @@
 //! of the chat's files as a commit under a hidden git ref. The diff panel
 //! reads a turn's changes and the branch's from them, and the developer
 //! can put the files back to any checkpoint.
+//!
+//! Each repository has a task queue: prompts and issues the harness
+//! service runs by itself, each in a chat in a new worktree, as many at
+//! once as the developer allows. It waits while every subscription a task
+//! could run on is at a usage limit.
 
 mod checkpoint;
 mod claude_code;
@@ -63,6 +68,7 @@ mod keychain;
 mod local_interface;
 mod program;
 mod protocol;
+mod queue;
 mod repo_check;
 mod repo_config;
 mod script;
@@ -105,6 +111,10 @@ pub use protocol::{
     SignIn, StartOn, SubscriptionId, SubscriptionKind, SubscriptionOverview, SwitchedOffCheck,
     Ticket, TicketState, TicketType, Todo, TodoId, TranscriptEntry, TurnCheckpoints,
     UnreadableCliExtensionFile, UsageLimit, WayfinderMap, WayfinderMaps,
+};
+pub use queue::{
+    AttentionReason, MAX_CONCURRENCY, QueueAnswer, QueueCommand, QueueError, QueueItem,
+    QueueItemId, QueueItemState, QueueSettings, QueueStatus, QueueTask, RepositoryQueue,
 };
 pub use service::{Service, ServiceConfig, ServiceHandle, StartError, start};
 pub use store::StorageError;
