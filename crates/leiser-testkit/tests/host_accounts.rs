@@ -504,9 +504,7 @@ async fn a_failed_removal_keeps_the_host_account_and_its_files() -> TestResult {
     let before = host_accounts(&service).await?;
     let marker = before[0].config_dir.join("settings");
     std::fs::write(&marker, "configured")?;
-    let state = harness.data_dir().join("state.json");
-    std::fs::rename(&state, state.with_extension("backup"))?;
-    std::fs::create_dir(&state)?;
+    harness.block_state_saves()?;
 
     let result = service
         .execute(Command::RemoveHostAccount {
@@ -556,11 +554,19 @@ async fn restart_finishes_interrupted_host_account_cleanup() -> TestResult {
         })
         .await;
     assert!(matches!(result, Err(CommandError::Storage { .. })));
+    let stored: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(harness.data_dir().join("state.json"))?)?;
+    assert!(
+        stored["version"]
+            .as_u64()
+            .is_some_and(|version| version > 3),
+        "an older service could discard the pending removal"
+    );
     std::fs::remove_file(dir)?;
     std::fs::rename(moved, dir)?;
 
     let harness = harness.restart().await?;
-    assert!(host_accounts(&harness.connect()).await?.is_empty());
+    assert_eq!(host_accounts(&harness.connect()).await?, Vec::new());
     assert!(!dir.exists());
     Ok(())
 }

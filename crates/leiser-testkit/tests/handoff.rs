@@ -144,7 +144,7 @@ async fn harness_mcp_answers(url: String) -> TestResult<bool> {
 
 #[tokio::test]
 async fn stopping_the_service_closes_its_mcp_connections_and_listener() -> TestResult {
-    use tokio::io::AsyncReadExt;
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
     use tokio::net::TcpStream;
 
     let script = Script::new().turn([Step::ReportHarnessMcpUrl]);
@@ -157,7 +157,23 @@ async fn stopping_the_service_closes_its_mcp_connections_and_listener() -> TestR
         .strip_prefix("http://")
         .and_then(|url| url.split('/').next())
         .ok_or("expected an HTTP address")?;
-    let mut connection = TcpStream::connect(address).await?;
+    let mut connection = BufReader::new(TcpStream::connect(address).await?);
+    connection
+        .get_mut()
+        .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .await?;
+    let mut header = String::new();
+    connection.read_line(&mut header).await?;
+    assert!(header.starts_with("HTTP/1.1 404"));
+    loop {
+        header.clear();
+        if connection.read_line(&mut header).await? == 0 {
+            return Err("unexpected EOF".into());
+        }
+        if header == "\r\n" {
+            break;
+        }
+    }
 
     drop(harness);
     service.stopped().await;

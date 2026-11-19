@@ -59,6 +59,8 @@ use crate::{
 ///   whether a subscription is interchangeable (no), and a chat's usage
 ///   limit and the messages it holds back (none).
 const VERSION: u32 = 3;
+/// An older service must refuse a snapshot while cleanup is outstanding.
+const CLEANUP_VERSION: u32 = 4;
 
 const STATE_FILE: &str = "state.json";
 const CHATS_DIR: &str = "chats";
@@ -121,12 +123,12 @@ pub(crate) struct StateV3 {
     pub chats: Vec<ChatV3>,
     /// Registrations already removed whose files or key still need cleanup.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub pending_removals: Vec<AccountRemoval>,
+    pub pending_removals: Vec<PendingRemoval>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum AccountRemoval {
+pub(crate) enum PendingRemoval {
     HostAccount(crate::HostAccountId),
     Subscription(crate::SubscriptionId, SubscriptionKind),
 }
@@ -607,7 +609,11 @@ impl Store {
     pub fn save(&self, state: &StateV3) -> Result<(), StorageError> {
         let path = self.dir.join(STATE_FILE);
         let mut bytes = serde_json::to_vec_pretty(&VersionedRef {
-            version: VERSION,
+            version: if state.pending_removals.is_empty() {
+                VERSION
+            } else {
+                CLEANUP_VERSION
+            },
             state,
         })
         .map_err(|source| StorageError::Io {
@@ -874,14 +880,14 @@ fn parse_state(path: &Path, bytes: &[u8]) -> Result<Stored, StorageError> {
                 .map_err(corrupt)?
                 .state,
         )),
-        3 => Ok(Stored::V3(
+        VERSION | CLEANUP_VERSION => Ok(Stored::V3(
             serde_json::from_slice::<VersionedV3>(bytes)
                 .map_err(corrupt)?
                 .state,
         )),
         found => Err(StorageError::UnsupportedVersion {
             found,
-            supported: VERSION,
+            supported: CLEANUP_VERSION,
         }),
     }
 }

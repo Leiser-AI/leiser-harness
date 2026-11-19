@@ -505,3 +505,17 @@ impl RawClient {
         }
     }
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_stale_temporary_file_cannot_change_endpoint_permissions() -> TestResult {
+    use std::os::unix::fs::PermissionsExt;
+    let harness = start_service(&Script::new())?;
+    let path = harness.data_dir().join(ENDPOINT_FILE);
+    let stale = path.with_extension("json.tmp");
+    std::fs::write(&stale, [])?;
+    std::fs::set_permissions(&stale, std::fs::Permissions::from_mode(0o644))?;
+    let _interface = leiser_service::serve(harness.connect(), harness.data_dir()).await?;
+    assert_eq!(std::fs::metadata(path)?.permissions().mode() & 0o077, 0);
+    Ok(())
+}

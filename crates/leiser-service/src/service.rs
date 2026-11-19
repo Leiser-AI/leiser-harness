@@ -22,7 +22,7 @@ use crate::keychain::KeychainError;
 use crate::repo_check::{self, Outcome};
 use crate::repo_config::RepositoryConfig;
 use crate::store::{
-    AccountRemoval, AgentSessionV2, ChatSubscriptionV3, ChatV3, CheckpointsV1, HandoffV2,
+    AgentSessionV2, ChatSubscriptionV3, ChatV3, CheckpointsV1, HandoffV2, PendingRemoval,
     RepositoryV1, StateV3, StorageError, Store, TurnCheckpointsV1, UsageLimitV3,
 };
 use crate::subscriptions::{SubscriptionError, Subscriptions};
@@ -40,8 +40,8 @@ use crate::{
     DiffRange, Driver, Event, HostAccountBinding, HostAccountId, Keychain, LoginAnswer,
     LoginOutcome, LoginProcess, OptOuts, OsKeychain, PermissionMode, Provider, QueueReason,
     RepoCheck, RepositoryId, RepositoryOverview, RepositoryScript, Response, SessionInput,
-    SessionSpec, SignIn, StartOn, SubscriptionAccess, SubscriptionId, SubscriptionKind, TodoId,
-    TranscriptEntry, TurnCheckpoints, UsageLimit, script,
+    SessionSpec, SignIn, StartOn, SubscriptionId, SubscriptionKind, TodoId, TranscriptEntry,
+    TurnCheckpoints, UsageLimit, script,
 };
 use auto_fix::{AutoFixWork, ChatAutoFix};
 use pull_requests::{ChatPullRequest, PullRequestWork};
@@ -220,8 +220,8 @@ pub fn start(config: ServiceConfig) -> Result<Service, StartError> {
         },
     )?;
     for removal in state.pending_removals.clone() {
-        if let Err(error) = state.finish_account_removal(removal) {
-            tracing::warn!(%error, "could not finish removing an account");
+        if let Err(error) = state.finish_removal(removal) {
+            tracing::warn!(%error, "could not finish removing a registration");
         }
     }
     state.resume_all();
@@ -603,7 +603,9 @@ enum Background {
 
 /// A repository's `repo-check`, once it has run or runs.
 enum CheckState {
-    Running,
+    Running {
+        subscription: Option<SubscriptionId>,
+    },
     Finished(Outcome),
 }
 
@@ -662,6 +664,7 @@ enum SessionMessage {
 struct Login {
     task: JoinHandle<()>,
     input: mpsc::Sender<String>,
+    stop: Option<oneshot::Sender<()>>,
     /// Set before [`Event::LoginFinished`] goes out.
     finished: Arc<AtomicBool>,
 }
@@ -681,10 +684,22 @@ impl Login {
         } = process;
         let finished = Arc::new(AtomicBool::new(false));
         let finished_flag = finished.clone();
+        let (stop, mut stopped) = oneshot::channel();
         let task = tokio::spawn(async move {
             // No subscriber is not an error: the desktop app may be closed.
-            while let Some(text) = output.recv().await {
-                let _ = events.send(output_event(text));
+            let mut outcome = outcome;
+            loop {
+                tokio::select! {
+                    _ = &mut stopped => {
+                        outcome.close();
+                        while output.recv().await.is_some() {}
+                        return;
+                    }
+                    text = output.recv() => match text {
+                        Some(text) => { let _ = events.send(output_event(text)); }
+                        None => break,
+                    }
+                }
             }
             let outcome = outcome.await.unwrap_or_else(|_| LoginOutcome::Failed {
                 reason: "the login stopped".to_owned(),
@@ -696,7 +711,15 @@ impl Login {
             task,
             input,
             finished,
+            stop: Some(stop),
         }
+    }
+
+    async fn stop(mut self) {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+        let _ = (&mut self.task).await;
     }
 
     fn running(&self) -> bool {
@@ -738,7 +761,7 @@ struct State {
     /// Repositories' wayfinder maps, once read.
     wayfinder: BTreeMap<RepositoryId, RepositoryMaps>,
     host_accounts: HostAccounts,
-    pending_removals: Vec<AccountRemoval>,
+    pending_removals: Vec<PendingRemoval>,
     host_account_logins: BTreeMap<HostAccountId, Login>,
     next_id: u64,
     generation: u64,
@@ -783,10 +806,10 @@ impl State {
             .filter(|removal| {
                 // Never apply a stale cleanup record to a live or future ID.
                 match *removal {
-                    AccountRemoval::HostAccount(id) => {
+                    PendingRemoval::HostAccount(id) => {
                         id.0 <= stored.next_id && !host_accounts.contains(id)
                     }
-                    AccountRemoval::Subscription(id, _) => {
+                    PendingRemoval::Subscription(id, _) => {
                         id.0 <= stored.next_id && !subscriptions.contains(id)
                     }
                 }
@@ -933,37 +956,19 @@ impl State {
                 request,
                 answer,
             } => self.answer_request(chat, request, answer).await,
-            Command::AddSubscription {
-                provider,
-                name,
-                sign_in,
-            } => self.add_subscription(provider, &name, &sign_in),
-            Command::RenameSubscription { subscription, name } => {
-                self.rename_subscription(subscription, &name)
-            }
-            Command::RemoveSubscription { subscription } => self.remove_subscription(subscription),
-            Command::LogIn { subscription } => self.log_in(subscription),
-            Command::AnswerLogin {
-                subscription,
-                answer,
-            } => self.answer_login(subscription, &answer).await,
-            Command::ListSubscriptions => Ok(self.list_subscriptions()),
-            Command::SetInterchangeable {
-                subscription,
-                interchangeable,
-            } => self.set_interchangeable(subscription, interchangeable),
-            Command::ContinueOnSubscription { chat, subscription } => {
-                self.continue_on_subscription(chat, subscription).await
-            }
-            Command::ChangeSubscription {
-                chat,
-                provider,
-                subscription,
-            } => self.change_subscription(chat, provider, subscription),
+            command @ (Command::AddSubscription { .. }
+            | Command::RenameSubscription { .. }
+            | Command::RemoveSubscription { .. }
+            | Command::LogIn { .. }
+            | Command::AnswerLogin { .. }
+            | Command::ListSubscriptions
+            | Command::SetInterchangeable { .. }
+            | Command::ContinueOnSubscription { .. }
+            | Command::ChangeSubscription { .. }) => self.execute_subscription(command).await,
             command @ (Command::AddHostAccount { .. }
             | Command::RemoveHostAccount { .. }
             | Command::LogInHostAccount { .. }
-            | Command::ListHostAccounts) => self.execute_host_account(command),
+            | Command::ListHostAccounts) => self.execute_host_account(command).await,
             command @ (Command::Push { .. }
             | Command::OpenPullRequest { .. }
             | Command::CheckPullRequest { .. }
@@ -1094,27 +1099,27 @@ impl State {
             .repo_check
             .clone()
             .ok_or(CommandError::RepoCheckNotConfigured)?;
-        if let Some(CheckState::Running) = self.repo_checks.get(&repository) {
+        if let Some(CheckState::Running { .. }) = self.repo_checks.get(&repository) {
             return Err(CommandError::RepoCheckRunning { repository });
         }
         let path = path.clone();
-        let started = self
-            .repo_check_subscription(&path)
-            .and_then(|subscription| {
-                driver
-                    .start(SessionSpec {
-                        working_directory: path,
-                        harness_mcp_url: None,
-                        access: Access::ReadOnly,
-                        // A read-only agent session asks nothing.
-                        permission_mode: PermissionMode::Supervised,
-                        subscription,
-                    })
-                    .map_err(|error| CommandError::AgentCli {
-                        reason: error.to_string(),
-                    })
-            });
-        let session = match started {
+        let started = self.repo_check_subscription(&path).and_then(|id| {
+            let subscription = id.map(|id| self.subscriptions.access(id)).transpose()?;
+            driver
+                .start(SessionSpec {
+                    working_directory: path,
+                    harness_mcp_url: None,
+                    access: Access::ReadOnly,
+                    // A read-only agent session asks nothing.
+                    permission_mode: PermissionMode::Supervised,
+                    subscription,
+                })
+                .map(|session| (id, session))
+                .map_err(|error| CommandError::AgentCli {
+                    reason: error.to_string(),
+                })
+        });
+        let (subscription, session) = match started {
             Ok(session) => session,
             Err(error) => {
                 let reason = match &error {
@@ -1125,7 +1130,8 @@ impl State {
                 return Err(error);
             }
         };
-        self.repo_checks.insert(repository, CheckState::Running);
+        self.repo_checks
+            .insert(repository, CheckState::Running { subscription });
         self.emit(Event::RepoCheckStarted { repository });
         let background = self.background.clone();
         tokio::spawn(async move {
@@ -1151,7 +1157,7 @@ impl State {
     fn repo_check_subscription(
         &self,
         repository: &Path,
-    ) -> Result<Option<SubscriptionAccess>, CommandError> {
+    ) -> Result<Option<SubscriptionId>, CommandError> {
         let Ok(config) = RepositoryConfig::load(repository) else {
             return Ok(None);
         };
@@ -1165,7 +1171,7 @@ impl State {
                 provider: Provider::Anthropic,
                 name: name.clone(),
             })?;
-        Ok(Some(self.subscriptions.access(subscription)?))
+        Ok(Some(subscription))
     }
 
     fn finish_repo_check(&mut self, repository: RepositoryId, outcome: Outcome) {
@@ -1186,7 +1192,7 @@ impl State {
             .ok_or(CommandError::UnknownRepository { repository })?;
         let check = match self.repo_checks.get(&repository) {
             None => RepoCheck::NotRun,
-            Some(CheckState::Running) => RepoCheck::Running,
+            Some(CheckState::Running { .. }) => RepoCheck::Running,
             Some(CheckState::Finished(Outcome::Done { report })) => {
                 match RepositoryConfig::load(path) {
                     Ok(config) => RepoCheck::Done {
@@ -1475,8 +1481,10 @@ impl State {
         self.emit(Event::ScriptStarted { chat: id, script });
         self.background_running += 1;
         tokio::spawn(async move {
-            let finished = script::run(&text, &working_directory, &repository).await;
-            // The service has stopped; the script ran in vain.
+            let finished = tokio::select! {
+                finished = script::run(&text, &working_directory, &repository) => finished,
+                () = background.closed() => return,
+            };
             let _ = background
                 .send(Background::ScriptFinished {
                     chat: id,
@@ -2193,7 +2201,42 @@ impl State {
         Ok(())
     }
 
-    fn add_subscription(
+    async fn execute_subscription(&mut self, command: Command) -> Result<Response, CommandError> {
+        match command {
+            Command::AddSubscription {
+                provider,
+                name,
+                sign_in,
+            } => self.add_subscription(provider, &name, &sign_in).await,
+            Command::RenameSubscription { subscription, name } => {
+                self.rename_subscription(subscription, &name)
+            }
+            Command::RemoveSubscription { subscription } => {
+                self.remove_subscription(subscription).await
+            }
+            Command::LogIn { subscription } => self.log_in(subscription).await,
+            Command::AnswerLogin {
+                subscription,
+                answer,
+            } => self.answer_login(subscription, &answer).await,
+            Command::ListSubscriptions => Ok(self.list_subscriptions()),
+            Command::SetInterchangeable {
+                subscription,
+                interchangeable,
+            } => self.set_interchangeable(subscription, interchangeable),
+            Command::ContinueOnSubscription { chat, subscription } => {
+                self.continue_on_subscription(chat, subscription).await
+            }
+            Command::ChangeSubscription {
+                chat,
+                provider,
+                subscription,
+            } => self.change_subscription(chat, provider, subscription),
+            _ => Err(CommandError::ServiceStopped),
+        }
+    }
+
+    async fn add_subscription(
         &mut self,
         provider: Provider,
         name: &str,
@@ -2216,7 +2259,7 @@ impl State {
             return Err(error);
         }
         if let SignIn::Login = sign_in {
-            self.start_login(subscription, provider)?;
+            self.start_login(subscription, provider).await?;
         }
         Ok(Response::SubscriptionAdded { subscription })
     }
@@ -2254,20 +2297,25 @@ impl State {
         Ok(Response::SubscriptionRenamed)
     }
 
-    fn remove_subscription(
+    async fn remove_subscription(
         &mut self,
         subscription: SubscriptionId,
     ) -> Result<Response, CommandError> {
         if let Some(removal) = self.pending_removals.iter().copied().find(
-            |removal| matches!(removal, AccountRemoval::Subscription(id, _) if *id == subscription),
+            |removal| matches!(removal, PendingRemoval::Subscription(id, _) if *id == subscription),
         ) {
-            self.finish_account_removal(removal)?;
+            self.finish_removal(removal)?;
             return Ok(Response::SubscriptionRemoved);
         }
         let provider = self
             .subscriptions
             .provider(subscription)
             .ok_or(CommandError::UnknownSubscription { subscription })?;
+        if let Some((&repository, _)) = self.repo_checks.iter().find(|(_, state)| {
+            matches!(state, CheckState::Running { subscription: Some(id) } if *id == subscription)
+        }) {
+            return Err(CommandError::RepoCheckRunning { repository });
+        }
         let users: Vec<ChatId> = self
             .chats
             .iter()
@@ -2285,20 +2333,23 @@ impl State {
             .subscriptions
             .kind(subscription)
             .ok_or(CommandError::UnknownSubscription { subscription })?;
-        let removal = AccountRemoval::Subscription(subscription, kind);
-        self.begin_account_removal(removal)?;
-        self.logins.remove(&subscription);
+        let removal = PendingRemoval::Subscription(subscription, kind);
+        self.begin_removal(removal)?;
+        self.subscriptions.forget(subscription);
+        if let Some(login) = self.logins.remove(&subscription) {
+            login.stop().await;
+        }
         for id in users {
             if let Some(chat) = self.chats.get_mut(&id) {
                 // Its config directory is about to go.
                 chat.session = None;
             }
         }
-        self.finish_account_removal(removal)?;
+        self.finish_removal(removal)?;
         Ok(Response::SubscriptionRemoved)
     }
 
-    fn log_in(&mut self, subscription: SubscriptionId) -> Result<Response, CommandError> {
+    async fn log_in(&mut self, subscription: SubscriptionId) -> Result<Response, CommandError> {
         let provider = self
             .subscriptions
             .provider(subscription)
@@ -2306,7 +2357,7 @@ impl State {
         if self.subscriptions.kind(subscription) != Some(SubscriptionKind::Login) {
             return Err(CommandError::NotALoginSubscription { subscription });
         }
-        self.start_login(subscription, provider)?;
+        self.start_login(subscription, provider).await?;
         Ok(Response::LoginStarted)
     }
 
@@ -2318,12 +2369,14 @@ impl State {
     /// Runs the agent CLI's login in the subscription's config directory
     /// and reports its output and end as events. Stops a login of the
     /// subscription that still runs.
-    fn start_login(
+    async fn start_login(
         &mut self,
         subscription: SubscriptionId,
         provider: Provider,
     ) -> Result<(), CommandError> {
-        self.logins.remove(&subscription);
+        if let Some(login) = self.logins.remove(&subscription) {
+            login.stop().await;
+        }
         let driver = self.login_driver(provider)?;
         let access = self.subscriptions.access(subscription)?;
         let process = driver
@@ -2362,7 +2415,7 @@ impl State {
         Ok(Response::LoginAnswered)
     }
 
-    fn execute_host_account(&mut self, command: Command) -> Result<Response, CommandError> {
+    async fn execute_host_account(&mut self, command: Command) -> Result<Response, CommandError> {
         match command {
             Command::AddHostAccount {
                 name,
@@ -2370,9 +2423,12 @@ impl State {
                 login,
                 author,
             } => self.add_host_account(&name, &git_host, &login, &author),
-            Command::RemoveHostAccount { host_account } => self.remove_host_account(host_account),
+            Command::RemoveHostAccount { host_account } => {
+                self.remove_host_account(host_account).await
+            }
             Command::LogInHostAccount { host_account } => self
                 .log_in_host_account(host_account)
+                .await
                 .map(|()| Response::HostAccountLoginStarted),
             Command::ListHostAccounts => Ok(self.list_host_accounts()),
             // The command loop sends only the commands above.
@@ -2417,49 +2473,48 @@ impl State {
         Ok(Response::HostAccountAdded { host_account })
     }
 
-    fn remove_host_account(
+    async fn remove_host_account(
         &mut self,
         host_account: HostAccountId,
     ) -> Result<Response, CommandError> {
-        let removal = AccountRemoval::HostAccount(host_account);
+        let removal = PendingRemoval::HostAccount(host_account);
         if !self.pending_removals.contains(&removal) {
             if !self.host_accounts.contains(host_account) {
                 return Err(CommandError::UnknownHostAccount { host_account });
             }
-            self.begin_account_removal(removal)?;
-            self.host_account_logins.remove(&host_account);
+            self.begin_removal(removal)?;
+            self.host_accounts.forget(host_account);
+            if let Some(login) = self.host_account_logins.remove(&host_account) {
+                login.stop().await;
+            }
         }
-        self.finish_account_removal(removal)?;
+        self.finish_removal(removal)?;
         Ok(Response::HostAccountRemoved)
     }
 
     /// Commit the registry change and the cleanup intent together before
     /// ending logins or touching their files. IDs are never reused.
-    fn begin_account_removal(&mut self, removal: AccountRemoval) -> Result<(), CommandError> {
+    fn begin_removal(&mut self, removal: PendingRemoval) -> Result<(), CommandError> {
         let mut state = self.snapshot();
         match removal {
-            AccountRemoval::Subscription(id, _) => state.subscriptions.retain(|s| s.id != id.0),
-            AccountRemoval::HostAccount(id) => state.host_accounts.retain(|a| a.id != id.0),
+            PendingRemoval::Subscription(id, _) => state.subscriptions.retain(|s| s.id != id.0),
+            PendingRemoval::HostAccount(id) => state.host_accounts.retain(|a| a.id != id.0),
         }
         state.pending_removals.push(removal);
         self.store.save(&state)?;
         self.pending_removals = state.pending_removals;
-        match removal {
-            AccountRemoval::Subscription(id, _) => self.subscriptions.forget(id),
-            AccountRemoval::HostAccount(id) => self.host_accounts.forget(id),
-        }
         Ok(())
     }
 
-    fn finish_account_removal(&mut self, removal: AccountRemoval) -> Result<(), CommandError> {
+    fn finish_removal(&mut self, removal: PendingRemoval) -> Result<(), CommandError> {
         let path = match removal {
-            AccountRemoval::Subscription(id, kind) => {
+            PendingRemoval::Subscription(id, kind) => {
                 if kind == SubscriptionKind::ApiKey {
                     self.subscriptions.delete_key(id)?;
                 }
                 self.store.subscriptions_dir().join(id.0.to_string())
             }
-            AccountRemoval::HostAccount(id) => {
+            PendingRemoval::HostAccount(id) => {
                 self.store.host_accounts_dir().join(id.0.to_string())
             }
         };
@@ -2472,7 +2527,7 @@ impl State {
         // Cleanup succeeded. A crash before the next successful save only
         // repeats these idempotent deletions.
         if let Err(error) = self.save() {
-            tracing::warn!(%error, "could not record completed account cleanup");
+            tracing::warn!(%error, "could not record completed registration cleanup");
         }
         Ok(())
     }
@@ -2480,12 +2535,17 @@ impl State {
     /// Runs the git host's login in the host account's config directory
     /// and reports its output and end as events. Stops a login of the host
     /// account that still runs.
-    fn log_in_host_account(&mut self, host_account: HostAccountId) -> Result<(), CommandError> {
+    async fn log_in_host_account(
+        &mut self,
+        host_account: HostAccountId,
+    ) -> Result<(), CommandError> {
         let access = self
             .host_accounts
             .access(host_account)
             .ok_or(CommandError::UnknownHostAccount { host_account })?;
-        self.host_account_logins.remove(&host_account);
+        if let Some(login) = self.host_account_logins.remove(&host_account) {
+            login.stop().await;
+        }
         let process =
             self.git_host
                 .login(&access)

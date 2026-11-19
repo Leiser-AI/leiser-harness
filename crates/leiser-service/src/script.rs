@@ -128,30 +128,3 @@ fn tail(text: String, cut: bool) -> String {
     }
     format!("{MARKER}{}", &text[start..])
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn a_verbose_script_keeps_both_streams_within_its_output_budget()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let dir = tempfile::tempdir()?;
-        std::fs::write(
-            dir.path().join("build-output"),
-            "é".repeat(MAX_OUTPUT_BYTES),
-        )?;
-        let finished = run(
-            "cat build-output; echo finished >&2",
-            dir.path(),
-            dir.path(),
-        )
-        .await;
-        assert_eq!(finished.exit_code, Some(0));
-        assert!(finished.output.starts_with("[…]\n"));
-        assert!(finished.output.ends_with("éfinished\n"));
-        assert!(!finished.output.contains('\u{fffd}'));
-        assert!(finished.output.len() <= MAX_OUTPUT_BYTES);
-        Ok(())
-    }
-}

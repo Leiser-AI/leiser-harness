@@ -462,6 +462,50 @@ async fn the_main_checkouts_branch_is_not_the_agents_to_name() -> TestResult {
     Ok(())
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn stopping_the_service_ends_a_running_setup_script() -> TestResult {
+    use std::time::Duration;
+    let harness = start_service(&Script::new())?;
+    let service = harness.connect();
+    let repo = TestRepo::with_remote()?;
+    configure(
+        &repo,
+        r#"[worktree]
+setup_script = 'echo $$ > "$LEISER_REPOSITORY/setup.pid"; exec sleep 30'
+"#,
+    )?;
+    let repository = add_repository(&service, &repo).await?;
+    start_chat(&service, repository, Checkout::NewWorktree).await?;
+    let pid = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Ok(pid) = std::fs::read_to_string(repo.path().join("setup.pid"))
+                && let Ok(pid) = pid.trim().parse::<u32>()
+            {
+                break pid;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+    drop(harness);
+    service.stopped().await;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .output()?
+            .status
+            .success()
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        Ok::<_, std::io::Error>(())
+    })
+    .await
+    .map_err(|_| "setup script survived service shutdown")??;
+    Ok(())
+}
+
 #[tokio::test]
 async fn the_setup_script_runs_after_the_worktree_is_created_and_before_the_agent_starts()
 -> TestResult {
@@ -763,5 +807,30 @@ async fn a_chat_keeps_its_worktree_and_done_status_after_a_restart() -> TestResu
             name: "feat/kept".to_owned()
         }
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_verbose_script_keeps_both_streams_within_its_output_budget() -> TestResult {
+    const BUDGET: usize = 64 * 1024;
+    let harness = start_service(&Script::new())?;
+    let service = harness.connect();
+    let repo = TestRepo::with_remote()?;
+    std::fs::write(repo.path().join("build-output"), "é".repeat(BUDGET))?;
+    configure(
+        &repo,
+        r#"[worktree]
+setup_script = 'cat "$LEISER_REPOSITORY/build-output"; echo finished >&2'
+"#,
+    )?;
+    let repository = add_repository(&service, &repo).await?;
+    let mut events = service.subscribe();
+    let chat = start_chat(&service, repository, Checkout::NewWorktree).await?;
+    let (status, output) = script_finished(&mut events, chat, RepositoryScript::Setup).await?;
+    assert_eq!(status, Some(0));
+    assert!(output.starts_with("[…]\n"));
+    assert!(output.ends_with("éfinished\n"));
+    assert!(!output.contains(char::REPLACEMENT_CHARACTER));
+    assert!(output.len() <= BUDGET);
     Ok(())
 }

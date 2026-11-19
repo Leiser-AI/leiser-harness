@@ -165,7 +165,7 @@ pub struct LoginProcess {
     /// asks for after the developer signed in in the browser.
     pub input: mpsc::Sender<String>,
     /// Resolves when the login has ended. Its output closes when the
-    /// login's output does, usually before.
+    /// login exits and both output streams finish.
     pub outcome: oneshot::Receiver<LoginOutcome>,
 }
 
@@ -195,9 +195,13 @@ impl LoginProcess {
         let (input, answers) = mpsc::channel(LOGIN_OUTPUT_BUFFER);
         tokio::spawn(write_lines(stdin, answers));
         let (mut finished, outcome) = oneshot::channel();
-        tokio::spawn(forward_lines(stdout, lines.clone()));
-        tokio::spawn(forward_lines(stderr, lines));
+        let mut readers = tokio::task::JoinSet::new();
+        readers.spawn(forward_lines(stdout, lines.clone()));
+        readers.spawn(forward_lines(stderr, lines.clone()));
         tokio::spawn(async move {
+            // Closing the output tells the service it is safe to remove
+            // the login directory. Keep its sender until the child exits.
+            let _until_exit = lines;
             let status = tokio::select! {
                 status = child.wait() => status,
                 // The login was dropped: stop it.
@@ -215,7 +219,12 @@ impl LoginProcess {
                     reason: format!("could not wait for the login: {error}"),
                 },
             };
-            let _ = finished.send(outcome);
+            tokio::select! {
+                () = async { while readers.join_next().await.is_some() {} } => {
+                    let _ = finished.send(outcome);
+                }
+                () = finished.closed() => {}
+            }
         });
         Ok(Self {
             output,

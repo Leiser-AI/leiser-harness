@@ -679,27 +679,6 @@ async fn read_frames(
 mod tests {
     use super::*;
 
-    #[cfg(unix)]
-    #[test]
-    fn a_stale_temporary_file_cannot_change_endpoint_permissions() -> io::Result<()> {
-        use std::os::unix::fs::PermissionsExt;
-        let data = tempfile::tempdir()?;
-        let path = data.path().join(ENDPOINT_FILE);
-        let stale = path.with_extension("json.tmp");
-        std::fs::write(&stale, [])?;
-        std::fs::set_permissions(&stale, std::fs::Permissions::from_mode(0o644))?;
-        write_endpoint(
-            &path,
-            &Endpoint {
-                version: 1,
-                port: 0,
-                token: String::new(),
-            },
-        )?;
-        assert_eq!(std::fs::metadata(path)?.permissions().mode() & 0o077, 0);
-        Ok(())
-    }
-
     #[tokio::test]
     async fn cancelling_a_request_releases_its_reply_slot_without_a_service_reply()
     -> Result<(), Box<dyn std::error::Error>> {
