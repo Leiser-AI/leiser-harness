@@ -11,7 +11,7 @@ use tokio::task::{JoinHandle, JoinSet};
 
 use crate::checkpoint::{self, CheckpointError};
 use crate::cli_extensions::{self, CliExtensionError};
-use crate::git_host::{GhGitHost, GitHost};
+use crate::git_host::{GitHost, GitHosts};
 use crate::handoff::{self, Handoff, ReadError};
 use crate::harness_mcp::{
     BranchNaming, ChatRead, HarnessCall, HarnessMcp, HarnessMcpError, Registration, TodoAnswer,
@@ -32,19 +32,21 @@ use crate::worktree::{self, WorktreeError};
 mod auto_fix;
 mod polls;
 mod pull_requests;
+mod queue;
 mod wayfinder;
 
 use crate::{
     Access, AgentCli, AgentEvent, AgentSessionId, Answer, Branch, ChatId, ChatOverview,
     ChatSettings, ChatStatus, Checkout, CheckpointMoment, Command, CommandError, CommitAuthor,
-    DiffRange, Driver, Event, HostAccountBinding, HostAccountId, Keychain, LoginAnswer,
-    LoginOutcome, LoginProcess, OptOuts, OsKeychain, PermissionMode, Provider, QueueReason,
-    RepoCheck, RepositoryId, RepositoryOverview, RepositoryScript, Response, SessionInput,
-    SessionSpec, SignIn, StartOn, SubscriptionId, SubscriptionKind, TodoId, TranscriptEntry,
-    TurnCheckpoints, UsageLimit, script,
+    DiffRange, Driver, Event, GitHostKind, HostAccountBinding, HostAccountId, Keychain,
+    LoginAnswer, LoginOutcome, LoginProcess, OptOuts, OsKeychain, PermissionMode, Provider,
+    QueueReason, RepoCheck, RepositoryId, RepositoryOverview, RepositoryScript, Response,
+    SessionInput, SessionSpec, SignIn, StartOn, SubscriptionId, SubscriptionKind, TodoId,
+    TranscriptEntry, TurnCheckpoints, UsageLimit, script,
 };
 use auto_fix::{AutoFixWork, ChatAutoFix};
 use pull_requests::{ChatPullRequest, PullRequestWork};
+use queue::QueueWork;
 use wayfinder::{RepositoryMaps, WayfinderWork};
 
 /// Commands waiting for the command loop. Small, so callers feel back
@@ -78,12 +80,14 @@ pub struct ServiceConfig {
     keychain: Arc<dyn Keychain>,
     codex_home: Option<PathBuf>,
     repo_check: Option<Arc<dyn Driver>>,
-    /// `None` is the developer's installed `gh`.
+    /// `None` is the developer's installed `gh` and `glab`.
     git_host: Option<Arc<dyn GitHost>>,
     /// How often auto-fix polls an open pull request.
     pull_request_poll_interval: Duration,
     /// How often repositories' wayfinder maps are polled.
     wayfinder_poll_interval: Duration,
+    /// How often the task queue looks whether usage limits have reset.
+    queue_interval: Duration,
 }
 
 impl ServiceConfig {
@@ -109,7 +113,16 @@ impl ServiceConfig {
             git_host: None,
             pull_request_poll_interval: auto_fix::POLL_INTERVAL,
             wayfinder_poll_interval: wayfinder::POLL_INTERVAL,
+            queue_interval: queue::TICK_INTERVAL,
         }
+    }
+
+    /// Lets the task queue look every `interval`, instead of every 30
+    /// seconds, whether usage limits it waits for have reset.
+    #[must_use]
+    pub fn with_queue_interval(mut self, interval: Duration) -> Self {
+        self.queue_interval = interval;
+        self
     }
 
     /// Polls repositories' wayfinder maps every `interval` instead of
@@ -129,7 +142,7 @@ impl ServiceConfig {
     }
 
     /// Signs host accounts in and checks pushes on `git_host` instead of
-    /// the developer's installed GitHub CLI `gh`.
+    /// the developer's installed GitHub (`gh`) and GitLab (`glab`) CLIs.
     #[must_use]
     pub fn with_git_host(mut self, git_host: Arc<dyn GitHost>) -> Self {
         self.git_host = Some(git_host);
@@ -198,7 +211,10 @@ pub enum StartError {
 /// Returns a [`StartError`] when the stored data cannot be read or the
 /// harness MCP server cannot listen, or when a poll interval is zero.
 pub fn start(config: ServiceConfig) -> Result<Service, StartError> {
-    if config.pull_request_poll_interval.is_zero() || config.wayfinder_poll_interval.is_zero() {
+    if config.pull_request_poll_interval.is_zero()
+        || config.wayfinder_poll_interval.is_zero()
+        || config.queue_interval.is_zero()
+    {
         return Err(StartError::ZeroPollInterval);
     }
     let (store, stored) = Store::open(&config.data_dir, config.default_agent_cli)?;
@@ -599,6 +615,7 @@ enum Background {
     PullRequest(PullRequestWork),
     AutoFix(AutoFixWork),
     Wayfinder(WayfinderWork),
+    Queue(QueueWork),
 }
 
 /// A repository's `repo-check`, once it has run or runs.
@@ -762,6 +779,10 @@ struct State {
     wayfinder_poll_interval: Duration,
     /// Repositories' wayfinder maps, once read.
     wayfinder: BTreeMap<RepositoryId, RepositoryMaps>,
+    /// Every repository's task queue.
+    queue: crate::queue::TaskQueue,
+    /// How often the task queue looks whether usage limits have reset.
+    queue_interval: Duration,
     host_accounts: HostAccounts,
     pending_removals: Vec<PendingRemoval>,
     host_account_logins: BTreeMap<HostAccountId, Login>,
@@ -819,6 +840,7 @@ impl State {
             })
             .collect();
         let checkpoints = stored_checkpoints(&store, chats.keys())?;
+        let queue = crate::queue::TaskQueue::load(&store)?;
         let status_changes = chats
             .values()
             .map(|chat| chat.shown.1)
@@ -842,10 +864,12 @@ impl State {
             logins: BTreeMap::new(),
             git_host: config
                 .git_host
-                .unwrap_or_else(|| Arc::new(GhGitHost::installed())),
+                .unwrap_or_else(|| Arc::new(GitHosts::installed())),
             pull_request_poll_interval: config.pull_request_poll_interval,
             wayfinder_poll_interval: config.wayfinder_poll_interval,
             wayfinder: BTreeMap::new(),
+            queue,
+            queue_interval: config.queue_interval,
             host_accounts,
             pending_removals,
             host_account_logins: BTreeMap::new(),
@@ -887,6 +911,8 @@ impl State {
         polls.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut map_polls = tokio::time::interval(self.wayfinder_poll_interval);
         map_polls.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut queue_ticks = tokio::time::interval(self.queue_interval);
+        queue_ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tokio::select! {
                 biased;
@@ -898,6 +924,7 @@ impl State {
                 Some(_) = self.scripts.join_next() => {}
                 _ = polls.tick() => self.poll_pull_requests(),
                 _ = map_polls.tick() => self.poll_wayfinder_maps(),
+                _ = queue_ticks.tick() => self.queue.wake(),
                 // Never closes: the harness MCP server holds a sender.
                 Some(call) = calls.recv() => self.on_call(call),
                 Some(()) = updates.recv(), if !self.update_waiting => {
@@ -908,6 +935,9 @@ impl State {
                 else => break,
             }
             self.note_status_changes();
+            // Before the update check: a task that just ended frees its
+            // slot, and none starts while the update waits.
+            self.run_queue().await;
             // Checked after every step, so a turn that ends and starts the
             // next queued message keeps the update waiting.
             if self.update_waiting && self.nothing_running() {
@@ -986,6 +1016,7 @@ impl State {
             Command::RunRepoCheck { repository } => self.run_repo_check(repository),
             Command::ReadRepoCheck { repository } => self.read_repo_check(repository),
             Command::ReadWayfinderMaps { repository } => self.read_wayfinder_maps(repository),
+            Command::Queue { command } => self.execute_queue(command).await,
             command @ (Command::ListTodos { .. }
             | Command::AddTodo { .. }
             | Command::SetTodoDone { .. }
@@ -1004,14 +1035,24 @@ impl State {
                 self.save_cli_extension_file(repository, file, text, previous)
                     .await
             }
+            command @ (Command::ListCheckpoints { .. }
+            | Command::ReadDiff { .. }
+            | Command::RestoreCheckpoint { .. }) => self.execute_checkpoint(command).await,
+        };
+        // The caller may have stopped waiting; nothing to do then.
+        let _ = reply.send(result);
+    }
+
+    async fn execute_checkpoint(&mut self, command: Command) -> Result<Response, CommandError> {
+        match command {
             Command::ListCheckpoints { chat } => self.list_checkpoints(chat).await,
             Command::ReadDiff { chat, range } => self.read_diff(chat, range).await,
             Command::RestoreCheckpoint { chat, turn, moment } => {
                 self.restore(chat, turn, moment).await
             }
-        };
-        // The caller may have stopped waiting; nothing to do then.
-        let _ = reply.send(result);
+            // `execute` sends only the commands above here.
+            _ => Err(CommandError::ServiceStopped),
+        }
     }
 
     fn execute_todo(&mut self, command: Command) -> Result<Response, CommandError> {
@@ -1444,6 +1485,7 @@ impl State {
             Background::PullRequest(work) => self.pull_request_finished(work),
             Background::AutoFix(work) => self.auto_fix_finished(work).await,
             Background::Wayfinder(work) => self.wayfinder_polled(work),
+            Background::Queue(work) => self.queue_work_finished(work).await,
         }
     }
 
@@ -2043,7 +2085,7 @@ impl State {
                 .flat_map(|session| &session.open)
                 .map(|request| request.id.clone())
                 .collect(),
-            host_account,
+            host_account: Box::new(host_account),
             commit_author,
             usage_limit: chat.usage_limit.as_ref().map(LimitHit::shown),
             place: chat.place.shown(),
@@ -2424,10 +2466,11 @@ impl State {
         match command {
             Command::AddHostAccount {
                 name,
+                kind,
                 git_host,
                 login,
                 author,
-            } => self.add_host_account(&name, &git_host, &login, &author),
+            } => self.add_host_account(&name, kind, &git_host, &login, &author),
             Command::RemoveHostAccount { host_account } => {
                 self.remove_host_account(host_account).await
             }
@@ -2444,6 +2487,7 @@ impl State {
     fn add_host_account(
         &mut self,
         name: &str,
+        kind: GitHostKind,
         git_host: &str,
         login: &str,
         author: &CommitAuthor,
@@ -2470,7 +2514,7 @@ impl State {
         }
         let host_account = HostAccountId(self.next_id());
         self.host_accounts
-            .add(host_account, name, git_host, login, author)?;
+            .add(host_account, name, kind, git_host, login, author)?;
         if let Err(error) = self.save() {
             self.host_accounts.remove(host_account);
             return Err(error);
@@ -2599,6 +2643,7 @@ impl State {
         };
         HostAccountBinding::Bound {
             host_account,
+            kind: self.host_accounts.kind(host_account).unwrap_or_default(),
             git_host: self
                 .host_accounts
                 .git_host(host_account)

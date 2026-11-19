@@ -30,15 +30,24 @@ pub const ANTHROPIC_API_KEY: &str = "ANTHROPIC_API_KEY";
 pub const CODEX_HOME: &str = "CODEX_HOME";
 /// The variable the Codex driver's API key provider reads its key from.
 pub const OPENAI_API_KEY: &str = "OPENAI_API_KEY";
+/// The Gemini CLI's home: it keeps its config in `.gemini` below it, one
+/// per Google subscription.
+pub const GEMINI_CLI_HOME: &str = "GEMINI_CLI_HOME";
+/// The Gemini CLI's API key for the Gemini API.
+pub const GEMINI_API_KEY: &str = "GEMINI_API_KEY";
 
 /// Provider credentials that a managed login or agent session should
 /// inherit only when explicitly selected for that subscription.
-const PROVIDER_CREDENTIALS: [&str; 5] = [
+const PROVIDER_CREDENTIALS: [&str; 9] = [
     ANTHROPIC_API_KEY,
     "ANTHROPIC_AUTH_TOKEN",
     "CLAUDE_CODE_OAUTH_TOKEN",
     OPENAI_API_KEY,
     "CODEX_API_KEY",
+    GEMINI_API_KEY,
+    "GOOGLE_API_KEY",
+    "GOOGLE_GENAI_USE_VERTEXAI",
+    "GOOGLE_GENAI_USE_GCA",
 ];
 
 /// The name the agent CLI must give the harness MCP server, so agents see
@@ -63,7 +72,10 @@ pub struct SessionSpec {
     pub subscription: Option<SubscriptionAccess>,
     /// How much the agent session may do without asking. Always one the
     /// driver supports (see [`Driver::supports_permission_mode`]). The
-    /// driver keeps the agent CLI's sandbox on in every mode. Applies to
+    /// driver keeps the agent CLI's sandbox on in every mode. An agent CLI
+    /// whose sandbox does not work with its machine protocol (the Gemini
+    /// CLI) runs without it: its driver supports only the modes that ask
+    /// before every command, Supervised and Auto-accept edits. Applies to
     /// [`Access::Chat`] only: a read-only agent session asks nothing.
     pub permission_mode: PermissionMode,
 }
@@ -83,7 +95,7 @@ pub enum Access {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubscriptionAccess {
     /// The agent CLI's config directory: Claude Code's `CLAUDE_CONFIG_DIR`,
-    /// Codex's `CODEX_HOME`.
+    /// Codex's `CODEX_HOME`, the Gemini CLI's `GEMINI_CLI_HOME`.
     pub home: PathBuf,
     /// The API key of an API key subscription, from the OS keychain;
     /// `None` for a login subscription, whose login is kept in `home`.
@@ -96,8 +108,13 @@ impl SubscriptionAccess {
     #[must_use]
     pub fn environment(&self, agent_cli: AgentCli) -> SubscriptionEnvironment {
         let (home, api_key, base_url) = match agent_cli {
-            AgentCli::ClaudeCode => (CLAUDE_CONFIG_DIR, ANTHROPIC_API_KEY, "ANTHROPIC_BASE_URL"),
-            AgentCli::Codex => (CODEX_HOME, OPENAI_API_KEY, "OPENAI_BASE_URL"),
+            AgentCli::ClaudeCode => (
+                CLAUDE_CONFIG_DIR,
+                ANTHROPIC_API_KEY,
+                Some("ANTHROPIC_BASE_URL"),
+            ),
+            AgentCli::Codex => (CODEX_HOME, OPENAI_API_KEY, Some("OPENAI_BASE_URL")),
+            AgentCli::Gemini => (GEMINI_CLI_HOME, GEMINI_API_KEY, None),
         };
         let mut set = vec![(home, self.home.clone().into_os_string())];
         if let Some(key) = &self.api_key {
@@ -105,7 +122,7 @@ impl SubscriptionAccess {
         }
         let remove = PROVIDER_CREDENTIALS
             .into_iter()
-            .chain([base_url])
+            .chain(base_url)
             .filter(|name| !set.iter().any(|(set, _)| set == name))
             .collect();
         SubscriptionEnvironment { set, remove }
@@ -240,7 +257,7 @@ const PROMPT_WAIT: Duration = Duration::from_millis(100);
 
 /// Passes the stream's lines on. Keeps reading when nobody listens, so the
 /// login never blocks on a full pipe.
-async fn forward_lines(mut stream: impl AsyncRead + Unpin, lines: mpsc::Sender<String>) {
+pub(crate) async fn forward_lines(mut stream: impl AsyncRead + Unpin, lines: mpsc::Sender<String>) {
     let mut pending: Vec<u8> = Vec::new();
     let mut buffer = [0_u8; 1024];
     loop {

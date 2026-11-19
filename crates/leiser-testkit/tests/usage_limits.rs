@@ -9,8 +9,8 @@ use std::time::Duration;
 
 use leiser_service::{
     AgentCli, AgentEvent, CLAUDE_CONFIG_DIR, CODEX_HOME, ChatId, ChatSettings, ChatStatus,
-    Checkout, Command, CommandError, Event, LoginOutcome, Provider, Response, ServiceHandle,
-    SignIn, SubscriptionId, TranscriptEntry, UsageLimit,
+    Checkout, Command, CommandError, Event, GEMINI_CLI_HOME, LoginOutcome, Provider, Response,
+    ServiceHandle, SignIn, SubscriptionId, TranscriptEntry, UsageLimit,
 };
 use leiser_testkit::{
     FAKE_USAGE_LIMIT_FILE, FakeDriver, FakeUsageLimit, Gate, Script, Step, TestRepo, TestService,
@@ -45,6 +45,28 @@ fn claude_and_codex_service() -> TestResult<TestService> {
     Ok(TestService::with_drivers(
         (AgentCli::ClaudeCode, claude),
         vec![(AgentCli::Codex, codex)],
+    )?)
+}
+
+fn gemini_service(script: &Script) -> TestResult<TestService> {
+    let driver =
+        FakeDriver::new(Path::new(FAKE_AGENT_CLI), script)?.standing_in_for(AgentCli::Gemini);
+    Ok(TestService::with_driver(
+        AgentCli::Gemini,
+        Arc::new(driver),
+    )?)
+}
+
+/// Chats start on Claude Code and can change to the Gemini CLI.
+fn claude_and_gemini_service(gemini: &Script) -> TestResult<TestService> {
+    let program = Path::new(FAKE_AGENT_CLI);
+    let claude: Arc<dyn leiser_service::Driver> =
+        Arc::new(FakeDriver::new(program, &Script::new())?);
+    let gemini: Arc<dyn leiser_service::Driver> =
+        Arc::new(FakeDriver::new(program, gemini)?.standing_in_for(AgentCli::Gemini));
+    Ok(TestService::with_drivers(
+        (AgentCli::ClaudeCode, claude),
+        vec![(AgentCli::Gemini, gemini)],
     )?)
 }
 
@@ -133,6 +155,7 @@ async fn start_chat(
     let key = match provider {
         Provider::Anthropic => "anthropic",
         Provider::OpenAi => "openai",
+        Provider::Google => "google",
     };
     std::fs::write(
         dir.join("config.toml"),
@@ -632,5 +655,83 @@ async fn interchangeable_subscriptions_and_a_usage_limit_survive_a_restart() -> 
         continue_on(&service, chat, Some(work)).await?,
         Response::ContinuedOnSubscription
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_gemini_chat_moves_by_itself_between_interchangeable_google_subscriptions_with_a_handoff()
+-> TestResult {
+    let reply = [report(GEMINI_CLI_HOME), Step::EchoUserMessage];
+    let harness = gemini_service(&Script::new().turn(reply))?;
+    let service = harness.connect();
+    let private = add(&service, Provider::Google, "Gemini private").await?;
+    let second = add(&service, Provider::Google, "Gemini work").await?;
+    set_interchangeable(&service, private).await?;
+    set_interchangeable(&service, second).await?;
+    let repo = TestRepo::new()?;
+    let chat = start_chat(&service, &repo, Provider::Google, "Gemini private").await?;
+    hit_limit(&service, private).await?;
+    let mut events = service.subscribe();
+
+    send(&service, chat, "fix the bug").await?;
+
+    let limited = collect_turn(&mut events, chat).await?;
+    assert!(matches!(limited[0], AgentEvent::UsageLimitReached { .. }));
+    assert_eq!(continued(&mut events, chat).await?, (Some(second), true));
+    let messages = messages(&mut events, chat).await?;
+    // Each Google subscription has a Gemini CLI home of its own, so the
+    // chat continues in a new agent session there, with a handoff.
+    assert_eq!(
+        messages[0],
+        home(&service, second).await?.display().to_string()
+    );
+    let continuation = &messages[1];
+    assert!(continuation.starts_with("<handoff>"), "{continuation}");
+    assert!(continuation.contains("fix the bug"), "{continuation}");
+    let state = read_chat(&service, chat).await?;
+    assert_eq!(state.subscription, Some(second));
+    assert_eq!(state.usage_limit, None);
+    Ok(())
+}
+
+#[tokio::test]
+async fn after_a_limit_a_claude_chat_continues_on_the_gemini_cli_with_a_handoff() -> TestResult {
+    let harness = claude_and_gemini_service(
+        &Script::new().turn([report(GEMINI_CLI_HOME), Step::EchoUserMessage]),
+    )?;
+    let service = harness.connect();
+    let private = add(&service, Provider::Anthropic, "Private").await?;
+    let gemini = add(&service, Provider::Google, "Gemini").await?;
+    set_interchangeable(&service, private).await?;
+    set_interchangeable(&service, gemini).await?;
+    let repo = TestRepo::new()?;
+    let chat = start_chat(&service, &repo, Provider::Anthropic, "Private").await?;
+    hit_limit(&service, private).await?;
+    let mut events = service.subscribe();
+    send(&service, chat, "fix the bug").await?;
+    collect_turn(&mut events, chat).await?;
+    // Never by itself to another provider, interchangeable or not.
+    assert_eq!(read_chat(&service, chat).await?.subscription, Some(private));
+
+    service
+        .execute(Command::ChangeSubscription {
+            chat,
+            provider: Provider::Google,
+            subscription: Some(gemini),
+        })
+        .await?;
+    send(&service, chat, "go on").await?;
+
+    let messages = messages(&mut events, chat).await?;
+    assert_eq!(
+        messages[0],
+        home(&service, gemini).await?.display().to_string()
+    );
+    let handoff = &messages[1];
+    assert!(handoff.starts_with("<handoff>"), "{handoff}");
+    assert!(handoff.contains("fix the bug"), "{handoff}");
+    assert!(handoff.contains("go on"), "{handoff}");
+    let state = read_chat(&service, chat).await?;
+    assert_eq!(state.subscription, Some(gemini));
     Ok(())
 }

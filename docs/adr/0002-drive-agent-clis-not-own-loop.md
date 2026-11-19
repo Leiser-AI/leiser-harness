@@ -40,3 +40,11 @@ falls back to queue when an agent CLI cannot take a message mid-turn.
   harness must hand the chat over between agent sessions.
 - An own agent loop can be added later as another driver behind the same
   interface. It is out of scope for v1.
+
+Amended 2026-11-19: the Gemini CLI is the agent CLI for Google. Its driver
+runs `gemini --acp` and talks the Agent Client Protocol (JSON-RPC over
+standard input and output), its machine protocol. ACP takes no message
+mid-turn, so steer falls back to queue. The Gemini CLI's sandbox does not
+work in ACP mode, so its driver offers only Supervised and Auto-accept
+edits, and holds the hard blocks with deny rules of the Gemini CLI's own
+policy engine.

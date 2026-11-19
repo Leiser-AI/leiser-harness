@@ -10,8 +10,8 @@ use std::path::Path;
 use std::time::Duration;
 
 use leiser_service::{
-    Command, CommitAuthor, Event, IssueRef, LoginOutcome, RepositoryId, Response, ServiceHandle,
-    Ticket, TicketState, TicketType, WayfinderMap, WayfinderMaps,
+    Command, CommitAuthor, Event, GitHostKind, IssueRef, LoginOutcome, RepositoryId, Response,
+    ServiceHandle, Ticket, TicketState, TicketType, WayfinderMap, WayfinderMaps,
 };
 use leiser_testkit::{FakePoll, Script, TestRepo, TestService};
 use tokio::sync::broadcast;
@@ -68,6 +68,7 @@ async fn add_host_account(service: &ServiceHandle) -> TestResult {
     let host_account = match service
         .execute(Command::AddHostAccount {
             name: NAME.to_owned(),
+            kind: GitHostKind::GitHub,
             git_host: GIT_HOST.to_owned(),
             login: LOGIN.to_owned(),
             author: CommitAuthor {

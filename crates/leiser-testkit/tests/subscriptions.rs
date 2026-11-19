@@ -637,8 +637,9 @@ fn managed_subscriptions_clear_inherited_credentials_for_both_drivers() {
         api_key: None,
     };
     for (cli, endpoint) in [
-        (AgentCli::ClaudeCode, "ANTHROPIC_BASE_URL"),
-        (AgentCli::Codex, "OPENAI_BASE_URL"),
+        (AgentCli::ClaudeCode, Some("ANTHROPIC_BASE_URL")),
+        (AgentCli::Codex, Some("OPENAI_BASE_URL")),
+        (AgentCli::Gemini, None),
     ] {
         let env = access.environment(cli);
         for name in [
@@ -647,8 +648,14 @@ fn managed_subscriptions_clear_inherited_credentials_for_both_drivers() {
             "CLAUDE_CODE_OAUTH_TOKEN",
             "OPENAI_API_KEY",
             "CODEX_API_KEY",
-            endpoint,
-        ] {
+            "GEMINI_API_KEY",
+            "GOOGLE_API_KEY",
+            "GOOGLE_GENAI_USE_VERTEXAI",
+            "GOOGLE_GENAI_USE_GCA",
+        ]
+        .into_iter()
+        .chain(endpoint)
+        {
             assert!(env.remove.contains(&name), "{cli:?} inherited {name}");
         }
     }

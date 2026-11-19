@@ -5,8 +5,8 @@
 //! is on no `PATH` at all. So an installed driver looks for its agent CLI,
 //! in this order:
 //!
-//! 1. the program its variable names (`LEISER_CLAUDE_CODE`, `LEISER_CODEX`),
-//!    used as given;
+//! 1. the program its variable names (`LEISER_CLAUDE_CODE`, `LEISER_CODEX`,
+//!    `LEISER_GEMINI`), used as given;
 //! 2. `PATH`;
 //! 3. common install directories: `~/.local/bin` (the Claude Code
 //!    installer), `/opt/homebrew/bin` and `/usr/local/bin` (Homebrew, npm),
@@ -56,13 +56,15 @@ const VERSION_TIMEOUT: Duration = Duration::from_secs(10);
 const VERSION_POLL: Duration = Duration::from_millis(10);
 
 /// The variables an installed driver reads.
-const VARIABLES: [&str; 6] = [
+const VARIABLES: [&str; 8] = [
     "PATH",
     "HOME",
     "SHELL",
     CLAUDE_CODE.variable,
     CODEX.variable,
+    GEMINI.variable,
     GH.variable,
+    GLAB.variable,
 ];
 
 /// How long the harness service waits for the login shell's `PATH`.
@@ -243,11 +245,28 @@ pub(crate) const CODEX: Install = Install {
     bundled: None,
 };
 
+pub(crate) const GEMINI: Install = Install {
+    agent_cli: "Gemini CLI",
+    program: "gemini",
+    variable: "LEISER_GEMINI",
+    home_directories: &[],
+    bundled: None,
+};
+
 /// The GitHub CLI, which signs host accounts in on GitHub.
 pub(crate) const GH: Install = Install {
     agent_cli: "the GitHub CLI",
     program: "gh",
     variable: "LEISER_GH",
+    home_directories: &[],
+    bundled: None,
+};
+
+/// The GitLab CLI, which signs host accounts in on GitLab.
+pub(crate) const GLAB: Install = Install {
+    agent_cli: "the GitLab CLI",
+    program: "glab",
+    variable: "LEISER_GLAB",
     home_directories: &[],
     bundled: None,
 };

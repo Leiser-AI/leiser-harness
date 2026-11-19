@@ -8,8 +8,8 @@
 use std::error::Error;
 
 use leiser_service::{
-    Blocker, GhGitHost, GitHost, HostAccountAccess, IssueRef, PolledWayfinderMaps, TicketIssue,
-    TicketType,
+    Blocker, GhGitHost, GitHost, GitHostKind, HostAccountAccess, IssueRef, PolledWayfinderMaps,
+    TicketIssue, TicketType,
 };
 use leiser_testkit::{FakeGh, FakeGhRequest};
 use serde_json::{Value, json};
@@ -61,6 +61,7 @@ fn fixture() -> TestResult<Fixture> {
         ]),
     )?;
     let access = HostAccountAccess {
+        kind: GitHostKind::GitHub,
         git_host: "github.com".to_owned(),
         login: "work-account".to_owned(),
         config_dir,

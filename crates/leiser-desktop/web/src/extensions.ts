@@ -9,7 +9,7 @@ import type { AgentCli, CliExtension, CliExtensionKind, RepositoryId, Unreadable
 import * as service from "./service";
 import { AGENT_CLI_NAMES } from "./service";
 
-const AGENT_CLIS: AgentCli[] = ["claude_code", "codex"];
+const AGENT_CLIS: AgentCli[] = ["claude_code", "codex", "gemini"];
 
 const KINDS: { type: CliExtensionKind["type"]; title: string; icon: IconName }[] = [
   { type: "instruction_file", title: "Instruction files", icon: "file" },
@@ -21,6 +21,7 @@ const KINDS: { type: CliExtensionKind["type"]; title: string; icon: IconName }[]
 /** What the agent CLI needs before it loads a kind, where it is not obvious. */
 const NOTES: Partial<Record<AgentCli, string>> = {
   codex: "Codex loads .codex/config.toml and .codex/hooks.json only in trusted projects.",
+  gemini: "With folder trust on, the Gemini CLI loads .gemini/settings.json only in trusted folders.",
 };
 
 /** The file open in the editor. */

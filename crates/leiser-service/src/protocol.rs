@@ -6,6 +6,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::queue::{QueueAnswer, QueueCommand, QueueError};
+
 /// A repository added to the harness.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct RepositoryId(pub(crate) u64);
@@ -21,6 +23,30 @@ pub struct SubscriptionId(pub(crate) u64);
 /// A host account registered in the harness.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct HostAccountId(pub(crate) u64);
+
+/// Which kind of git host a host account lives on.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum GitHostKind {
+    /// GitHub and GitHub Enterprise Server (via `gh`).
+    #[default]
+    #[serde(rename = "github")]
+    GitHub,
+    /// GitLab.com and self-hosted GitLab instances (via `glab`).
+    #[serde(rename = "gitlab")]
+    GitLab,
+}
+
+impl std::fmt::Display for GitHostKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::GitHub => "GitHub",
+            Self::GitLab => "GitLab",
+        })
+    }
+}
 
 /// The name and email address commits are made with.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -43,6 +69,7 @@ pub enum Provider {
     Anthropic,
     #[serde(rename = "openai")]
     OpenAi,
+    Google,
 }
 
 impl std::fmt::Display for Provider {
@@ -50,6 +77,7 @@ impl std::fmt::Display for Provider {
         f.write_str(match self {
             Self::Anthropic => "Anthropic",
             Self::OpenAi => "OpenAI",
+            Self::Google => "Google",
         })
     }
 }
@@ -61,6 +89,7 @@ impl Provider {
         match self {
             Self::Anthropic => AgentCli::ClaudeCode,
             Self::OpenAi => AgentCli::Codex,
+            Self::Google => AgentCli::Gemini,
         }
     }
 }
@@ -150,6 +179,8 @@ impl std::fmt::Display for TodoId {
 pub enum AgentCli {
     ClaudeCode,
     Codex,
+    /// Google's Gemini CLI (`gemini`).
+    Gemini,
 }
 
 impl std::fmt::Display for AgentCli {
@@ -157,6 +188,7 @@ impl std::fmt::Display for AgentCli {
         f.write_str(match self {
             Self::ClaudeCode => "Claude Code",
             Self::Codex => "Codex",
+            Self::Gemini => "Gemini CLI",
         })
     }
 }
@@ -200,6 +232,7 @@ impl AgentCli {
         match self {
             Self::ClaudeCode => Provider::Anthropic,
             Self::Codex => Provider::OpenAi,
+            Self::Gemini => Provider::Google,
         }
     }
 }
@@ -386,22 +419,26 @@ pub enum Command {
         subscription: Option<SubscriptionId>,
     },
     /// Registers a host account: one user account `login` on the git host
-    /// `git_host` (such as `github.com`), and the commit author its
-    /// repositories commit with. It gets a `gh` config directory of its
-    /// own, in which [`Command::LogInHostAccount`] signs it in. Names are
-    /// unique. A repository is bound to it by name, as
+    /// `git_host` (such as `github.com` or `gitlab.example.com`), and the
+    /// commit author its repositories commit with. It gets a CLI config
+    /// directory of its own (`GH_CONFIG_DIR` for GitHub, `GLAB_CONFIG_DIR`
+    /// for GitLab), in which [`Command::LogInHostAccount`] signs it in.
+    /// Names are unique. A repository is bound to it by name, as
     /// `host_account = "<name>"` in its `.leiser/config.toml`.
     AddHostAccount {
         name: String,
+        #[serde(default)]
+        kind: GitHostKind,
         git_host: String,
         login: String,
         author: CommitAuthor,
     },
-    /// Removes a host account with its `gh` config directory. Repositories
+    /// Removes a host account with its CLI config directory. Repositories
     /// bound to it cannot start chats or push until they are bound again.
     RemoveHostAccount { host_account: HostAccountId },
-    /// Runs the git host's login (`gh auth login`) in the host account's
-    /// config directory; see [`Event::HostAccountLoginOutput`] and
+    /// Runs the git host's login (`gh auth login` for GitHub,
+    /// `glab auth login` for GitLab) in the host account's config
+    /// directory; see [`Event::HostAccountLoginOutput`] and
     /// [`Event::HostAccountLoginFinished`]. A login still running is
     /// stopped first.
     LogInHostAccount { host_account: HostAccountId },
@@ -448,8 +485,8 @@ pub enum Command {
     /// After the chat's last turn stopped at a usage limit: changes the
     /// subscription of the chat's agent CLI to `subscription`, as
     /// [`Command::ChangeSubscription`] does, and continues the chat there in
-    /// a new turn. Codex continues the same agent session; Claude Code
-    /// continues in a new agent session with a handoff. Messages queued when
+    /// a new turn. Codex continues the same agent session; Claude Code and
+    /// the Gemini CLI continue in a new agent session with a handoff. Messages queued when
     /// the limit was hit are sent after this turn. Fails when the chat's
     /// last turn did not stop at a usage limit.
     ContinueOnSubscription {
@@ -471,6 +508,11 @@ pub enum Command {
     /// a change is reported as [`Event::WayfinderMapsChanged`]. The first
     /// read of a repository that was not polled yet starts a poll.
     ReadWayfinderMaps { repository: RepositoryId },
+    /// Reads or changes a repository's task queue: tasks the harness
+    /// service runs by itself, each in a chat in a new worktree, as slots
+    /// free up. Answers with [`Response::Queue`]; every change is also
+    /// reported as [`Event::QueueChanged`].
+    Queue { command: QueueCommand },
     /// Reads a chat's todo list.
     ListTodos { chat: ChatId },
     /// Adds a todo at the end of the chat's todo list. Its text is trimmed
@@ -686,8 +728,9 @@ pub enum Response {
         /// The approval requests and questions the running turn waits for,
         /// oldest first.
         open_requests: Vec<String>,
-        /// The host account the chat's repository is bound to.
-        host_account: HostAccountBinding,
+        /// The host account the chat's repository is bound to. Boxed to
+        /// keep [`Response`] small.
+        host_account: Box<HostAccountBinding>,
         /// Who commits where the chat works are made by, as git reports it
         /// there now; `None` when git has no author.
         commit_author: Option<CommitAuthor>,
@@ -754,6 +797,9 @@ pub enum Response {
     },
     WayfinderMaps {
         maps: WayfinderMaps,
+    },
+    Queue {
+        answer: QueueAnswer,
     },
     Todos {
         todos: Vec<Todo>,
@@ -827,10 +873,12 @@ pub struct UsageLimit {
 pub struct HostAccountOverview {
     pub host_account: HostAccountId,
     pub name: String,
+    #[serde(default)]
+    pub kind: GitHostKind,
     pub git_host: String,
     pub login: String,
     pub author: CommitAuthor,
-    /// The `gh` config directory the host account is signed in in.
+    /// The git host CLI config directory the host account is signed in in.
     pub config_dir: PathBuf,
     /// Whether the git host's login runs right now.
     pub logging_in: bool,
@@ -846,6 +894,8 @@ pub enum HostAccountBinding {
     Bound {
         host_account: HostAccountId,
         name: String,
+        #[serde(default)]
+        kind: GitHostKind,
         git_host: String,
         login: String,
     },
@@ -1484,6 +1534,8 @@ pub enum CommandError {
     Keychain { reason: String },
     #[error("repo-check is not set up in the harness service")]
     RepoCheckNotConfigured,
+    #[error("{error}")]
+    Queue { error: QueueError },
     #[error("repo-check is already running in repository {repository:?}")]
     RepoCheckRunning { repository: RepositoryId },
     #[error("{} holds no CLI extension of this repository", file.display())]
@@ -1701,6 +1753,10 @@ pub enum Event {
     /// read for the first time; read them with
     /// [`Command::ReadWayfinderMaps`].
     WayfinderMapsChanged { repository: RepositoryId },
+    /// The repository's task queue changed: a task was added, moved,
+    /// started or finished, or the queue paused; read it with
+    /// [`QueueCommand::Read`].
+    QueueChanged { repository: RepositoryId },
     /// An update of the harness service waits until no turn runs. Then the
     /// service restarts on the new version and resumes every agent session.
     ServiceUpdateWaiting,
@@ -1734,6 +1790,7 @@ impl Event {
             | Self::RepoCheckStarted { .. }
             | Self::RepoCheckFinished { .. }
             | Self::WayfinderMapsChanged { .. }
+            | Self::QueueChanged { .. }
             | Self::ServiceUpdateWaiting => None,
         }
     }

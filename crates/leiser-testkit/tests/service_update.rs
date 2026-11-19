@@ -31,6 +31,7 @@ async fn zero_poll_intervals_fail_before_the_service_starts() -> TestResult {
     for config in [
         config().with_wayfinder_poll_interval(Duration::ZERO),
         config().with_pull_request_poll_interval(Duration::ZERO),
+        config().with_queue_interval(Duration::ZERO),
     ] {
         assert!(matches!(
             start(config),

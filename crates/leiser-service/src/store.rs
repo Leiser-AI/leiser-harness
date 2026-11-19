@@ -24,6 +24,9 @@
 //!   themselves live in the repository, under hidden refs (see
 //!   `checkpoint.rs`). Added in version 3 without a version bump, as the
 //!   todo lists were.
+//! - `queue.json`: every repository's task queue, replaced atomically on
+//!   every change. It has its own storage version (see `queue.rs`) and was
+//!   added without a version bump of `state.json`.
 //!
 //! The stored types are separate from the protocol types, except for
 //! [`TranscriptEntry`] and the `repo-check` report. A change that old data no longer parses with bumps
@@ -39,8 +42,8 @@ use serde::{Deserialize, Serialize};
 use crate::git_host::CommitId;
 use crate::repo_check::Outcome;
 use crate::{
-    AgentCli, AgentEvent, AutoFix, PermissionMode, Provider, PullRequestState, SubscriptionKind,
-    TranscriptEntry, TurnCheckpoints,
+    AgentCli, AgentEvent, AutoFix, GitHostKind, PermissionMode, Provider, PullRequestState,
+    SubscriptionKind, TranscriptEntry, TurnCheckpoints,
 };
 
 /// The storage version this harness service writes.
@@ -58,14 +61,17 @@ use crate::{
 ///   developer's answers and for continuing on another subscription,
 ///   whether a subscription is interchangeable (no), and a chat's usage
 ///   limit and the messages it holds back (none).
-const VERSION: u32 = 3;
+/// - 4: the Gemini CLI and Google as an agent CLI and a provider. The
+///   shape is version 3's, so version 3 data reads as it is; the number
+///   makes an older harness service refuse data that may name them.
+const VERSION: u32 = 4;
 /// An older service must refuse a snapshot while cleanup is outstanding.
-const CLEANUP_VERSION: u32 = 4;
+const CLEANUP_VERSION: u32 = 5;
 
 const STATE_FILE: &str = "state.json";
 const CHATS_DIR: &str = "chats";
 const SUBSCRIPTIONS_DIR: &str = "subscriptions";
-/// Holds one `gh` config directory per host account.
+/// Holds one CLI config directory per host account (`gh` or `glab`).
 const HOST_ACCOUNTS_DIR: &str = "host-accounts";
 
 const REPO_CHECKS_DIR: &str = "repo-checks";
@@ -111,7 +117,7 @@ pub enum StorageError {
     UnsupportedVersion { found: u32, supported: u32 },
 }
 
-/// The contents of `state.json`, storage version 3.
+/// The contents of `state.json`, storage versions 3 and 4.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct StateV3 {
     pub next_id: u64,
@@ -137,6 +143,9 @@ pub(crate) enum PendingRemoval {
 pub(crate) struct HostAccountV3 {
     pub id: u64,
     pub name: String,
+    /// Added after version 3 was released; older accounts are GitHub.
+    #[serde(default)]
+    pub kind: GitHostKind,
     pub git_host: String,
     pub login: String,
     pub author_name: String,
@@ -775,6 +784,34 @@ impl Store {
             .map_err(io_error)
     }
 
+    /// The path of a file directly in the data directory.
+    pub fn file_path(&self, name: &str) -> PathBuf {
+        self.dir.join(name)
+    }
+
+    /// Reads a file directly in the data directory; `None` when there is
+    /// none.
+    pub fn read_file(&self, name: &str) -> Result<Option<Vec<u8>>, StorageError> {
+        let path = self.file_path(name);
+        match fs::read(&path) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(source) => Err(StorageError::Io { path, source }),
+        }
+    }
+
+    /// Replaces a file directly in the data directory atomically with
+    /// `value` as JSON.
+    pub fn write_json(&self, name: &str, value: &impl Serialize) -> Result<(), StorageError> {
+        let path = self.file_path(name);
+        let mut bytes = serde_json::to_vec_pretty(value).map_err(|source| StorageError::Io {
+            path: path.clone(),
+            source: source.into(),
+        })?;
+        bytes.push(b'\n');
+        replace(&path, &bytes)
+    }
+
     /// The directory that holds one directory per subscription.
     pub fn subscriptions_dir(&self) -> PathBuf {
         self.dir.join(SUBSCRIPTIONS_DIR)
@@ -880,7 +917,8 @@ fn parse_state(path: &Path, bytes: &[u8]) -> Result<Stored, StorageError> {
                 .map_err(corrupt)?
                 .state,
         )),
-        VERSION | CLEANUP_VERSION => Ok(Stored::V3(
+        // Versions 3, 4 and 5 (pending cleanup) all share `VersionedV3`'s shape.
+        3 | VERSION | CLEANUP_VERSION => Ok(Stored::V3(
             serde_json::from_slice::<VersionedV3>(bytes)
                 .map_err(corrupt)?
                 .state,
@@ -906,6 +944,26 @@ mod tests {
     fn half_then_disk_full(file: &mut File, line: &[u8]) -> io::Result<()> {
         file.write_all(&line[..line.len() / 2])?;
         Err(io::Error::new(io::ErrorKind::StorageFull, "disk full"))
+    }
+
+    #[test]
+    fn version_3_data_loads_and_is_saved_as_version_4() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, mut state) = Store::open(dir.path(), AgentCli::ClaudeCode).unwrap();
+        state.next_id = 7;
+        store.save(&state).unwrap();
+        let path = dir.path().join(STATE_FILE);
+        let mut stored: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        stored["version"] = 3.into();
+        fs::write(&path, serde_json::to_vec(&stored).unwrap()).unwrap();
+
+        let (store, state) = Store::open(dir.path(), AgentCli::ClaudeCode).unwrap();
+        store.save(&state).unwrap();
+
+        assert_eq!(state.next_id, 7);
+        let saved: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved["version"], 4);
     }
 
     #[test]

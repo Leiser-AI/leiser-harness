@@ -33,7 +33,8 @@ struct Drivers {
 /// A harness service on drivers, usually [`FakeDriver`]s, a temporary data
 /// directory, a [`MemoryKeychain`], a temporary shared Codex home and a
 /// [`FakeGitHost`], all kept across [`TestService::restart`]. It polls open
-/// pull requests for auto-fix every 100 milliseconds.
+/// pull requests for auto-fix, and its task queue looks for reset usage
+/// limits, every 100 milliseconds.
 #[derive(Debug)]
 pub struct TestService {
     service: Service,
@@ -242,7 +243,8 @@ fn start(
             .with_codex_home(codex_home.path().to_path_buf())
             .with_git_host(Arc::new(git_host.clone()))
             .with_pull_request_poll_interval(POLL_INTERVAL)
-            .with_wayfinder_poll_interval(POLL_INTERVAL),
+            .with_wayfinder_poll_interval(POLL_INTERVAL)
+            .with_queue_interval(POLL_INTERVAL),
         |config, (agent_cli, driver)| config.with_driver(*agent_cli, driver.clone()),
     );
     if let Some(driver) = &drivers.repo_check {

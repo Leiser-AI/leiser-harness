@@ -19,6 +19,7 @@ import type {
   Command,
   CommandError,
   CommitAuthor,
+  GitHostKind,
   HostAccountBinding,
   HostAccountId,
   HostAccountOverview,
@@ -27,6 +28,9 @@ import type {
   PermissionMode,
   Provider,
   PullRequest,
+  QueueAnswer,
+  QueueCommand,
+  QueueError,
   QueueReason,
   RepoCheck,
   RepositoryId,
@@ -80,17 +84,20 @@ export const PERMISSION_MODE_NAMES: Record<PermissionMode, string> = {
 export const AGENT_CLI_NAMES: Record<AgentCli, string> = {
   claude_code: "Claude Code",
   codex: "Codex",
+  gemini: "Gemini CLI",
 };
 
 export const PROVIDER_NAMES: Record<Provider, string> = {
   anthropic: "Anthropic",
   openai: "OpenAI",
+  google: "Google",
 };
 
 /** The provider whose subscriptions an agent CLI runs on. */
 export const AGENT_CLI_PROVIDERS: Record<AgentCli, Provider> = {
   claude_code: "anthropic",
   codex: "openai",
+  gemini: "google",
 };
 
 /** A command the service refused, with the reason it gave. */
@@ -194,6 +201,8 @@ function describe(error: CommandError): string {
       return `Not saved: the agent CLI could not read ${error.file} any more. ${error.reason}`;
     case "cli_extension_file_access":
       return `Could not access ${error.file}: ${error.reason}`;
+    case "queue":
+      return describeQueueError(error.error);
     case "service_stopped":
       return "The harness service has stopped.";
     case "unreadable_command":
@@ -401,11 +410,19 @@ export async function listHostAccounts(): Promise<HostAccountOverview[]> {
 
 export async function addHostAccount(
   name: string,
+  kind: GitHostKind,
   gitHost: string,
   login: string,
   author: CommitAuthor,
 ): Promise<HostAccountId> {
-  const response = await execute({ type: "add_host_account", name, git_host: gitHost, login, author });
+  const response = await execute({
+    type: "add_host_account",
+    name,
+    kind,
+    git_host: gitHost,
+    login,
+    author,
+  });
   return response.type === "host_account_added" ? response.host_account : unexpected(response);
 }
 
@@ -414,7 +431,7 @@ export async function removeHostAccount(hostAccount: HostAccountId): Promise<voi
   if (response.type !== "host_account_removed") unexpected(response);
 }
 
-/** Runs the git host's login (`gh auth login`) for the host account. */
+/** Runs the git host's login (`gh auth login` or `glab auth login`) for the host account. */
 export async function logInHostAccount(hostAccount: HostAccountId): Promise<void> {
   const response = await execute({ type: "log_in_host_account", host_account: hostAccount });
   if (response.type !== "host_account_login_started") unexpected(response);
@@ -477,6 +494,31 @@ export async function runRepoCheck(repository: RepositoryId): Promise<void> {
 export async function readRepoCheck(repository: RepositoryId): Promise<RepoCheck> {
   const response = await execute({ type: "read_repo_check", repository });
   return response.type === "repo_check" ? response.check : unexpected(response);
+}
+
+function describeQueueError(error: QueueError): string {
+  switch (error.type) {
+    case "unknown_item":
+      return "This task is no longer in the queue.";
+    case "empty_prompt":
+      return "A task needs a prompt.";
+    case "invalid_issue":
+      return "Enter the number of an issue, starting at 1.";
+    case "invalid_concurrency":
+      return `A queue runs 1 to ${error.max} tasks at once.`;
+    case "not_queued":
+      return "Only queued tasks can be moved.";
+    case "still_active":
+      return "The task is still queued or running; cancel it first.";
+    case "finished":
+      return "The task is finished already.";
+  }
+}
+
+/** Runs a command on a repository's task queue; answers with the queue after it. */
+export async function queueCommand(command: QueueCommand): Promise<QueueAnswer> {
+  const response = await execute({ type: "queue", command });
+  return response.type === "queue" ? response.answer : unexpected(response);
 }
 
 /** The repository's open wayfinder maps, as the harness last read them. */

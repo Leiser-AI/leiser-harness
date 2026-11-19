@@ -11,6 +11,11 @@
 //!   the shared home except the login (`auth.json`) and a few files that
 //!   are each home's own. Threads live in the shared home, so a chat that
 //!   changes Codex subscription continues its agent session.
+//! - Gemini CLI: every subscription gets its own `GEMINI_CLI_HOME`,
+//!   `subscriptions/<id>/gemini`, which the Gemini CLI keeps its `.gemini`
+//!   config directory in: login, settings and saved sessions. Like Claude
+//!   Code, a chat that changes Google subscription continues in a new agent
+//!   session with a handoff.
 //!
 //! API keys are kept in the OS keychain only, under the subscription's
 //! account (see `keychain.rs`), and read again for every agent session.
@@ -253,7 +258,7 @@ impl Subscriptions {
         };
         let home = self.home(id, registered.provider);
         match registered.provider {
-            Provider::Anthropic => create_dir(&home)?,
+            Provider::Anthropic | Provider::Google => create_dir(&home)?,
             Provider::OpenAi => {
                 let shared = self
                     .codex_home
@@ -272,7 +277,8 @@ impl Subscriptions {
     /// Whether an agent session of the provider's agent CLI that ran on
     /// `from` can continue on `to`; `None` is the default login. Codex
     /// keeps threads in the shared home, which every shadow home links to;
-    /// a Claude config directory keeps its agent sessions to itself.
+    /// a Claude config directory and a Gemini CLI home keep their agent
+    /// sessions to themselves.
     pub fn shares_agent_sessions(
         provider: Provider,
         from: Option<SubscriptionId>,
@@ -280,7 +286,7 @@ impl Subscriptions {
     ) -> bool {
         match provider {
             Provider::OpenAi => true,
-            Provider::Anthropic => from == to,
+            Provider::Anthropic | Provider::Google => from == to,
         }
     }
 
@@ -311,6 +317,7 @@ impl Subscriptions {
         match provider {
             Provider::Anthropic => dir.join("claude"),
             Provider::OpenAi => dir.join("codex-home"),
+            Provider::Google => dir.join("gemini"),
         }
     }
 

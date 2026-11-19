@@ -22,6 +22,7 @@ import type {
   Question,
   ChatStatus,
   Checkout,
+  GitHostKind,
   HostAccountBinding,
   HostAccountOverview,
   Provider,
@@ -31,6 +32,7 @@ import type {
   RepoCheck,
   RepositoryId,
   RepositoryOverview,
+  RepositoryQueue,
   RepositoryScript,
   ServiceEvent,
   StartOn,
@@ -55,6 +57,7 @@ import { ON_MAC, shortcutLabel } from "./platform";
 import * as service from "./service";
 import * as terminal from "./terminal";
 import * as wayfinder from "./wayfinder";
+import * as queueView from "./queue";
 import {
   AGENT_CLI_NAMES,
   AGENT_CLI_PROVIDERS,
@@ -73,6 +76,7 @@ type Selection =
   | { type: "chat"; chat: ChatId }
   | { type: "repo_check"; repository: RepositoryId }
   | { type: "wayfinder_map"; repository: RepositoryId }
+  | { type: "queue"; repository: RepositoryId }
   | { type: "extensions"; repository: RepositoryId };
 
 let selected: Selection = { type: "new_chat" };
@@ -89,7 +93,7 @@ function selectedChat(): ChatId | null {
 }
 
 /** The repository whose `view` is selected, if it is. */
-function selectedRepository(view: "repo_check" | "wayfinder_map" | "extensions"): RepositoryId | null {
+function selectedRepository(view: "repo_check" | "wayfinder_map" | "queue" | "extensions"): RepositoryId | null {
   return selected.type === view ? selected.repository : null;
 }
 
@@ -165,6 +169,16 @@ const todoForm = byId<HTMLFormElement>("todo-form");
 const todoInput = byId<HTMLInputElement>("todo-text");
 extensions.mount(byId("extensions"), clearError);
 diffPanel.mount(byId("diff"), showError);
+queueView.mount(byId("queue"), {
+  openChat: (chat) =>
+    void act(async () => {
+      selected = { type: "chat", chat };
+      await refresh();
+    }),
+  changed: refresh,
+  showError,
+  clearError,
+});
 
 function byId<T extends HTMLElement = HTMLElement>(id: string): T {
   const element = document.getElementById(id);
@@ -369,21 +383,43 @@ async function readAndRender(): Promise<void> {
       ),
     ),
   );
+  // Each repository's task queue; `null` from a service older than the app.
+  const queues = new Map(
+    await Promise.all(
+      repositories.map(
+        async (overview) =>
+          [
+            overview.repository,
+            await readQueue(overview.repository),
+          ] as const,
+      ),
+    ),
+  );
   if (read !== readCount) return;
   // A chat the service no longer lists has no shell left to keep.
   terminal.keepOnly(new Set(chats.map((overview) => overview.chat)));
   renderServiceNotice(updateWaiting);
-  renderSidebar(repositories, chats, checks, maps, startsIn?.repository ?? null);
+  renderSidebar(repositories, chats, checks, maps, startsIn?.repository ?? null, queues);
   // The subscriptions dialog can open over any view.
   renderSubscriptions(subscriptions);
   renderHostAccounts(hostAccounts);
   wayfinderView.hidden = true;
+  if (selected.type !== "queue") queueView.hide();
   if (selected.type === "extensions") {
     const shownRepository = selected.repository;
     const shown = repositories.find((overview) => overview.repository === shownRepository);
     repoCheckView.hidden = true;
     diffPanel.hide();
     renderExtensionsTopBar(shown ?? null);
+    renderTodos(null, null);
+    terminal.show(null);
+    return;
+  }
+  const queueRepository = repositories.find((overview) => overview.repository === selectedRepository("queue"));
+  if (queueRepository) {
+    diffPanel.hide();
+    repoCheckView.hidden = true;
+    renderQueue(queueRepository, queues.get(queueRepository.repository) ?? null);
     renderTodos(null, null);
     terminal.show(null);
     return;
@@ -599,6 +635,7 @@ function renderSidebar(
   maps: Map<RepositoryId, WayfinderMaps | null>,
   /** The repository the new chat on screen starts in, if one shows. */
   newChatIn: RepositoryId | null,
+  queues: Map<RepositoryId, RepositoryQueue | null>,
 ): void {
   const list = el("ul", "repository-list");
   if (repositories.length === 0) {
@@ -695,6 +732,7 @@ function renderSidebar(
       mapItem.append(button);
       chatList.append(mapItem);
     }
+    chatList.append(queueLink(repository, queues.get(repository.repository) ?? null));
     // The service lists waiting chats first, then working, then done ones.
     for (const chat of chats.filter((overview) => overview.repository === repository.repository)) {
       const chatItem = el("li");
@@ -1506,6 +1544,55 @@ function openMaps(maps: WayfinderMaps | null): WayfinderMap[] {
   return maps?.type === "read" ? maps.maps : [];
 }
 
+/** The repository's task queue; `null` when the service cannot read it, such as one older than the app. */
+async function readQueue(repository: RepositoryId): Promise<RepositoryQueue | null> {
+  try {
+    return (await service.queueCommand({ type: "read", repository })).queue;
+  } catch (error) {
+    if (!(error instanceof service.ServiceError && error.error.type === "unreadable_command")) {
+      console.warn("could not read the task queue", error);
+    }
+    return null;
+  }
+}
+
+/** The sidebar's row that opens the repository's task queue. */
+function queueLink(repository: RepositoryOverview, queue: RepositoryQueue | null): HTMLElement {
+  const item = el("li");
+  const button = el("button", "chat-link queue-link");
+  button.type = "button";
+  button.title = `Tasks the harness runs by itself in ${repository.name}, each in a worktree of its own`;
+  button.append(icon("checklist"), el("span", "chat-title", "Task queue"));
+  const summary = queueView.summary(queue);
+  if (summary !== null) button.append(el("span", "chat-note", summary));
+  if (repository.repository === selectedRepository("queue")) {
+    button.classList.add("selected");
+    button.setAttribute("aria-current", "true");
+  }
+  button.addEventListener("click", () =>
+    act(async () => {
+      if (!leaveExtensions()) return;
+      selected = { type: "queue", repository: repository.repository };
+      await refresh();
+    }),
+  );
+  item.append(button);
+  return item;
+}
+
+function renderQueue(repository: RepositoryOverview, queue: RepositoryQueue | null): void {
+  selectedWorking = false;
+  composer.hidden = true;
+  transcript.hidden = true;
+  const facts = [labelled("Repository", repository.name)];
+  if (queue !== null) {
+    const shown = queueView.facts(queue);
+    facts.push(labelled("Status", shown.status), labelled("Running", shown.running));
+  }
+  renderTopBar("Task queue", facts);
+  queueView.render(repository.repository, queue);
+}
+
 function renderWayfinder(repository: RepositoryOverview, maps: WayfinderMap[]): void {
   selectedWorking = false;
   composer.hidden = true;
@@ -1575,10 +1662,15 @@ function renderWayfinder(repository: RepositoryOverview, maps: WayfinderMap[]): 
   wayfinderView.replaceChildren(intro, legend, scroller);
 }
 
-/** How each agent CLI's prompt invokes a skill by name. */
-const SKILL_PREFIXES: Record<AgentCli, string> = {
+/**
+ * What starts a prompt that invokes a skill, before the skill's name, per
+ * agent CLI. The Gemini CLI has no syntax for it: its model activates a
+ * skill when the prompt asks for it.
+ */
+const SKILL_INVOCATIONS: Record<AgentCli, string> = {
   claude_code: "/",
   codex: "$",
+  gemini: "Use the skill ",
 };
 
 /**
@@ -1598,7 +1690,7 @@ async function startChatOnTicket(repository: RepositoryId, map: WayfinderMap, ti
 
 /** The start of a prompt that invokes the wayfinder skill, as `agentCli` takes it. */
 function wayfinderInvocation(agentCli: AgentCli): string {
-  return `${SKILL_PREFIXES[agentCli]}wayfinder `;
+  return `${SKILL_INVOCATIONS[agentCli]}wayfinder `;
 }
 
 /**
@@ -1905,7 +1997,10 @@ function hostAccountRow(account: HostAccountOverview): HTMLElement {
   details.title = account.config_dir;
   const login = el("button", "ghost", "Log in");
   login.type = "button";
-  login.title = "Run the git host's login (gh auth login) for this account";
+  login.title =
+    account.kind === "gitlab"
+      ? "Run the git host's login (glab auth login) for this account"
+      : "Run the git host's login (gh auth login) for this account";
   login.addEventListener("click", () =>
     actInHostDialog(async () => {
       await service.logInHostAccount(account.host_account);
@@ -2403,14 +2498,31 @@ pullRequestForm.addEventListener("submit", (event) => {
   })();
 });
 
+const newHostKind = byId<HTMLSelectElement>("new-host-kind");
+const newHostGitHost = byId<HTMLInputElement>("new-host-git-host");
+newHostKind.addEventListener("change", () => {
+  if (newHostKind.value === "gitlab" && newHostGitHost.value === "github.com") {
+    newHostGitHost.value = "gitlab.com";
+  } else if (newHostKind.value === "github" && newHostGitHost.value === "gitlab.com") {
+    newHostGitHost.value = "github.com";
+  }
+});
+
 addHostAccountForm.addEventListener("submit", (event) => {
   event.preventDefault();
   void actInHostDialog(async () => {
     const value = (id: string) => byId<HTMLInputElement>(id).value;
-    await service.addHostAccount(value("new-host-name"), value("new-host-git-host"), value("new-host-login"), {
-      name: value("new-host-author-name"),
-      email: value("new-host-author-email"),
-    });
+    const kind: GitHostKind = newHostKind.value === "gitlab" ? "gitlab" : "github";
+    await service.addHostAccount(
+      value("new-host-name"),
+      kind,
+      value("new-host-git-host"),
+      value("new-host-login"),
+      {
+        name: value("new-host-author-name"),
+        email: value("new-host-author-email"),
+      },
+    );
     for (const id of ["new-host-name", "new-host-login", "new-host-author-name", "new-host-author-email"]) {
       byId<HTMLInputElement>(id).value = "";
     }

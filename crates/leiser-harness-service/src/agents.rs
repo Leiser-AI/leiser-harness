@@ -1,6 +1,6 @@
-//! The agent CLIs chats run on: the developer's installed Claude Code and
-//! Codex, or the testkit's scripted fake agent CLI to try the app without a
-//! subscription.
+//! The agent CLIs chats run on: the developer's installed Claude Code,
+//! Codex and Gemini CLI, or the testkit's scripted fake agent CLI to try
+//! the app without a subscription.
 
 use std::io;
 use std::path::Path;
@@ -8,8 +8,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use leiser_service::{
-    AgentCli, AgentEvent, ClaudeCodeDriver, CodexDriver, Question, QuestionOption, ServiceConfig,
-    ServiceProgram,
+    AgentCli, AgentEvent, ClaudeCodeDriver, CodexDriver, GeminiDriver, Question, QuestionOption,
+    ServiceConfig, ServiceProgram,
 };
 use leiser_testkit::{FakeDriver, FakeGitHost, SAMPLE_REPO_CHECK_REPORT, Script, Step};
 
@@ -23,6 +23,9 @@ const FAKE_STATE_DIR: &str = "fake-agent-cli-state";
 /// Where the fake agent CLI standing in for Codex keeps its agent sessions,
 /// in [`FAKE_STATE_DIR`].
 const FAKE_CODEX_STATE_DIR: &str = "codex";
+/// Where the fake agent CLI standing in for the Gemini CLI keeps its agent
+/// sessions, in [`FAKE_STATE_DIR`].
+const FAKE_GEMINI_STATE_DIR: &str = "gemini";
 /// The shared Codex home of fake Codex subscriptions, in the data directory.
 const FAKE_CODEX_HOME: &str = "codex-home";
 /// A fake turn waits after its tool call while this file, in
@@ -36,8 +39,8 @@ const FAKE_TURN_GATE: &str = "turn-gate";
 pub struct FakeAgentCliError(#[from] io::Error);
 
 /// The harness service's configuration. Chats start on Claude Code and can
-/// change to Codex; when the program says so, the fake agent CLI plays
-/// both.
+/// change to Codex or the Gemini CLI; when the program says so, the fake
+/// agent CLI plays all three.
 /// `repo-check` runs on Claude Code, which has the skill, or on the fake
 /// agent CLI. Worktrees go where the program says, by default into the
 /// data directory. API keys go to the OS keychain and Codex subscriptions
@@ -51,9 +54,12 @@ pub fn service_config(program: &ServiceProgram) -> Result<ServiceConfig, FakeAge
         let claude_code = fake_driver(fake, &state, &gate)?;
         let codex = fake_driver(fake, &state.join(FAKE_CODEX_STATE_DIR), &gate)?
             .standing_in_for(AgentCli::Codex);
+        let gemini = fake_driver(fake, &state.join(FAKE_GEMINI_STATE_DIR), &gate)?
+            .standing_in_for(AgentCli::Gemini);
         let codex_home = data_dir.join(FAKE_CODEX_HOME);
         ServiceConfig::new(AgentCli::ClaudeCode, Arc::new(claude_code), data_dir)
             .with_driver(AgentCli::Codex, Arc::new(codex))
+            .with_driver(AgentCli::Gemini, Arc::new(gemini))
             .with_codex_home(codex_home)
             .with_repo_check(Arc::new(fake_repo_check(fake)?))
             .with_git_host(Arc::new(FakeGitHost::new()))
@@ -63,6 +69,7 @@ pub fn service_config(program: &ServiceProgram) -> Result<ServiceConfig, FakeAge
         let claude_code = Arc::new(ClaudeCodeDriver::installed());
         ServiceConfig::new(AgentCli::ClaudeCode, claude_code.clone(), data_dir)
             .with_driver(AgentCli::Codex, Arc::new(CodexDriver::installed()))
+            .with_driver(AgentCli::Gemini, Arc::new(GeminiDriver::installed()))
             .with_repo_check(claude_code)
     };
     Ok(match program.worktrees_dir() {

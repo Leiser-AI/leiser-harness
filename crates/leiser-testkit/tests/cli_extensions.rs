@@ -379,7 +379,7 @@ async fn instruction_files_git_ignores_outside_the_root_are_not_listed() -> Test
 
 #[cfg(unix)]
 #[tokio::test]
-async fn a_symlinked_skill_is_one_file_that_both_agent_clis_load() -> TestResult {
+async fn a_symlinked_skill_is_one_file_that_every_agent_cli_loads() -> TestResult {
     use std::os::unix::fs::symlink;
 
     let repo = TestRepo::new()?;
@@ -408,6 +408,13 @@ async fn a_symlinked_skill_is_one_file_that_both_agent_clis_load() -> TestResult
             ),
             extension(
                 AgentCli::Codex,
+                skill_kind.clone(),
+                "tdd",
+                ".agents/skills/tdd/SKILL.md",
+                ".agents/skills/tdd/SKILL.md",
+            ),
+            extension(
+                AgentCli::Gemini,
                 skill_kind,
                 "tdd",
                 ".agents/skills/tdd/SKILL.md",
@@ -626,6 +633,141 @@ async fn a_file_that_does_not_parse_is_reported_and_can_be_fixed() -> TestResult
             ".mcp.json",
             ".mcp.json",
         )]
+    );
+    Ok(())
+}
+
+/// The Gemini CLI's settings: JSON with comments.
+const GEMINI_SETTINGS: &str = r#"{
+  // Servers for this repository.
+  "mcpServers": {
+    "search": { "httpUrl": "https://search.example.test/mcp" },
+    "files": { "command": "files-server", "args": ["--root", "."] }
+  },
+  "hooks": {
+    "BeforeTool": [
+      { "matcher": "run_shell_command", "hooks": [{ "type": "command", "command": "./guard.sh" }] }
+    ]
+  }
+}
+"#;
+
+#[tokio::test]
+async fn the_gemini_cli_lists_the_extensions_it_loads_from_the_repository() -> TestResult {
+    let repo = TestRepo::new()?;
+    write(&repo, "GEMINI.md", "# Rules\n\n@./docs/style.md\n")?;
+    write(&repo, "docs/style.md", "# Style\n")?;
+    write(&repo, "crates/app/GEMINI.md", "# App rules\n")?;
+    write(
+        &repo,
+        ".agents/skills/tdd/SKILL.md",
+        &skill("tdd", "Test first."),
+    )?;
+    write(
+        &repo,
+        ".gemini/skills/review/SKILL.md",
+        &skill("review", "Reviews a branch."),
+    )?;
+    write(&repo, ".gemini/settings.json", GEMINI_SETTINGS)?;
+    let panel = Panel::open(&repo).await?;
+
+    assert_eq!(
+        panel.extensions(AgentCli::Gemini).await?,
+        vec![
+            instruction_file(AgentCli::Gemini, "GEMINI.md", None),
+            instruction_file(AgentCli::Gemini, "docs/style.md", Some("GEMINI.md")),
+            instruction_file(AgentCli::Gemini, "crates/app/GEMINI.md", None),
+            extension(
+                AgentCli::Gemini,
+                CliExtensionKind::Skill {
+                    description: Some("Test first.".to_owned()),
+                },
+                "tdd",
+                ".agents/skills/tdd/SKILL.md",
+                ".agents/skills/tdd/SKILL.md",
+            ),
+            extension(
+                AgentCli::Gemini,
+                CliExtensionKind::Skill {
+                    description: Some("Reviews a branch.".to_owned()),
+                },
+                "review",
+                ".gemini/skills/review/SKILL.md",
+                ".gemini/skills/review/SKILL.md",
+            ),
+            extension(
+                AgentCli::Gemini,
+                CliExtensionKind::McpServer {
+                    launch: Some("files-server --root .".to_owned()),
+                },
+                "files",
+                ".gemini/settings.json",
+                ".gemini/settings.json",
+            ),
+            extension(
+                AgentCli::Gemini,
+                CliExtensionKind::McpServer {
+                    launch: Some("https://search.example.test/mcp".to_owned()),
+                },
+                "search",
+                ".gemini/settings.json",
+                ".gemini/settings.json",
+            ),
+            extension(
+                AgentCli::Gemini,
+                CliExtensionKind::Hook {
+                    matcher: Some("run_shell_command".to_owned()),
+                    commands: vec!["./guard.sh".to_owned()],
+                },
+                "BeforeTool",
+                ".gemini/settings.json",
+                ".gemini/settings.json",
+            ),
+        ]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_gemini_cli_reads_the_context_files_its_settings_name() -> TestResult {
+    let repo = TestRepo::new()?;
+    write(&repo, "AGENTS.md", "# Rules\n")?;
+    write(&repo, "GEMINI.md", "# Not loaded\n")?;
+    write(
+        &repo,
+        ".gemini/settings.json",
+        r#"{ "context": { "fileName": ["AGENTS.md"] } }"#,
+    )?;
+    let panel = Panel::open(&repo).await?;
+
+    let instructions: Vec<PathBuf> = panel
+        .extensions(AgentCli::Gemini)
+        .await?
+        .into_iter()
+        .filter(|extension| matches!(extension.kind, CliExtensionKind::InstructionFile { .. }))
+        .map(|extension| extension.path)
+        .collect();
+
+    assert_eq!(instructions, vec![PathBuf::from("AGENTS.md")]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn gemini_settings_with_comments_save_and_broken_ones_are_refused() -> TestResult {
+    let repo = TestRepo::new()?;
+    write(&repo, ".gemini/settings.json", GEMINI_SETTINGS)?;
+    let panel = Panel::open(&repo).await?;
+    let file = ".gemini/settings.json";
+    let previous = panel.read(file).await?;
+
+    let edited = previous.replace("./guard.sh", "./guard-all.sh");
+    panel.save(file, &edited, &previous).await?;
+    let broken = panel.save(file, "{ // unclosed", &edited).await;
+
+    assert_eq!(fs::read_to_string(repo.path().join(file))?, edited);
+    assert!(
+        matches!(broken, Err(CommandError::InvalidCliExtensionFile { .. })),
+        "{broken:?}"
     );
     Ok(())
 }

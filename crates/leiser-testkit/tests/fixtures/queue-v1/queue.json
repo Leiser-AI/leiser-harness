@@ -1,0 +1,94 @@
+{
+  "version": 1,
+  "last_item": 7,
+  "repositories": [
+    {
+      "repository": 1,
+      "settings": {
+        "concurrency": 2,
+        "agent_cli": "codex",
+        "permission_mode": "full_access"
+      },
+      "paused": true
+    }
+  ],
+  "items": [
+    {
+      "id": 1,
+      "repository": 1,
+      "task": { "type": "prompt", "text": "Write the changelog" },
+      "agent_cli": null,
+      "permission_mode": null,
+      "state": { "type": "queued" }
+    },
+    {
+      "id": 2,
+      "repository": 1,
+      "task": { "type": "issue", "number": 12 },
+      "agent_cli": "claude_code",
+      "permission_mode": "supervised",
+      "state": { "type": "starting" }
+    },
+    {
+      "id": 3,
+      "repository": 1,
+      "task": { "type": "prompt", "text": "Fix the flaky test" },
+      "agent_cli": null,
+      "permission_mode": null,
+      "state": { "type": "running", "chat": 5 }
+    },
+    {
+      "id": 4,
+      "repository": 1,
+      "task": { "type": "prompt", "text": "Update the dependencies" },
+      "agent_cli": null,
+      "permission_mode": null,
+      "state": {
+        "type": "needs_attention",
+        "chat": 6,
+        "reason": {
+          "type": "usage_limit",
+          "limit": "5-hour limit",
+          "subscription": null,
+          "resets_at": null
+        }
+      }
+    },
+    {
+      "id": 5,
+      "repository": 1,
+      "task": { "type": "prompt", "text": "Rename the module" },
+      "agent_cli": null,
+      "permission_mode": null,
+      "state": { "type": "completed", "chat": 7 }
+    },
+    {
+      "id": 6,
+      "repository": 1,
+      "task": { "type": "prompt", "text": "Add the setting" },
+      "agent_cli": null,
+      "permission_mode": null,
+      "state": {
+        "type": "pull_request_ready",
+        "chat": 8,
+        "number": 3,
+        "url": "https://git.example.invalid/pull/3"
+      }
+    },
+    {
+      "id": 7,
+      "repository": 1,
+      "task": { "type": "prompt", "text": "Drop the old flag" },
+      "agent_cli": null,
+      "permission_mode": null,
+      "state": { "type": "cancelled", "chat": null }
+    }
+  ],
+  "limits": [
+    {
+      "provider": "anthropic",
+      "subscription": null,
+      "resets_at": null
+    }
+  ]
+}

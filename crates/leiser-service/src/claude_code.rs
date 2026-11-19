@@ -224,7 +224,7 @@ fn deny_rules() -> Vec<String> {
         }
         rules.push(format!("Bash({GIT_COMMIT} *Generated with*{name}*)"));
     }
-    for email in ["noreply@anthropic.com", "noreply@openai.com"] {
+    for email in crate::hard_blocks::AI_EMAILS {
         rules.push(format!("Bash({GIT_COMMIT} *{email}*)"));
     }
     rules
@@ -1724,6 +1724,10 @@ mod tests {
                     Some("/data/subscriptions/1/claude".to_owned())
                 ),
                 ("CODEX_API_KEY".to_owned(), None),
+                ("GEMINI_API_KEY".to_owned(), None),
+                ("GOOGLE_API_KEY".to_owned(), None),
+                ("GOOGLE_GENAI_USE_GCA".to_owned(), None),
+                ("GOOGLE_GENAI_USE_VERTEXAI".to_owned(), None),
                 ("OPENAI_API_KEY".to_owned(), None),
             ]
         );

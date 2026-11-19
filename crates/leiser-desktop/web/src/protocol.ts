@@ -5,14 +5,15 @@ export type RepositoryId = number;
 export type ChatId = number;
 export type SubscriptionId = number;
 export type HostAccountId = number;
+export type GitHostKind = "github" | "gitlab";
 
-export type Provider = "anthropic" | "openai";
+export type Provider = "anthropic" | "openai" | "google";
 export type SubscriptionKind = "login" | "api_key";
 export type SignIn = { type: "login" } | { type: "api_key"; api_key: string };
 export type LoginOutcome = { type: "signed_in" } | { type: "failed"; reason: string };
 export type TodoId = number;
 
-export type AgentCli = "claude_code" | "codex";
+export type AgentCli = "claude_code" | "codex" | "gemini";
 export type Checkout =
   | { type: "main" }
   | { type: "new_worktree" }
@@ -67,6 +68,7 @@ export type Command =
   | {
       type: "add_host_account";
       name: string;
+      kind: GitHostKind;
       git_host: string;
       login: string;
       author: CommitAuthor;
@@ -82,6 +84,7 @@ export type Command =
   | { type: "run_repo_check"; repository: RepositoryId }
   | { type: "read_repo_check"; repository: RepositoryId }
   | { type: "read_wayfinder_maps"; repository: RepositoryId }
+  | { type: "queue"; command: QueueCommand }
   | { type: "read_service_status" }
   | { type: "list_todos"; chat: ChatId }
   | { type: "add_todo"; chat: ChatId; text: string }
@@ -200,6 +203,7 @@ export type Response =
   | { type: "repo_check_started" }
   | { type: "repo_check"; check: RepoCheck }
   | { type: "wayfinder_maps"; maps: WayfinderMaps }
+  | { type: "queue"; answer: QueueAnswer }
   | { type: "service_status"; version: string; update_waiting: boolean }
   | { type: "todos"; todos: Todo[] }
   | { type: "todo_added"; todo: TodoId }
@@ -214,6 +218,7 @@ export type Response =
 
 export type CommandError =
   | { type: "not_a_git_repository"; path: string }
+  | { type: "queue"; error: QueueError }
   | { type: "unknown_repository"; repository: RepositoryId }
   | { type: "unknown_chat"; chat: ChatId }
   | { type: "chat_in_another_repository"; chat: ChatId }
@@ -322,6 +327,7 @@ export interface CommitAuthor {
 export interface HostAccountOverview {
   host_account: HostAccountId;
   name: string;
+  kind: GitHostKind;
   git_host: string;
   login: string;
   author: CommitAuthor;
@@ -332,7 +338,14 @@ export interface HostAccountOverview {
 /** The host account a repository's `.leiser/config.toml` binds it to. */
 export type HostAccountBinding =
   | { type: "unbound" }
-  | { type: "bound"; host_account: HostAccountId; name: string; git_host: string; login: string }
+  | {
+      type: "bound";
+      host_account: HostAccountId;
+      name: string;
+      kind: GitHostKind;
+      git_host: string;
+      login: string;
+    }
   | { type: "unknown"; name: string }
   | { type: "unreadable"; reason: string };
 
@@ -546,6 +559,7 @@ export type ServiceEvent =
   | { type: "repo_check_started"; repository: RepositoryId }
   | { type: "repo_check_finished"; repository: RepositoryId }
   | { type: "wayfinder_maps_changed"; repository: RepositoryId }
+  | { type: "queue_changed"; repository: RepositoryId }
   | { type: "todos_changed"; chat: ChatId; todos: Todo[] }
   | { type: "checkpoint_restored"; chat: ChatId; turn: number; moment: CheckpointMoment }
   | { type: "pull_request_changed"; chat: ChatId; pull_request: PullRequest }
@@ -564,3 +578,96 @@ export type ServiceConnection =
   | { state: "connecting" }
   | { state: "connected"; service_version: string }
   | { state: "unavailable"; reason: string };
+
+// ---- Task queue (`crates/leiser-service/src/queue.rs`) ----
+
+export type QueueItemId = number;
+
+/** What a queued task asks the agent to do. */
+export type QueueTask = { type: "prompt"; text: string } | { type: "issue"; number: number };
+
+/** How a repository's queue runs its tasks. */
+export interface QueueSettings {
+  /** How many tasks run at once, each in a worktree of its own. */
+  concurrency: number;
+  /** `null`: the service's default agent CLI. */
+  agent_cli: AgentCli | null;
+  /** `null`: the repository's permission mode. */
+  permission_mode: PermissionMode | null;
+}
+
+export type QueueCommand =
+  | { type: "read"; repository: RepositoryId }
+  | {
+      type: "enqueue";
+      repository: RepositoryId;
+      task: QueueTask;
+      agent_cli: AgentCli | null;
+      permission_mode: PermissionMode | null;
+    }
+  | { type: "move"; item: QueueItemId; to: number }
+  | { type: "cancel"; item: QueueItemId }
+  | { type: "remove"; item: QueueItemId }
+  | { type: "pause"; repository: RepositoryId }
+  | { type: "resume"; repository: RepositoryId }
+  | { type: "change_settings"; repository: RepositoryId; settings: QueueSettings };
+
+export type QueueAnswer =
+  | { type: "queue"; queue: RepositoryQueue }
+  | { type: "enqueued"; item: QueueItemId; queue: RepositoryQueue };
+
+export interface RepositoryQueue {
+  repository: RepositoryId;
+  settings: QueueSettings;
+  status: QueueStatus;
+  /** Every task in line order. */
+  items: QueueItem[];
+}
+
+export type QueueStatus =
+  | { type: "idle" }
+  | { type: "running" }
+  | { type: "paused" }
+  | { type: "waiting_for_usage_limits"; resets_in_seconds: number | null }
+  | { type: "waiting_for_update" };
+
+export interface QueueItem {
+  item: QueueItemId;
+  task: QueueTask;
+  title: string;
+  agent_cli: AgentCli | null;
+  permission_mode: PermissionMode | null;
+  state: QueueItemState;
+}
+
+export type QueueItemState =
+  | { type: "queued" }
+  | { type: "starting" }
+  | { type: "running"; chat: ChatId; waiting_for_you: boolean }
+  | { type: "needs_attention"; chat: ChatId | null; reason: AttentionReason }
+  | { type: "completed"; chat: ChatId }
+  | { type: "pull_request_ready"; chat: ChatId; number: number; url: string }
+  | { type: "cancelled"; chat: ChatId | null };
+
+export type AttentionReason =
+  | { type: "start_failed"; reason: string }
+  | { type: "turn_failed"; reason: string }
+  | { type: "interrupted" }
+  | { type: "session_ended" }
+  | { type: "stopped" }
+  | {
+      type: "usage_limit";
+      limit: string;
+      subscription: SubscriptionId | null;
+      resets_in_seconds: number | null;
+    }
+  | { type: "service_restarted" };
+
+export type QueueError =
+  | { type: "unknown_item"; item: QueueItemId }
+  | { type: "empty_prompt" }
+  | { type: "invalid_issue" }
+  | { type: "invalid_concurrency"; concurrency: number; max: number }
+  | { type: "not_queued"; item: QueueItemId }
+  | { type: "still_active"; item: QueueItemId }
+  | { type: "finished"; item: QueueItemId };

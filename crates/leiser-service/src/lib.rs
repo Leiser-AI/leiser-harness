@@ -23,6 +23,9 @@
 //! and Should findings of its report. It never fixes them. A repository's
 //! `.leiser/config.toml` can switch single checks off.
 //!
+//! Three agent CLIs are supported: Claude Code, Codex and the Gemini CLI,
+//! each on the subscriptions of its provider.
+//!
 //! The CLI extensions an agent CLI loads from a repository (skills, MCP
 //! servers, hooks, instruction files) can be listed, read and saved in the
 //! agent CLI's own files; they are not part of the harness (ADR 0003).
@@ -46,12 +49,18 @@
 //! of the chat's files as a commit under a hidden git ref. The diff panel
 //! reads a turn's changes and the branch's from them, and the developer
 //! can put the files back to any checkpoint.
+//!
+//! Each repository has a task queue: prompts and issues the harness
+//! service runs by itself, each in a chat in a new worktree, as many at
+//! once as the developer allows. It waits while every subscription a task
+//! could run on is at a usage limit.
 
 mod checkpoint;
 mod claude_code;
 mod cli_extensions;
 mod codex;
 mod driver;
+mod gemini;
 mod git;
 mod git_host;
 mod handoff;
@@ -63,6 +72,7 @@ mod keychain;
 mod local_interface;
 mod program;
 mod protocol;
+mod queue;
 mod repo_check;
 mod repo_config;
 mod script;
@@ -77,14 +87,15 @@ pub use claude_code::ClaudeCodeDriver;
 pub use codex::CodexDriver;
 pub use driver::{
     ANTHROPIC_API_KEY, Access, AgentSession, AgentSessionId, CLAUDE_CONFIG_DIR, CODEX_HOME, Driver,
-    DriverError, HARNESS_MCP_SERVER, LoginProcess, OPENAI_API_KEY, SessionInput, SessionSpec,
-    SubscriptionAccess, SubscriptionEnvironment,
+    DriverError, GEMINI_API_KEY, GEMINI_CLI_HOME, HARNESS_MCP_SERVER, LoginProcess, OPENAI_API_KEY,
+    SessionInput, SessionSpec, SubscriptionAccess, SubscriptionEnvironment,
 };
+pub use gemini::GeminiDriver;
 pub use git_host::{
-    Blocker, CheckOutcome, CommitId, GH_CONFIG_DIR, GhGitHost, GitHost, GitHostError,
-    GitHostFuture, HostAccountAccess, MapIssue, Mergeable, NewPullRequest, OpenedPullRequest,
-    PollMemo, PolledPullRequest, PolledWayfinderMaps, PullRequestActivity, PullRequestCheck,
-    PullRequestComment, TicketIssue,
+    Blocker, CheckOutcome, CommitId, GH_CONFIG_DIR, GLAB_CONFIG_DIR, GhGitHost, GitHost,
+    GitHostError, GitHostFuture, GitHosts, GlabGitHost, HostAccountAccess, MapIssue, Mergeable,
+    NewPullRequest, OpenedPullRequest, PollMemo, PolledPullRequest, PolledWayfinderMaps,
+    PullRequestActivity, PullRequestCheck, PullRequestComment, TicketIssue,
 };
 pub use harness_mcp::HarnessMcpError;
 pub use installed::Environment;
@@ -98,13 +109,18 @@ pub use protocol::{
     AgentCli, AgentEvent, Answer, ApiKey, AutoFix, AutoFixStop, AutoFixTrigger, Branch, ChatId,
     ChatOverview, ChatPlace, ChatSettings, ChatStatus, CheckId, Checkout, CheckpointMoment,
     CliExtension, CliExtensionKind, Command, CommandError, CommentLocation, CommitAuthor, DiffLine,
-    DiffRange, Event, FileChange, FileDiff, Finding, HostAccountBinding, HostAccountId,
-    HostAccountOverview, Hunk, InvalidCheckId, IssueRef, LoginAnswer, LoginOutcome, OptOuts, Patch,
-    PermissionMode, Provider, PullRequest, PullRequestState, Question, QuestionOption, QueueReason,
-    RepoCheck, RepoCheckReport, RepositoryId, RepositoryOverview, RepositoryScript, Response,
-    SignIn, StartOn, SubscriptionId, SubscriptionKind, SubscriptionOverview, SwitchedOffCheck,
-    Ticket, TicketState, TicketType, Todo, TodoId, TranscriptEntry, TurnCheckpoints,
-    UnreadableCliExtensionFile, UsageLimit, WayfinderMap, WayfinderMaps,
+    DiffRange, Event, FileChange, FileDiff, Finding, GitHostKind, HostAccountBinding,
+    HostAccountId, HostAccountOverview, Hunk, InvalidCheckId, IssueRef, LoginAnswer, LoginOutcome,
+    OptOuts, Patch, PermissionMode, Provider, PullRequest, PullRequestState, Question,
+    QuestionOption, QueueReason, RepoCheck, RepoCheckReport, RepositoryId, RepositoryOverview,
+    RepositoryScript, Response, SignIn, StartOn, SubscriptionId, SubscriptionKind,
+    SubscriptionOverview, SwitchedOffCheck, Ticket, TicketState, TicketType, Todo, TodoId,
+    TranscriptEntry, TurnCheckpoints, UnreadableCliExtensionFile, UsageLimit, WayfinderMap,
+    WayfinderMaps,
+};
+pub use queue::{
+    AttentionReason, MAX_CONCURRENCY, QueueAnswer, QueueCommand, QueueError, QueueItem,
+    QueueItemId, QueueItemState, QueueSettings, QueueStatus, QueueTask, RepositoryQueue,
 };
 pub use service::{Service, ServiceConfig, ServiceHandle, StartError, start};
 pub use store::StorageError;

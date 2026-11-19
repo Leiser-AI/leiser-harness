@@ -21,18 +21,19 @@
 //! (`<dir>/<id>.json`), so `--resume` continues with the turn after the last
 //! one the session played. Resuming an unknown session fails.
 //!
-//! While its config directory, `CLAUDE_CONFIG_DIR` or `CODEX_HOME`, holds
-//! [`FAKE_USAGE_LIMIT_FILE`], every message ends its turn at that usage
-//! limit at once. Such a turn plays no scripted turn: the next message
-//! without the limit gets the turn this one would have played.
+//! While its config directory, `CLAUDE_CONFIG_DIR`, `CODEX_HOME` or
+//! `GEMINI_CLI_HOME`, holds [`FAKE_USAGE_LIMIT_FILE`], every message ends
+//! its turn at that usage limit at once. Such a turn plays no scripted
+//! turn: the next message without the limit gets the turn this one would
+//! have played.
 //!
 //! `fake-agent-cli --version` prints [`FAKE_VERSION`], older than any agent
 //! CLI the harness supports, for tests of the minimum version check.
 //!
 //! `fake-agent-cli login [--fail] [--ask-for-code]` signs in like an agent
 //! CLI's login: it prints where to sign in and writes [`FAKE_LOGIN_FILE`]
-//! into its config directory, `CLAUDE_CONFIG_DIR` or `CODEX_HOME`, naming
-//! the variable it found. With `--ask-for-code` it first prompts for a code
+//! into its config directory, `CLAUDE_CONFIG_DIR`, `CODEX_HOME` or
+//! `GEMINI_CLI_HOME`, naming the variable it found. With `--ask-for-code` it first prompts for a code
 //! without a line end, as Claude Code does, and reads it from standard
 //! input. With `--fail` it exits with an error instead.
 
@@ -44,7 +45,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, TryRecvError};
 use std::time::Duration;
 
 use leiser_service::{AgentEvent, Answer, PermissionMode, Question};
-use leiser_service::{CLAUDE_CONFIG_DIR, CODEX_HOME};
+use leiser_service::{CLAUDE_CONFIG_DIR, CODEX_HOME, GEMINI_CLI_HOME};
 use leiser_testkit::{
     FAKE_GLOBAL_AUTHOR, FAKE_LOGIN_FILE, FAKE_USAGE_LIMIT_FILE, FakeInput, FakeLogin,
     FakeUsageLimit, HarnessMcpClient, McpClientError, Script, Step, UNSET,
@@ -80,7 +81,9 @@ enum FakeError {
     UnknownRequest(String),
     #[error("the login failed, as scripted")]
     LoginFailed,
-    #[error("the login found no config directory in CLAUDE_CONFIG_DIR or CODEX_HOME")]
+    #[error(
+        "the login found no config directory in CLAUDE_CONFIG_DIR, CODEX_HOME or GEMINI_CLI_HOME"
+    )]
     NoConfigDirectory,
 }
 
@@ -295,7 +298,7 @@ fn run() -> Result<(), FakeError> {
 /// The config directory the fake agent CLI runs in, if its environment
 /// names one, and the variable that named it.
 fn config_directory() -> Option<(&'static str, OsString)> {
-    [CLAUDE_CONFIG_DIR, CODEX_HOME]
+    [CLAUDE_CONFIG_DIR, CODEX_HOME, GEMINI_CLI_HOME]
         .into_iter()
         .find_map(|variable| std::env::var_os(variable).map(|home| (variable, home)))
 }

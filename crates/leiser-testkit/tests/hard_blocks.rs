@@ -10,7 +10,8 @@ use std::time::Duration;
 
 use leiser_service::{
     AgentEvent, Branch, ChatId, ChatSettings, Checkout, Command, CommandError, CommitAuthor, Event,
-    HostAccountId, LoginOutcome, PermissionMode, RepositoryId, Response, ServiceHandle,
+    GitHostKind, HostAccountId, LoginOutcome, PermissionMode, RepositoryId, Response,
+    ServiceHandle,
 };
 use leiser_testkit::{DEFAULT_BRANCH, Script, Step, TestRepo, TestService, collect_turn};
 use tokio::sync::broadcast;
@@ -39,6 +40,7 @@ async fn add_host_account(service: &ServiceHandle) -> TestResult<HostAccountId> 
     match service
         .execute(Command::AddHostAccount {
             name: NAME.to_owned(),
+            kind: GitHostKind::GitHub,
             git_host: GIT_HOST.to_owned(),
             login: LOGIN.to_owned(),
             author: CommitAuthor {
