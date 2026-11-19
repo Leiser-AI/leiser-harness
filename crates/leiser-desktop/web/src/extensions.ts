@@ -21,6 +21,7 @@ const KINDS: { type: CliExtensionKind["type"]; title: string; icon: IconName }[]
 /** What the agent CLI needs before it loads a kind, where it is not obvious. */
 const NOTES: Partial<Record<AgentCli, string>> = {
   codex: "Codex loads .codex/config.toml and .codex/hooks.json only in trusted projects.",
+  gemini: "With folder trust on, the Gemini CLI loads .gemini/settings.json only in trusted folders.",
 };
 
 /** The file open in the editor. */

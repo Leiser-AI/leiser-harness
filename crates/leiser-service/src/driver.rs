@@ -76,7 +76,10 @@ pub struct SessionSpec {
     pub subscription: Option<SubscriptionAccess>,
     /// How much the agent session may do without asking. Always one the
     /// driver supports (see [`Driver::supports_permission_mode`]). The
-    /// driver keeps the agent CLI's sandbox on in every mode. Applies to
+    /// driver keeps the agent CLI's sandbox on in every mode. An agent CLI
+    /// whose sandbox does not work with its machine protocol (the Gemini
+    /// CLI) runs without it: its driver supports only the modes that ask
+    /// before every command, Supervised and Auto-accept edits. Applies to
     /// [`Access::Chat`] only: a read-only agent session asks nothing.
     pub permission_mode: PermissionMode,
 }

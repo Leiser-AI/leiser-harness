@@ -224,7 +224,7 @@ fn deny_rules() -> Vec<String> {
         }
         rules.push(format!("Bash({GIT_COMMIT} *Generated with*{name}*)"));
     }
-    for email in ["noreply@anthropic.com", "noreply@openai.com"] {
+    for email in crate::hard_blocks::AI_EMAILS {
         rules.push(format!("Bash({GIT_COMMIT} *{email}*)"));
     }
     rules

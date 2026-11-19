@@ -5,16 +5,16 @@ use std::collections::{HashMap, VecDeque};
 
 use super::limits;
 use super::wire::{
-    self, AuthenticateParams, CancelParams, ClientCapabilities, ClientInfo, ClientNotification,
-    ClientRequest, ContentBlock, ErrorResponse, FileSystemCapabilities, Incoming, InitializeParams,
-    Initialized, JSONRPC, LoadSessionParams, McpServer, NewSessionParams, Notification,
-    PermissionOption, PermissionOptionKind, PermissionOutcome, PermissionRequest,
-    PermissionResponse, PromptBlock, PromptDone, PromptParams, Request, RequestId, RpcError,
-    SessionStarted, SessionUpdate, StopReason, ToolCallContent, ToolCallFields, ToolCallStatus,
-    WireError,
+    self, AuthMethod, AuthenticateParams, CancelParams, ClientCapabilities, ClientInfo,
+    ClientNotification, ClientRequest, ContentBlock, ErrorResponse, FileSystemCapabilities,
+    Incoming, InitializeParams, Initialized, JSONRPC, LoadSessionParams, McpServer, McpTransport,
+    NewSessionParams, Notification, PermissionOption, PermissionOptionKind, PermissionOutcome,
+    PermissionRequest, PermissionResponse, PromptBlock, PromptDone, PromptParams, Request,
+    RequestId, RpcError, SessionStarted, SessionUpdate, StopReason, ToolCallContent,
+    ToolCallFields, ToolCallStatus, ToolKind, WireError,
 };
 use crate::driver::redact_api_keys;
-use crate::{AgentEvent, Answer};
+use crate::{Access, AgentEvent, Answer};
 
 /// Why the agent session cannot go on.
 #[derive(Debug, thiserror::Error)]
@@ -47,11 +47,12 @@ pub(super) struct Opening {
     pub resume: Option<String>,
     /// The ACP authentication method to sign in with before the session
     /// opens; `None` keeps the Gemini CLI's own choice.
-    pub auth_method: Option<&'static str>,
+    pub auth_method: Option<AuthMethod>,
     /// The harness MCP server's address, if the session gets it.
     pub harness_mcp_url: Option<String>,
-    /// Whether nobody answers approval requests: they are declined at once.
-    pub read_only: bool,
+    /// What the session may change. Nobody answers a read-only session's
+    /// approval requests: they are declined at once.
+    pub access: Access,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,6 +94,9 @@ enum Phase {
         /// not be loaded, which the harness service handles by itself.
         reason: Option<String>,
     },
+    /// A message came for a session that could not open: the agent
+    /// session ends.
+    Ended,
 }
 
 #[derive(Debug)]
@@ -128,9 +132,16 @@ pub(super) struct Conversation {
     message: String,
     tool_calls: HashMap<String, ToolCall>,
     /// Permission requests waiting for the developer, by their id.
-    open: HashMap<String, (RequestId, Vec<PermissionOption>)>,
-    /// Whether the agent session must end now.
-    ended: bool,
+    open: HashMap<String, OpenApproval>,
+}
+
+/// A permission request waiting for the developer.
+#[derive(Debug)]
+struct OpenApproval {
+    /// The Gemini CLI's id of the request, to answer it with.
+    id: RequestId,
+    /// The answers it offers.
+    options: Vec<PermissionOption>,
 }
 
 impl Conversation {
@@ -145,32 +156,16 @@ impl Conversation {
             message: String::new(),
             tool_calls: HashMap::new(),
             open: HashMap::new(),
-            ended: false,
         };
         let mut output = Output::default();
-        let params = InitializeParams {
-            protocol_version: wire::PROTOCOL_VERSION,
-            client_capabilities: ClientCapabilities {
-                fs: FileSystemCapabilities {
-                    read_text_file: false,
-                    write_text_file: false,
-                },
-                terminal: false,
-            },
-            client_info: ClientInfo {
-                name: "leiser_harness",
-                title: "leiser-harness",
-                version: env!("CARGO_PKG_VERSION"),
-            },
-        };
-        conversation.request(&mut output, Pending::Initialize, params)?;
+        conversation.request(&mut output, Pending::Initialize, initialize_params())?;
         Ok((conversation, output))
     }
 
     /// Whether the agent session must end: its session could not open and
     /// a message came for it.
     pub fn ended(&self) -> bool {
-        self.ended
+        matches!(self.phase, Phase::Ended)
     }
 
     /// A message from the developer. It starts a turn at once, or when the
@@ -199,7 +194,7 @@ impl Conversation {
                 });
             }
         }
-        self.ended = true;
+        self.phase = Phase::Ended;
     }
 
     /// Stops the running turn; a turn that waits for the session to open
@@ -217,7 +212,7 @@ impl Conversation {
                     let session_id = session_id.clone();
                     // ACP: the client answers its open permission requests
                     // as cancelled before the turn ends.
-                    for (_, (id, _)) in self.open.drain() {
+                    for (_, OpenApproval { id, .. }) in self.open.drain() {
                         output
                             .lines
                             .push(permission_answer(id, PermissionOutcome::Cancelled)?);
@@ -244,7 +239,7 @@ impl Conversation {
     /// Answers to requests that are no longer open are dropped.
     pub fn answer(&mut self, request: &str, answer: Answer) -> Result<Output, ProtocolError> {
         let mut output = Output::default();
-        let Some((id, options)) = self.open.remove(request) else {
+        let Some(OpenApproval { id, options }) = self.open.remove(request) else {
             return Ok(output);
         };
         let (outcome, feedback) = match answer {
@@ -305,7 +300,7 @@ impl Conversation {
             .harness_mcp_url
             .iter()
             .map(|url| McpServer {
-                kind: "http",
+                transport: McpTransport::Http,
                 name: crate::HARNESS_MCP_SERVER,
                 url: url.clone(),
                 headers: [],
@@ -497,21 +492,24 @@ impl Conversation {
             Ok(StopReason::Refusal) => vec![AgentEvent::TurnFailed {
                 reason: "the model refused to continue".to_owned(),
             }],
-            Err(error) => {
-                let text = error.full_text();
-                match limits::usage_limit(error.code, &text) {
-                    Some(limit) => vec![
-                        AgentEvent::UsageLimitReached {
-                            limit: limit.limit,
-                            resets_in_seconds: limit.resets_in_seconds,
-                        },
-                        AgentEvent::TurnEnded,
-                    ],
-                    None => vec![AgentEvent::TurnFailed {
-                        reason: redact_api_keys(&error.message),
-                    }],
+            Err(error) => match limits::usage_limit(error.code, &error.full_text()) {
+                Some(limit) => vec![
+                    AgentEvent::UsageLimitReached {
+                        limit: limit.limit,
+                        resets_in_seconds: limit.resets_in_seconds,
+                    },
+                    AgentEvent::TurnEnded,
+                ],
+                // The declined action failed the prompt: the feedback
+                // still goes on, and a lasting failure fails its prompt.
+                None if !feedback.is_empty() => {
+                    let text = feedback.join("\n\n");
+                    return self.prompt(output, text, Vec::new());
                 }
-            }
+                None => vec![AgentEvent::TurnFailed {
+                    reason: redact_api_keys(&error.message),
+                }],
+            },
         };
         output.events.extend(events);
         if let Phase::Ready { turn, .. } = &mut self.phase {
@@ -619,7 +617,7 @@ impl Conversation {
                         ..
                     }
                 );
-                if self.opening.read_only || !running {
+                if self.opening.access == Access::ReadOnly || !running {
                     output
                         .lines
                         .push(permission_answer(id, choose(&options, REJECT))?);
@@ -631,7 +629,7 @@ impl Conversation {
                     request: key.clone(),
                     description: describe(&tool_call),
                 });
-                self.open.insert(key, (id, options));
+                self.open.insert(key, OpenApproval { id, options });
             }
             Request::Unsupported { method } => {
                 output.lines.push(serde_json::to_string(&ErrorResponse {
@@ -646,6 +644,26 @@ impl Conversation {
             }
         }
         Ok(())
+    }
+}
+
+/// The `initialize` request's params: the driver offers no file system and
+/// no terminal, so the Gemini CLI uses its own tools.
+pub(super) fn initialize_params() -> InitializeParams {
+    InitializeParams {
+        protocol_version: wire::PROTOCOL_VERSION,
+        client_capabilities: ClientCapabilities {
+            fs: FileSystemCapabilities {
+                read_text_file: false,
+                write_text_file: false,
+            },
+            terminal: false,
+        },
+        client_info: ClientInfo {
+            name: "leiser_harness",
+            title: "leiser-harness",
+            version: env!("CARGO_PKG_VERSION"),
+        },
     }
 }
 
@@ -689,20 +707,19 @@ fn is_finished(status: ToolCallStatus) -> bool {
 /// A tool call's name in the chat: its ACP kind, such as `execute`, `edit`
 /// or `read`.
 fn tool_name(call: &ToolCallFields) -> String {
-    call.kind
-        .clone()
-        .filter(|kind| !kind.is_empty())
-        .unwrap_or_else(|| "tool".to_owned())
+    call.kind.map_or("tool", ToolKind::name).to_owned()
 }
 
 /// What an approval request asks for, from its tool call.
 fn describe(call: &ToolCallFields) -> String {
     let title = call.title.clone().filter(|title| !title.trim().is_empty());
-    match (call.kind.as_deref(), title) {
-        (Some("execute"), Some(title)) => format!("Run `{title}`"),
-        (Some("edit" | "delete" | "move"), Some(title)) => format!("Change files: {title}"),
+    match (call.kind, title) {
+        (Some(ToolKind::Execute), Some(title)) => format!("Run `{title}`"),
+        (Some(ToolKind::Edit | ToolKind::Delete | ToolKind::Move), Some(title)) => {
+            format!("Change files: {title}")
+        }
         (_, Some(title)) => title,
-        (Some("execute"), None) => "Run a command".to_owned(),
+        (Some(ToolKind::Execute), None) => "Run a command".to_owned(),
         (_, None) => "Use a tool".to_owned(),
     }
 }
@@ -712,7 +729,8 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::{Conversation, Opening, Output};
-    use crate::{AgentEvent, Answer};
+    use crate::gemini::wire::AuthMethod;
+    use crate::{Access, AgentEvent, Answer};
 
     type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
@@ -722,7 +740,7 @@ mod tests {
             resume: None,
             auth_method: None,
             harness_mcp_url: Some("http://127.0.0.1:1/mcp".to_owned()),
-            read_only: false,
+            access: Access::Chat,
         }
     }
 
@@ -783,7 +801,7 @@ mod tests {
     #[test]
     fn a_subscription_signs_in_before_the_session_opens() -> TestResult {
         let (mut conversation, _) = Conversation::open(Opening {
-            auth_method: Some("gemini-api-key"),
+            auth_method: Some(AuthMethod::ApiKey),
             ..opening()
         })?;
 
@@ -1025,9 +1043,39 @@ mod tests {
     }
 
     #[test]
+    fn a_declines_feedback_follows_also_when_the_prompt_failed() -> TestResult {
+        let mut conversation = ready()?;
+        conversation.user_message("go".to_owned())?;
+        conversation.receive(
+            &json!({"jsonrpc": "2.0", "id": 7, "method": "session/request_permission", "params": {
+                "sessionId": "s1", "toolCall": {"toolCallId": "t1", "kind": "execute"},
+                "options": [{"optionId": "cancel", "kind": "reject_once"}]}})
+            .to_string(),
+        )?;
+        conversation.answer(
+            "7",
+            Answer::Decline {
+                feedback: Some("Not that way".to_owned()),
+            },
+        )?;
+
+        let failed = conversation.receive(
+            &json!({"jsonrpc": "2.0", "id": 2, "error": {"code": 500, "message": "Tool canceled"}})
+                .to_string(),
+        )?;
+
+        assert_eq!(failed.events, Vec::<AgentEvent>::new());
+        assert_eq!(
+            lines(&failed)?[0]["params"]["prompt"][0]["text"],
+            "Not that way"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn a_read_only_session_declines_every_permission_request() -> TestResult {
         let (mut conversation, _) = Conversation::open(Opening {
-            read_only: true,
+            access: Access::ReadOnly,
             harness_mcp_url: None,
             ..opening()
         })?;

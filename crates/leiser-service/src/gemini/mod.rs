@@ -51,8 +51,9 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::{mpsc, oneshot};
 
-use self::conversation::{Conversation, Opening, Output, ProtocolError};
+use self::conversation::{Conversation, Opening, Output, ProtocolError, initialize_params};
 use self::policy::PolicyFile;
+use self::wire::{AuthMethod, AuthenticateParams, ClientRequest, JSONRPC};
 use crate::installed::{self, Found, Program};
 use crate::{
     Access, AgentCli, AgentEvent, AgentSession, AgentSessionId, Driver, DriverError, Environment,
@@ -66,10 +67,6 @@ const CHANNEL_BUFFER: usize = 64;
 
 /// How long the Gemini CLI may take to exit after its input closes.
 const EXIT_GRACE: Duration = Duration::from_secs(5);
-
-/// The ACP authentication methods the driver signs in with.
-const OAUTH: &str = "oauth-personal";
-const API_KEY: &str = "gemini-api-key";
 
 /// Switches the Gemini CLI's sandbox off, whatever its settings say: it
 /// does not work with ACP.
@@ -250,10 +247,18 @@ impl Driver for GeminiDriver {
     }
 }
 
-/// Runs `initialize` and `authenticate` for [`OAUTH`] over ACP.
+/// Runs `initialize` and `authenticate` for [`AuthMethod::Google`] over
+/// ACP.
 async fn sign_in(mut stdin: ChildStdin, stdout: ChildStdout) -> LoginOutcome {
     let failed = |reason: String| LoginOutcome::Failed { reason };
-    let lines = login_lines();
+    let lines = match login_lines() {
+        Ok(lines) => lines,
+        Err(error) => {
+            return failed(format!(
+                "could not encode a line for the Gemini CLI: {error}"
+            ));
+        }
+    };
     for line in lines {
         let written = async {
             stdin.write_all(line.as_bytes()).await?;
@@ -287,18 +292,23 @@ async fn sign_in(mut stdin: ChildStdin, stdout: ChildStdout) -> LoginOutcome {
 }
 
 /// The `initialize` (id 0) and `authenticate` (id 1) requests of a login.
-fn login_lines() -> Vec<String> {
-    [
-        serde_json::json!({"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {
-            "protocolVersion": wire::PROTOCOL_VERSION,
-            "clientCapabilities": {"fs": {"readTextFile": false, "writeTextFile": false}, "terminal": false},
-        }}),
-        serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "authenticate",
-            "params": {"methodId": OAUTH}}),
-    ]
-    .iter()
-    .map(ToString::to_string)
-    .collect()
+fn login_lines() -> serde_json::Result<[String; 2]> {
+    Ok([
+        serde_json::to_string(&ClientRequest {
+            jsonrpc: JSONRPC,
+            id: 0,
+            method: "initialize",
+            params: initialize_params(),
+        })?,
+        serde_json::to_string(&ClientRequest {
+            jsonrpc: JSONRPC,
+            id: 1,
+            method: "authenticate",
+            params: AuthenticateParams {
+                method_id: AuthMethod::Google,
+            },
+        })?,
+    ])
 }
 
 /// The Gemini CLI's `--approval-mode` for a permission mode it supports;
@@ -351,12 +361,12 @@ fn session_command(mut command: Command, spec: &SessionSpec, policy: OsString) -
 }
 
 /// The ACP authentication method a subscription signs in with.
-fn auth_method(spec: &SessionSpec) -> Option<&'static str> {
+fn auth_method(spec: &SessionSpec) -> Option<AuthMethod> {
     spec.subscription
         .as_ref()
         .map(|subscription| match subscription.api_key {
-            Some(_) => API_KEY,
-            None => OAUTH,
+            Some(_) => AuthMethod::ApiKey,
+            None => AuthMethod::Google,
         })
 }
 
@@ -378,8 +388,7 @@ impl GeminiDriver {
                 ))
             })?
             .to_owned();
-        let read_only = spec.access == Access::ReadOnly;
-        let policy = PolicyFile::write(read_only).map_err(DriverError::Spawn)?;
+        let policy = PolicyFile::write(spec.access).map_err(DriverError::Spawn)?;
         let mut child = session_command(
             Command::from(program.command()),
             spec,
@@ -401,7 +410,7 @@ impl GeminiDriver {
             resume,
             auth_method: auth_method(spec),
             harness_mcp_url: spec.harness_mcp_url.clone(),
-            read_only,
+            access: spec.access,
         };
         let (id_sender, id) = oneshot::channel();
         let (input, input_receiver) = mpsc::channel(CHANNEL_BUFFER);

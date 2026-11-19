@@ -13,12 +13,15 @@ use crate::driver::redact_api_keys;
 const TOO_MANY_REQUESTS: i64 = 429;
 
 /// Words that mark a quota error whatever its status.
-const QUOTA_WORDS: [&str; 4] = [
+const QUOTA_WORDS: [&str; 3] = [
     "resource_exhausted",
     "exhausted your daily quota",
-    "exhausted your capacity",
     "quota exceeded",
 ];
+
+/// Words of an overloaded model: it is busy for everyone, so another
+/// subscription would not help, and the turn fails instead.
+const CAPACITY_WORDS: [&str; 2] = ["model_capacity_exhausted", "exhausted your capacity"];
 
 /// Phrases that come right before the time a quota resets in.
 const RESET_PHRASES: [&str; 4] = ["reset after", "retry after", "retry in", "resets in"];
@@ -33,13 +36,14 @@ pub(super) struct Limit {
 /// The usage limit the error with `code` and `text` reports, if it is one.
 pub(super) fn usage_limit(code: i64, text: &str) -> Option<Limit> {
     let lower = text.to_lowercase();
+    if CAPACITY_WORDS.iter().any(|word| lower.contains(word)) {
+        return None;
+    }
     if code != TOO_MANY_REQUESTS && !QUOTA_WORDS.iter().any(|word| lower.contains(word)) {
         return None;
     }
     let limit = if lower.contains("daily quota") || lower.contains("per day") {
         "Daily quota".to_owned()
-    } else if lower.contains("capacity") {
-        "Model capacity".to_owned()
     } else if lower.contains("spending cap") {
         "Spending cap".to_owned()
     } else if lower.contains("per minute") || lower.contains("rate limit") {
@@ -155,6 +159,14 @@ mod tests {
         assert!(
             usage_limit(500, "RESOURCE_EXHAUSTED: Please retry in 500ms")
                 .is_some_and(|limit| limit.resets_in_seconds == Some(1))
+        );
+    }
+
+    #[test]
+    fn an_overloaded_model_is_no_limit_of_the_subscription() {
+        assert_eq!(
+            usage_limit(429, "You have exhausted your capacity on this model."),
+            None
         );
     }
 

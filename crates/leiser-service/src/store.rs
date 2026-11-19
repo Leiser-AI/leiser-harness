@@ -57,10 +57,11 @@ use crate::{
 ///   chat's permission mode (Auto), transcript entries for the
 ///   developer's answers and for continuing on another subscription,
 ///   whether a subscription is interchangeable (no), and a chat's usage
-///   limit and the messages it holds back (none). Also the Gemini CLI
-///   and Google as an agent CLI and a provider: data that names them is
-///   refused by an older harness service as unreadable, never changed.
-const VERSION: u32 = 3;
+///   limit and the messages it holds back (none).
+/// - 4: the Gemini CLI and Google as an agent CLI and a provider. The
+///   shape is version 3's, so version 3 data reads as it is; the number
+///   makes an older harness service refuse data that may name them.
+const VERSION: u32 = 4;
 
 const STATE_FILE: &str = "state.json";
 const CHATS_DIR: &str = "chats";
@@ -111,7 +112,7 @@ pub enum StorageError {
     UnsupportedVersion { found: u32, supported: u32 },
 }
 
-/// The contents of `state.json`, storage version 3.
+/// The contents of `state.json`, storage versions 3 and 4.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct StateV3 {
     pub next_id: u64,
@@ -865,7 +866,8 @@ fn parse_state(path: &Path, bytes: &[u8]) -> Result<Stored, StorageError> {
                 .map_err(corrupt)?
                 .state,
         )),
-        3 => Ok(Stored::V3(
+        // Version 4 has version 3's shape.
+        3 | 4 => Ok(Stored::V3(
             serde_json::from_slice::<VersionedV3>(bytes)
                 .map_err(corrupt)?
                 .state,
@@ -891,6 +893,26 @@ mod tests {
     fn half_then_disk_full(file: &mut File, line: &[u8]) -> io::Result<()> {
         file.write_all(&line[..line.len() / 2])?;
         Err(io::Error::new(io::ErrorKind::StorageFull, "disk full"))
+    }
+
+    #[test]
+    fn version_3_data_loads_and_is_saved_as_version_4() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, mut state) = Store::open(dir.path(), AgentCli::ClaudeCode).unwrap();
+        state.next_id = 7;
+        store.save(&state).unwrap();
+        let path = dir.path().join(STATE_FILE);
+        let mut stored: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        stored["version"] = 3.into();
+        fs::write(&path, serde_json::to_vec(&stored).unwrap()).unwrap();
+
+        let (store, state) = Store::open(dir.path(), AgentCli::ClaudeCode).unwrap();
+        store.save(&state).unwrap();
+
+        assert_eq!(state.next_id, 7);
+        let saved: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved["version"], 4);
     }
 
     #[test]

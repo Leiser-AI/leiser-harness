@@ -135,11 +135,47 @@ pub(super) struct ToolCallFields {
     #[serde(default)]
     pub title: Option<String>,
     #[serde(default)]
-    pub kind: Option<String>,
+    pub kind: Option<ToolKind>,
     #[serde(default)]
     pub status: Option<ToolCallStatus>,
     #[serde(default)]
     pub content: Option<Vec<ToolCallContent>>,
+}
+
+/// What kind of tool a tool call runs, as ACP classifies it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum ToolKind {
+    Read,
+    Edit,
+    Delete,
+    Move,
+    Search,
+    Execute,
+    Think,
+    Fetch,
+    SwitchMode,
+    /// MCP tools, and kinds newer than this driver.
+    #[serde(other)]
+    Other,
+}
+
+impl ToolKind {
+    /// Its name in the chat, as ACP spells it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Edit => "edit",
+            Self::Delete => "delete",
+            Self::Move => "move",
+            Self::Search => "search",
+            Self::Execute => "execute",
+            Self::Think => "think",
+            Self::Fetch => "fetch",
+            Self::SwitchMode => "switch_mode",
+            Self::Other => "other",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -403,7 +439,18 @@ pub(super) struct ClientInfo {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct AuthenticateParams {
-    pub method_id: &'static str,
+    pub method_id: AuthMethod,
+}
+
+/// The Gemini CLI's ACP authentication methods the driver signs in with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub(super) enum AuthMethod {
+    /// Sign in with Google: the login kept in the config home.
+    #[serde(rename = "oauth-personal")]
+    Google,
+    /// A Gemini API key from `GEMINI_API_KEY`.
+    #[serde(rename = "gemini-api-key")]
+    ApiKey,
 }
 
 #[derive(Debug, Serialize)]
@@ -421,14 +468,21 @@ pub(super) struct LoadSessionParams {
     pub mcp_servers: Vec<McpServer>,
 }
 
-/// An MCP server for the session, reached over streamable HTTP.
+/// An MCP server for the session.
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct McpServer {
     #[serde(rename = "type")]
-    pub kind: &'static str,
+    pub transport: McpTransport,
     pub name: &'static str,
     pub url: String,
     pub headers: [HttpHeader; 0],
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum McpTransport {
+    /// Streamable HTTP.
+    Http,
 }
 
 #[derive(Debug, Clone, Serialize)]

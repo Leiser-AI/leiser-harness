@@ -32,6 +32,9 @@ pub(crate) const AI_NAMES: [&str; 7] = [
 /// `Claude Opus 4.5 <noreply@anthropic.com>`.
 const CLAUDE_MODELS: [&str; 5] = ["code", "opus", "sonnet", "haiku", "fable"];
 
+/// Email addresses AI agents commit as.
+pub(crate) const AI_EMAILS: [&str; 2] = ["noreply@anthropic.com", "noreply@openai.com"];
+
 /// Email domains of the companies behind the agent CLIs.
 const AI_EMAIL_DOMAINS: [&str; 2] = ["anthropic.com", "openai.com"];
 

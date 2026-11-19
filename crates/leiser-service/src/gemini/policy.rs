@@ -15,15 +15,13 @@ use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::HARNESS_MCP_SERVER;
-use crate::hard_blocks::{AI_NAMES, PROTECTED_BRANCHES};
+use crate::hard_blocks::{AI_EMAILS, AI_NAMES, PROTECTED_BRANCHES};
+use crate::{Access, HARNESS_MCP_SERVER};
 
 /// The Gemini CLI's shell tool.
 const SHELL_TOOL: &str = "run_shell_command";
 /// The Gemini CLI's tools that write files.
 const EDIT_TOOLS: [&str; 2] = ["write_file", "replace"];
-/// Email addresses AI agents commit as.
-const AI_EMAILS: [&str; 2] = ["noreply@anthropic.com", "noreply@openai.com"];
 
 /// The highest priority in a tier: the hard blocks win over everything
 /// else in the user tier.
@@ -38,7 +36,7 @@ const GIT_COMMIT: &str = r"\bgit\b[\s\S]*\bcommit\b";
 const END: &str = r"([\s;&|)]|$)";
 
 /// The rules of an agent session's policy file.
-pub(super) fn rules(read_only: bool) -> String {
+pub(super) fn rules(access: Access) -> String {
     let mut text =
         String::from("# Written by leiser-harness for one agent session; removed when it ends.\n");
     let branches = PROTECTED_BRANCHES.join("|");
@@ -87,7 +85,7 @@ pub(super) fn rules(read_only: bool) -> String {
         text,
         "\n[[rule]]\nmcpName = \"{HARNESS_MCP_SERVER}\"\ndecision = \"allow\"\npriority = {ALLOW_PRIORITY}\n"
     );
-    if read_only {
+    if access == Access::ReadOnly {
         for tool in EDIT_TOOLS {
             let _ = write!(
                 text,
@@ -133,7 +131,7 @@ pub(super) struct PolicyFile {
 impl PolicyFile {
     /// Writes the rules to a new file in the temporary directory, which
     /// only the developer can write to on macOS and Windows.
-    pub fn write(read_only: bool) -> io::Result<Self> {
+    pub fn write(access: Access) -> io::Result<Self> {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -148,7 +146,7 @@ impl PolicyFile {
             .write(true)
             .create_new(true)
             .open(&path)?;
-        file.write_all(rules(read_only).as_bytes())?;
+        file.write_all(rules(access).as_bytes())?;
         Ok(Self { path })
     }
 
@@ -166,17 +164,18 @@ impl Drop for PolicyFile {
 #[cfg(test)]
 mod tests {
     use super::rules;
+    use crate::Access;
 
     /// The commands a rule's pattern denies, by a small regular expression
     /// matcher for the subset the patterns use.
     fn denied(command: &str) -> bool {
-        patterns(false)
+        patterns(Access::Chat)
             .iter()
             .any(|pattern| regex_lite::matches(pattern, command))
     }
 
-    fn patterns(read_only: bool) -> Vec<String> {
-        rules(read_only)
+    fn patterns(access: Access) -> Vec<String> {
+        rules(access)
             .lines()
             .filter_map(|line| line.strip_prefix("commandRegex = '"))
             .filter_map(|line| line.strip_suffix('\''))
@@ -186,7 +185,7 @@ mod tests {
 
     #[test]
     fn the_policy_parses_as_toml_with_a_rule_per_block() -> Result<(), toml::de::Error> {
-        let parsed: toml::Table = toml::from_str(&rules(true))?;
+        let parsed: toml::Table = toml::from_str(&rules(Access::ReadOnly))?;
 
         let rules = parsed
             .get("rule")
