@@ -25,7 +25,12 @@ pub(crate) struct Finished {
 /// platform. It finds the worktree in `LEISER_WORKTREE` and the main
 /// checkout in `LEISER_REPOSITORY`, for example to copy files that git
 /// ignores.
-pub(crate) async fn run(script: &str, worktree: &Path, repository: &Path) -> Finished {
+pub(crate) async fn run(
+    script: &str,
+    worktree: &Path,
+    repository: &Path,
+    stopped: impl Future<Output = ()>,
+) -> Finished {
     let shell = match shell(worktree).await {
         Ok(shell) => shell,
         Err(reason) => {
@@ -45,7 +50,9 @@ pub(crate) async fn run(script: &str, worktree: &Path, repository: &Path) -> Fin
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    match collect(command).await {
+    #[cfg(unix)]
+    command.process_group(0);
+    match collect(command, stopped).await {
         Ok(finished) => finished,
         Err(error) => Finished {
             exit_code: None,
@@ -54,18 +61,61 @@ pub(crate) async fn run(script: &str, worktree: &Path, repository: &Path) -> Fin
     }
 }
 
-async fn collect(mut command: Command) -> io::Result<Finished> {
+async fn collect(mut command: Command, stopped: impl Future<Output = ()>) -> io::Result<Finished> {
     let mut child = command.spawn()?;
     let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
         return Err(io::Error::other("missing script output pipes"));
     };
-    let (status, (mut text, stdout_cut), (errors, stderr_cut)) =
-        tokio::try_join!(child.wait(), read_tail(stdout), read_tail(stderr))?;
+    // Keep the leader unreaped while its pipes are open. Its PID cannot
+    // be reused for a different group between cancellation and the kill.
+    let completion = async {
+        let tails = tokio::try_join!(read_tail(stdout), read_tail(stderr))?;
+        Ok::<_, io::Error>((child.wait().await?, tails))
+    };
+    let (status, ((mut text, stdout_cut), (errors, stderr_cut))) = tokio::select! {
+        result = completion => result?,
+        () = stopped => {
+            stop_tree(&mut child).await?;
+            return Err(io::Error::new(io::ErrorKind::Interrupted, "service stopped"));
+        }
+    };
     text.push_str(&errors);
     Ok(Finished {
         exit_code: status.code(),
         output: tail(text, stdout_cut || stderr_cut),
     })
+}
+
+/// Ends the shell and its foreground workers, then reaps the shell.
+async fn stop_tree(child: &mut tokio::process::Child) -> io::Result<()> {
+    let Some(id) = child.id() else {
+        return Ok(());
+    };
+    #[cfg(unix)]
+    let mut stop = {
+        let mut command = Command::new("/bin/kill");
+        command.args(["-KILL", "--", &format!("-{id}")]);
+        command
+    };
+    #[cfg(windows)]
+    let mut stop = {
+        let windows = std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into());
+        let mut command = Command::new(PathBuf::from(windows).join("System32/taskkill.exe"));
+        command.args(["/PID", &id.to_string(), "/T", "/F"]);
+        command
+    };
+    let stopped = stop
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await;
+    if !matches!(stopped, Ok(status) if status.success()) {
+        tracing::warn!(id, "could not terminate the script process tree");
+        child.start_kill()?;
+    }
+    child.wait().await?;
+    Ok(())
 }
 
 /// Drain the pipe even after the budget is reached so the child can exit.

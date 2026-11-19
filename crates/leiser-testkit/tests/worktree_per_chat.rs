@@ -462,47 +462,71 @@ async fn the_main_checkouts_branch_is_not_the_agents_to_name() -> TestResult {
     Ok(())
 }
 
-#[cfg(unix)]
+/// Invoked as a foreground child of the setup shell. Holding a file lock
+/// gives the parent an OS-level witness that works on Windows and Unix.
+#[test]
+fn setup_script_worker() -> TestResult {
+    let Some(repo) = std::env::var_os("LEISER_TEST_SETUP_LOCK_DIR") else {
+        return Ok(());
+    };
+    let repo = Path::new(&repo);
+    let lock = std::fs::File::create(repo.join("worker.lock"))?;
+    lock.lock()?;
+    std::fs::write(repo.join("worker.ready"), [])?;
+    std::thread::sleep(std::time::Duration::from_secs(30));
+    Ok(())
+}
+
 #[tokio::test]
 async fn stopping_the_service_ends_a_running_setup_script() -> TestResult {
     use std::time::Duration;
     let harness = start_service(&Script::new())?;
     let service = harness.connect();
     let repo = TestRepo::with_remote()?;
+    let worker = format!("setup-worker{}", std::env::consts::EXE_SUFFIX);
+    std::fs::copy(std::env::current_exe()?, repo.path().join(&worker))?;
     configure(
         &repo,
-        r#"[worktree]
-setup_script = 'echo $$ > "$LEISER_REPOSITORY/setup.pid"; exec sleep 30'
-"#,
+        &format!(
+            r#"[worktree]
+setup_script = '''
+LEISER_TEST_SETUP_LOCK_DIR="$LEISER_REPOSITORY" "$LEISER_REPOSITORY/{worker}" --exact setup_script_worker
+echo finished
+'''
+"#
+        ),
     )?;
     let repository = add_repository(&service, &repo).await?;
     start_chat(&service, repository, Checkout::NewWorktree).await?;
-    let pid = tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            if let Ok(pid) = std::fs::read_to_string(repo.path().join("setup.pid"))
-                && let Ok(pid) = pid.trim().parse::<u32>()
-            {
-                break pid;
-            }
-            tokio::task::yield_now().await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !repo.path().join("worker.ready").exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await?;
+    let lock = std::fs::File::options()
+        .read(true)
+        .write(true)
+        .open(repo.path().join("worker.lock"))?;
+    assert!(matches!(
+        lock.try_lock(),
+        Err(std::fs::TryLockError::WouldBlock)
+    ));
     drop(harness);
     service.stopped().await;
     tokio::time::timeout(Duration::from_secs(2), async {
-        while std::process::Command::new("kill")
-            .args(["-0", &pid.to_string()])
-            .output()?
-            .status
-            .success()
-        {
-            tokio::time::sleep(Duration::from_millis(10)).await;
+        loop {
+            match lock.try_lock() {
+                Ok(()) => return Ok(()),
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                Err(std::fs::TryLockError::Error(error)) => return Err(error),
+            }
         }
-        Ok::<_, std::io::Error>(())
     })
     .await
-    .map_err(|_| "setup script survived service shutdown")??;
+    .map_err(|_| "setup worker survived service shutdown")??;
     Ok(())
 }
 

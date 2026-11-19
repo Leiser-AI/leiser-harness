@@ -201,7 +201,6 @@ impl LoginProcess {
         tokio::spawn(async move {
             // Closing the output tells the service it is safe to remove
             // the login directory. Keep its sender until the child exits.
-            let _until_exit = lines;
             let status = tokio::select! {
                 status = child.wait() => status,
                 // The login was dropped: stop it.
@@ -219,11 +218,11 @@ impl LoginProcess {
                     reason: format!("could not wait for the login: {error}"),
                 },
             };
-            tokio::select! {
-                () = async { while readers.join_next().await.is_some() {} } => {
-                    let _ = finished.send(outcome);
+            if finished.send(outcome).is_ok() {
+                tokio::select! {
+                    () = async { while readers.join_next().await.is_some() {} } => {}
+                    () = lines.closed() => {}
                 }
-                () = finished.closed() => {}
             }
         });
         Ok(Self {

@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::{broadcast, mpsc, oneshot};
-use tokio::task::JoinHandle;
+use tokio::task::{JoinHandle, JoinSet};
 
 use crate::checkpoint::{self, CheckpointError};
 use crate::cli_extensions::{self, CliExtensionError};
@@ -692,7 +692,9 @@ impl Login {
                 tokio::select! {
                     _ = &mut stopped => {
                         outcome.close();
-                        while output.recv().await.is_some() {}
+                        if outcome.try_recv().is_err() {
+                            while output.recv().await.is_some() {}
+                        }
                         return;
                     }
                     text = output.recv() => match text {
@@ -769,6 +771,7 @@ struct State {
     status_changes: u64,
     /// Background work (worktrees, scripts) that has not finished yet.
     background_running: usize,
+    scripts: JoinSet<()>,
     /// An update of the harness service waits until no turn, worktree or
     /// script runs.
     update_waiting: bool,
@@ -850,6 +853,7 @@ impl State {
             generation: 0,
             status_changes,
             background_running: 0,
+            scripts: JoinSet::new(),
             update_waiting: false,
         })
     }
@@ -891,6 +895,7 @@ impl State {
                 Some(message) = sessions.recv() => self.on_session(message).await,
                 // Never closes: `self` holds a sender.
                 Some(finished) = background.recv() => self.on_background(finished).await,
+                Some(_) = self.scripts.join_next() => {}
                 _ = polls.tick() => self.poll_pull_requests(),
                 _ = map_polls.tick() => self.poll_wayfinder_maps(),
                 // Never closes: the harness MCP server holds a sender.
@@ -910,6 +915,8 @@ impl State {
                 break;
             }
         }
+        drop(background);
+        while self.scripts.join_next().await.is_some() {}
     }
 
     /// Whether the service can stop without interrupting anything: no turn
@@ -1480,11 +1487,9 @@ impl State {
         let background = self.background.clone();
         self.emit(Event::ScriptStarted { chat: id, script });
         self.background_running += 1;
-        tokio::spawn(async move {
-            let finished = tokio::select! {
-                finished = script::run(&text, &working_directory, &repository) => finished,
-                () = background.closed() => return,
-            };
+        self.scripts.spawn(async move {
+            let finished =
+                script::run(&text, &working_directory, &repository, background.closed()).await;
             let _ = background
                 .send(Background::ScriptFinished {
                     chat: id,

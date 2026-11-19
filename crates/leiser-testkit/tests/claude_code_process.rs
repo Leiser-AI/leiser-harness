@@ -74,6 +74,19 @@ fn scripts() -> TestResult<&'static Scripts> {
 }
 
 #[tokio::test]
+async fn a_completed_login_reports_its_outcome_before_output_is_drained() -> TestResult {
+    let mut command = tokio::process::Command::new("sh");
+    command.args([
+        "-c",
+        "i=0; while [ $i -lt 100 ]; do echo line; i=$((i+1)); done",
+    ]);
+    let login = leiser_service::LoginProcess::spawn(command)?;
+    let outcome = tokio::time::timeout(Duration::from_secs(2), login.outcome).await??;
+    assert_eq!(outcome, leiser_service::LoginOutcome::SignedIn);
+    Ok(())
+}
+
+#[tokio::test]
 async fn login_output_stays_open_until_the_cancelled_child_is_reaped() -> TestResult {
     let mut command = tokio::process::Command::new("sh");
     command.args(["-c", "echo $$; exec 1>&- 2>&-; exec sleep 30"]);
