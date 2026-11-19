@@ -644,6 +644,7 @@ export type AttentionReason =
   | { type: "turn_failed"; reason: string }
   | { type: "interrupted" }
   | { type: "session_ended" }
+  | { type: "stopped" }
   | {
       type: "usage_limit";
       limit: string;

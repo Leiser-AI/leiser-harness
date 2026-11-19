@@ -494,6 +494,8 @@ function reasonText(reason: AttentionReason): string {
       return "The turn was interrupted";
     case "session_ended":
       return "The agent session ended before the turn did";
+    case "stopped":
+      return "The chat stopped without a turn, for example after its setup script failed";
     case "usage_limit":
       return reason.resets_in_seconds === null
         ? `Stopped at the ${reason.limit}`

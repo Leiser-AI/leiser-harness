@@ -389,10 +389,7 @@ async function readAndRender(): Promise<void> {
         async (overview) =>
           [
             overview.repository,
-            await service
-              .queueCommand({ type: "read", repository: overview.repository })
-              .then((answer) => answer.queue)
-              .catch(() => null),
+            await readQueue(overview.repository),
           ] as const,
       ),
     ),
@@ -1544,6 +1541,18 @@ function renderRepoCheck(repository: RepositoryOverview, check: RepoCheck): void
 /** The open maps of a repository; none when they could not be read. */
 function openMaps(maps: WayfinderMaps | null): WayfinderMap[] {
   return maps?.type === "read" ? maps.maps : [];
+}
+
+/** The repository's task queue; `null` when the service cannot read it, such as one older than the app. */
+async function readQueue(repository: RepositoryId): Promise<RepositoryQueue | null> {
+  try {
+    return (await service.queueCommand({ type: "read", repository })).queue;
+  } catch (error) {
+    if (!(error instanceof service.ServiceError && error.error.type === "unreadable_command")) {
+      console.warn("could not read the task queue", error);
+    }
+    return null;
+  }
 }
 
 /** The sidebar's row that opens the repository's task queue. */

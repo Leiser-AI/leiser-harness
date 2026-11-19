@@ -23,21 +23,26 @@
 //!   usage limits until one resets, a task completes on it or the
 //!   developer resumes the queue.
 //! - The developer can take a task's chat up again: a task that needed
-//!   attention is running again once its chat works.
+//!   attention is running again once its chat works. The developer's own
+//!   turns are not held back by the concurrency limit.
 //!
 //! The queue is kept in `queue.json` in the data directory with a storage
 //! version of its own ([`QUEUE_VERSION`]), next to `state.json` (ADR
 //! 0006). An older harness service never reads the file, so adding it
 //! needed no new version of `state.json`. A restart puts a task that was
 //! starting back in line, and marks a running one as needing attention:
-//! the turn did not survive the restart.
+//! the turn did not survive the restart. A crash in the moment between a
+//! task's worktree chat being stored and the queue learning of it leaves
+//! that chat behind and starts the task again.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
 use crate::store::{StorageError, Store};
-use crate::{AgentCli, ChatId, PermissionMode, Provider, RepositoryId, SubscriptionId};
+use crate::{
+    AgentCli, ChatId, CommandError, PermissionMode, Provider, RepositoryId, SubscriptionId,
+};
 
 /// The most tasks a repository's queue runs at once.
 pub const MAX_CONCURRENCY: u32 = 8;
@@ -276,6 +281,9 @@ pub enum AttentionReason {
     Interrupted,
     /// The agent session ended before the turn did.
     SessionEnded,
+    /// The chat stopped without a turn end, for example after its setup
+    /// script failed.
+    Stopped,
     /// The turn stopped at a usage limit and could not move on.
     UsageLimit {
         limit: String,
@@ -314,9 +322,17 @@ pub(crate) struct LimitKey {
     pub subscription: Option<SubscriptionId>,
 }
 
-/// Whether a subscription is at a usage limit, as far as the queue knows.
+/// Whether a subscription is at a usage limit, as far as known.
+/// A subscription a task could run on, with what the rest of the
+/// service knows of its usage limit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum KnownLimit {
+pub(crate) struct Candidate {
+    pub key: LimitKey,
+    pub known: KnownLimit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum KnownLimit {
     Free,
     /// At a limit that resets then, if known.
     Limited {
@@ -327,7 +343,7 @@ enum KnownLimit {
 /// A task the queue starts now: its chat starts with these settings and
 /// `message`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Start {
+pub(crate) struct TaskStart {
     pub item: QueueItemId,
     pub repository: RepositoryId,
     pub message: String,
@@ -339,10 +355,25 @@ pub(crate) struct Start {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ChatSeen {
     pub activity: Activity,
-    /// The chat's open pull request: number and address.
-    pub pull_request: Option<(u64, String)>,
+    pub pull_request: Option<OpenPullRequest>,
     /// Where the chat runs now.
     pub on: LimitKey,
+}
+
+/// A task's chat's open pull request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OpenPullRequest {
+    pub number: u64,
+    pub url: String,
+}
+
+/// A chat the queue watches for one of its tasks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Watched {
+    pub chat: ChatId,
+    /// Whether the queue needs to know how the chat's last turn ended
+    /// once no turn runs: the task is running.
+    pub needs_end: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -374,45 +405,48 @@ pub(crate) struct LimitSeen {
     pub limit: String,
     pub key: LimitKey,
     pub resets_at: Option<u64>,
-    /// Other subscriptions of the provider the service knows to be at a
-    /// limit, with when they reset, if known: the queue does not try them
-    /// either.
-    pub others: Vec<(LimitKey, Option<u64>)>,
 }
 
-/// What [`Queue::cancel`] leaves for the service to do.
+/// What [`TaskQueue::cancel`] leaves for the service to do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Cancelled {
-    Done,
-    /// Interrupt the chat's running turn.
-    Interrupt(ChatId),
+pub(crate) enum AfterCancel {
+    Nothing,
+    /// Stop the chat's work: its running turn, or the first message that
+    /// waits for its setup script.
+    StopChat(ChatId),
 }
 
 /// Every repository's queue.
 #[derive(Debug, Default)]
-pub(crate) struct Queue {
+pub(crate) struct TaskQueue {
     last_item: u64,
     repositories: BTreeMap<RepositoryId, RepositoryState>,
     /// Every repository's tasks, in line order.
     items: Vec<Item>,
-    /// Usage limits tasks stopped at, with when they reset, if known.
+    /// Usage limits of agent CLIs' default logins that tasks stopped at,
+    /// with when they reset, if known. The service keeps those of
+    /// subscriptions; they come in with [`Candidate`]s.
     limits: BTreeMap<LimitKey, Option<u64>>,
+    /// Subscriptions' usage limits the developer told the queue to try
+    /// again ([`TaskQueue::resume`]), with the reset the service knew then.
+    /// A new limit there counts again.
+    forgiven: BTreeMap<LimitKey, Option<u64>>,
     /// Repositories whose queued tasks all wait for usage limits, with the
-    /// first reset, if known. Set by [`Queue::plan`].
+    /// first reset, if known. Set by [`TaskQueue::plan`].
     waiting_for_limits: BTreeMap<RepositoryId, Option<u64>>,
-    /// Whether [`Queue::plan`] has something to look at.
+    /// Whether [`TaskQueue::plan`] has something to look at.
     plan_due: bool,
-    /// Repositories whose queue changed since [`Queue::take_changed`].
+    /// Repositories whose queue changed since [`TaskQueue::take_changed`].
     changed: BTreeSet<RepositoryId>,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct RepositoryState {
     settings: QueueSettings,
     paused: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct Item {
     id: QueueItemId,
     repository: RepositoryId,
@@ -422,8 +456,8 @@ struct Item {
     state: ItemState,
 }
 
-/// A task's state as kept and stored: [`QueueItemState`] with absolute
-/// reset times.
+/// A task's state as kept and stored (not a protocol type):
+/// [`QueueItemState`] with absolute reset times.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ItemState {
@@ -462,6 +496,9 @@ enum Attention {
     },
     Interrupted,
     SessionEnded,
+    /// No turn end came: the first message waits for nothing, for example
+    /// after the setup script failed.
+    Stopped,
     UsageLimit {
         limit: String,
         subscription: Option<SubscriptionId>,
@@ -525,6 +562,7 @@ impl Attention {
             },
             Self::Interrupted => AttentionReason::Interrupted,
             Self::SessionEnded => AttentionReason::SessionEnded,
+            Self::Stopped => AttentionReason::Stopped,
             Self::UsageLimit {
                 limit,
                 subscription,
@@ -539,20 +577,97 @@ impl Attention {
     }
 }
 
-/// The contents of `queue.json`, storage version 1.
+/// The contents of `queue.json`, storage version 1. Separate from the
+/// protocol types, so a change of the local interface cannot change it.
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct QueueV1 {
     last_item: u64,
     repositories: Vec<RepositoryV1>,
-    items: Vec<Item>,
+    items: Vec<ItemV1>,
     limits: Vec<LimitV1>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 struct RepositoryV1 {
     repository: RepositoryId,
-    #[serde(flatten)]
-    state: RepositoryState,
+    settings: SettingsV1,
+    paused: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+struct SettingsV1 {
+    concurrency: u32,
+    agent_cli: Option<AgentCli>,
+    permission_mode: Option<PermissionMode>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ItemV1 {
+    id: QueueItemId,
+    repository: RepositoryId,
+    task: TaskV1,
+    agent_cli: Option<AgentCli>,
+    permission_mode: Option<PermissionMode>,
+    state: ItemState,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum TaskV1 {
+    Prompt { text: String },
+    Issue { number: u64 },
+}
+
+impl From<SettingsV1> for QueueSettings {
+    fn from(stored: SettingsV1) -> Self {
+        Self {
+            concurrency: stored.concurrency,
+            agent_cli: stored.agent_cli,
+            permission_mode: stored.permission_mode,
+        }
+    }
+}
+
+impl From<QueueSettings> for SettingsV1 {
+    fn from(settings: QueueSettings) -> Self {
+        Self {
+            concurrency: settings.concurrency,
+            agent_cli: settings.agent_cli,
+            permission_mode: settings.permission_mode,
+        }
+    }
+}
+
+impl From<ItemV1> for Item {
+    fn from(stored: ItemV1) -> Self {
+        Self {
+            id: stored.id,
+            repository: stored.repository,
+            task: match stored.task {
+                TaskV1::Prompt { text } => QueueTask::Prompt { text },
+                TaskV1::Issue { number } => QueueTask::Issue { number },
+            },
+            agent_cli: stored.agent_cli,
+            permission_mode: stored.permission_mode,
+            state: stored.state,
+        }
+    }
+}
+
+impl From<&Item> for ItemV1 {
+    fn from(item: &Item) -> Self {
+        Self {
+            id: item.id,
+            repository: item.repository,
+            task: match &item.task {
+                QueueTask::Prompt { text } => TaskV1::Prompt { text: text.clone() },
+                QueueTask::Issue { number } => TaskV1::Issue { number: *number },
+            },
+            agent_cli: item.agent_cli,
+            permission_mode: item.permission_mode,
+            state: item.state.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -580,7 +695,7 @@ struct VersionedV1 {
     queue: QueueV1,
 }
 
-impl Queue {
+impl TaskQueue {
     /// Reads the queue from the data directory; a directory without one
     /// has an empty queue. Tasks that were starting are queued again, and
     /// running ones need attention: no turn survives a restart.
@@ -606,9 +721,15 @@ impl Queue {
             repositories: stored
                 .repositories
                 .into_iter()
-                .map(|stored| (stored.repository, stored.state))
+                .map(|stored| {
+                    let state = RepositoryState {
+                        settings: stored.settings.into(),
+                        paused: stored.paused,
+                    };
+                    (stored.repository, state)
+                })
                 .collect(),
-            items: stored.items,
+            items: stored.items.into_iter().map(Item::from).collect(),
             limits: stored
                 .limits
                 .into_iter()
@@ -639,10 +760,11 @@ impl Queue {
                 .iter()
                 .map(|(repository, state)| RepositoryV1 {
                     repository: *repository,
-                    state: *state,
+                    settings: state.settings.into(),
+                    paused: state.paused,
                 })
                 .collect(),
-            items: self.items.clone(),
+            items: self.items.iter().map(ItemV1::from).collect(),
             limits: self
                 .limits
                 .iter()
@@ -754,13 +876,7 @@ impl Queue {
         let item = self.items.remove(from);
         // Where the `to`th queued task of the repository is now; after the
         // last one when there are fewer.
-        let queued: Vec<usize> = self
-            .items
-            .iter()
-            .enumerate()
-            .filter(|(_, other)| other.repository == repository && other.state == ItemState::Queued)
-            .map(|(index, _)| index)
-            .collect();
+        let queued: Vec<usize> = self.queued(repository).collect();
         let index = match queued.get(to) {
             Some(&index) => index,
             None => queued.last().map_or(self.items.len(), |&last| last + 1),
@@ -770,19 +886,19 @@ impl Queue {
         Ok(())
     }
 
-    pub fn cancel(&mut self, id: QueueItemId) -> Result<Cancelled, QueueError> {
+    pub fn cancel(&mut self, id: QueueItemId) -> Result<AfterCancel, QueueError> {
         let index = self.position(id)?;
         let item = &mut self.items[index];
         let (state, cancelled) = match &item.state {
             ItemState::Queued | ItemState::Starting => {
-                (ItemState::Cancelled { chat: None }, Cancelled::Done)
+                (ItemState::Cancelled { chat: None }, AfterCancel::Nothing)
             }
             ItemState::Running { chat, .. } => (
                 ItemState::Cancelled { chat: Some(*chat) },
-                Cancelled::Interrupt(*chat),
+                AfterCancel::StopChat(*chat),
             ),
             ItemState::NeedsAttention { chat, .. } => {
-                (ItemState::Cancelled { chat: *chat }, Cancelled::Done)
+                (ItemState::Cancelled { chat: *chat }, AfterCancel::Nothing)
             }
             ItemState::Completed { .. }
             | ItemState::PullRequestReady { .. }
@@ -812,11 +928,18 @@ impl Queue {
         self.touch(repository);
     }
 
-    /// Starts the repository's tasks again and forgets the usage limits
-    /// the queue waited for, so the next start tries them.
-    pub fn resume(&mut self, repository: RepositoryId) {
+    /// Starts the repository's tasks again and tries the usage limits the
+    /// queue waited for again: its own and `known`, the subscriptions' the
+    /// service knows now. Limits belong to subscriptions, not repositories,
+    /// so every repository's queue tries them again.
+    pub fn resume(
+        &mut self,
+        repository: RepositoryId,
+        known: impl IntoIterator<Item = (LimitKey, Option<u64>)>,
+    ) {
         self.repositories.entry(repository).or_default().paused = false;
         self.limits.clear();
+        self.forgiven = known.into_iter().collect();
         self.waiting_for_limits.clear();
         // Every repository's queue may have waited for those limits.
         let repositories: Vec<RepositoryId> = self.repositories.keys().copied().collect();
@@ -842,7 +965,7 @@ impl Queue {
         Ok(())
     }
 
-    /// Looks for tasks to start again at the next [`Queue::plan`], for
+    /// Looks for tasks to start again at the next [`TaskQueue::plan`], for
     /// usage limits that have reset meanwhile.
     pub fn wake(&mut self) {
         if !self.limits.is_empty() || !self.waiting_for_limits.is_empty() {
@@ -850,14 +973,15 @@ impl Queue {
         }
     }
 
-    /// The chats the queue watches, and whether it needs to know how the
-    /// last turn of each ended once it is idle.
-    pub fn watched(&self) -> Vec<(ChatId, bool)> {
+    /// The chats the queue watches.
+    pub fn watched(&self) -> Vec<Watched> {
         self.items
             .iter()
             .filter_map(|item| {
-                let chat = item.state.watched_chat()?;
-                Some((chat, matches!(item.state, ItemState::Running { .. })))
+                Some(Watched {
+                    chat: item.state.watched_chat()?,
+                    needs_end: matches!(item.state, ItemState::Running { .. }),
+                })
             })
             .collect()
     }
@@ -872,11 +996,18 @@ impl Queue {
             return;
         };
         let repository = item.repository;
+        // A turn that runs on keeps its slot, even with a pull request.
+        let turn_runs = matches!(
+            (&item.state, &seen.activity),
+            (ItemState::Running { .. }, Activity::Working { .. })
+        );
         let next = match (&item.state, seen.activity) {
             // Ready for review, however the chat got there.
-            _ if seen.pull_request.is_some() => seen
-                .pull_request
-                .map(|(number, url)| ItemState::PullRequestReady { chat, number, url }),
+            _ if !turn_runs && seen.pull_request.is_some() => {
+                seen.pull_request.map(|OpenPullRequest { number, url }| {
+                    ItemState::PullRequestReady { chat, number, url }
+                })
+            }
             (
                 ItemState::Running {
                     waiting_for_you: was,
@@ -894,8 +1025,11 @@ impl Queue {
                 },
             ) => Some(match usage_limit {
                 Some(limit) => {
-                    self.limits.insert(limit.key, limit.resets_at);
-                    self.limits.extend(limit.others);
+                    // The service keeps subscriptions' limits itself.
+                    if limit.key.subscription.is_none() {
+                        self.limits.insert(limit.key, limit.resets_at);
+                    }
+                    self.forgiven.remove(&limit.key);
                     ItemState::NeedsAttention {
                         chat: Some(chat),
                         reason: Attention::UsageLimit {
@@ -915,9 +1049,13 @@ impl Queue {
                         chat: Some(chat),
                         reason: Attention::TurnFailed { reason },
                     },
-                    TurnEnd::Interrupted | TurnEnd::Unknown => ItemState::NeedsAttention {
+                    TurnEnd::Interrupted => ItemState::NeedsAttention {
                         chat: Some(chat),
                         reason: Attention::Interrupted,
+                    },
+                    TurnEnd::Unknown => ItemState::NeedsAttention {
+                        chat: Some(chat),
+                        reason: Attention::Stopped,
                     },
                     TurnEnd::SessionEnded => ItemState::NeedsAttention {
                         chat: Some(chat),
@@ -949,8 +1087,8 @@ impl Queue {
     pub fn plan(
         &mut self,
         now: u64,
-        mut candidates: impl FnMut(&Start) -> Result<Vec<LimitKey>, String>,
-    ) -> Vec<Start> {
+        mut candidates: impl FnMut(&TaskStart) -> Result<Vec<Candidate>, CommandError>,
+    ) -> Vec<TaskStart> {
         if !std::mem::take(&mut self.plan_due) {
             return Vec::new();
         }
@@ -987,14 +1125,16 @@ impl Queue {
                 }
                 let start = Self::start_of(&self.items[index], state.settings);
                 let next = match candidates(&start) {
-                    Err(reason) => ItemState::NeedsAttention {
+                    Err(error) => ItemState::NeedsAttention {
                         chat: None,
-                        reason: Attention::StartFailed { reason },
+                        reason: Attention::StartFailed {
+                            reason: error.to_string(),
+                        },
                     },
                     Ok(subscriptions) => {
                         let limits: Vec<KnownLimit> = subscriptions
                             .iter()
-                            .map(|key| self.limit_of(key, now))
+                            .map(|candidate| self.limit_of(candidate, now))
                             .collect();
                         if !limits.contains(&KnownLimit::Free) {
                             blocked = true;
@@ -1046,7 +1186,7 @@ impl Queue {
     pub fn chat_started(
         &mut self,
         id: QueueItemId,
-        started: Result<ChatId, String>,
+        started: Result<ChatId, CommandError>,
     ) -> Option<(ChatId, String)> {
         let index = self.position(id).ok()?;
         let item = &mut self.items[index];
@@ -1059,10 +1199,12 @@ impl Queue {
                 };
                 Some((chat, item.task.message()))
             }
-            (ItemState::Starting, Err(reason)) => {
+            (ItemState::Starting, Err(error)) => {
                 item.state = ItemState::NeedsAttention {
                     chat: None,
-                    reason: Attention::StartFailed { reason },
+                    reason: Attention::StartFailed {
+                        reason: error.to_string(),
+                    },
                 };
                 None
             }
@@ -1077,7 +1219,7 @@ impl Queue {
     }
 
     /// The first message of a running task's chat could not be sent.
-    pub fn message_failed(&mut self, id: QueueItemId, reason: String) {
+    pub fn message_failed(&mut self, id: QueueItemId, error: &CommandError) {
         let Ok(index) = self.position(id) else {
             return;
         };
@@ -1085,7 +1227,9 @@ impl Queue {
         if let ItemState::Running { chat, .. } = item.state {
             item.state = ItemState::NeedsAttention {
                 chat: Some(chat),
-                reason: Attention::StartFailed { reason },
+                reason: Attention::StartFailed {
+                    reason: error.to_string(),
+                },
             };
             let repository = item.repository;
             self.touch(repository);
@@ -1134,19 +1278,28 @@ impl Queue {
             .map(|(index, _)| index)
     }
 
-    /// The usage limit a subscription is at now, as far as the queue
-    /// knows.
-    fn limit_of(&self, key: &LimitKey, now: u64) -> KnownLimit {
-        match self.limits.get(key) {
-            Some(&resets_at) if resets_at.is_none_or(|at| at > now) => {
-                KnownLimit::Limited { resets_at }
+    /// The usage limit a task's subscription is at now: one the queue
+    /// saw, or one the service knows that the developer did not tell the
+    /// queue to try again.
+    fn limit_of(&self, candidate: &Candidate, now: u64) -> KnownLimit {
+        let current = |resets_at: Option<u64>| resets_at.is_none_or(|at| at > now);
+        if let Some(&resets_at) = self.limits.get(&candidate.key)
+            && current(resets_at)
+        {
+            return KnownLimit::Limited { resets_at };
+        }
+        match candidate.known {
+            KnownLimit::Limited { resets_at }
+                if current(resets_at) && self.forgiven.get(&candidate.key) != Some(&resets_at) =>
+            {
+                candidate.known
             }
-            _ => KnownLimit::Free,
+            KnownLimit::Limited { .. } | KnownLimit::Free => KnownLimit::Free,
         }
     }
 
-    fn start_of(item: &Item, settings: QueueSettings) -> Start {
-        Start {
+    fn start_of(item: &Item, settings: QueueSettings) -> TaskStart {
+        TaskStart {
             item: item.id,
             repository: item.repository,
             message: item.task.message(),
@@ -1162,6 +1315,11 @@ mod tests {
 
     const NOW: u64 = 1_000_000;
     const REPOSITORY: RepositoryId = RepositoryId(1);
+    /// The default login of Claude Code: the queue keeps its limits itself.
+    const DEFAULT_LOGIN: LimitKey = LimitKey {
+        provider: Provider::Anthropic,
+        subscription: None,
+    };
     const CLAUDE: LimitKey = LimitKey {
         provider: Provider::Anthropic,
         subscription: Some(SubscriptionId(7)),
@@ -1177,44 +1335,32 @@ mod tests {
         }
     }
 
-    fn on(keys: &[LimitKey]) -> impl FnMut(&Start) -> Result<Vec<LimitKey>, String> + use<> {
-        let keys = keys.to_vec();
-        move |_| Ok(keys.clone())
+    fn free(key: LimitKey) -> Candidate {
+        Candidate {
+            key,
+            known: KnownLimit::Free,
+        }
     }
 
-    /// Runs the queue's first task into the usage limit of `key`, while
-    /// the service knows `others` to be limited too.
-    fn hit_limit(
-        queue: &mut Queue,
-        key: LimitKey,
-        resets_at: Option<u64>,
-        others: Vec<(LimitKey, Option<u64>)>,
-    ) {
-        let first = queue
-            .enqueue(REPOSITORY, prompt("first"), None, None)
-            .unwrap();
-        queue.plan(NOW, on(&[key]));
-        queue.chat_started(first, Ok(ChatId(3)));
-        queue.observe(
-            ChatId(3),
-            ChatSeen {
-                activity: Activity::Idle {
-                    ended: TurnEnd::Completed,
-                    usage_limit: Some(LimitSeen {
-                        limit: "5-hour limit".to_owned(),
-                        key,
-                        resets_at,
-                        others,
-                    }),
-                    done: false,
-                },
-                pull_request: None,
-                on: key,
-            },
-        );
+    fn limited(key: LimitKey, resets_at: Option<u64>) -> Candidate {
+        Candidate {
+            key,
+            known: KnownLimit::Limited { resets_at },
+        }
     }
 
-    fn states(queue: &Queue) -> Vec<QueueItemState> {
+    fn on(
+        candidates: &[Candidate],
+    ) -> impl FnMut(&TaskStart) -> Result<Vec<Candidate>, CommandError> + use<> {
+        let candidates = candidates.to_vec();
+        move |_| Ok(candidates.clone())
+    }
+
+    fn enqueue(queue: &mut TaskQueue, text: &str) -> QueueItemId {
+        queue.enqueue(REPOSITORY, prompt(text), None, None).unwrap()
+    }
+
+    fn states(queue: &TaskQueue) -> Vec<QueueItemState> {
         queue
             .view(REPOSITORY, NOW, false)
             .items
@@ -1223,16 +1369,54 @@ mod tests {
             .collect()
     }
 
-    fn idle(ended: TurnEnd) -> ChatSeen {
+    fn ids(queue: &TaskQueue) -> Vec<QueueItemId> {
+        queue
+            .view(REPOSITORY, NOW, false)
+            .items
+            .into_iter()
+            .map(|item| item.item)
+            .collect()
+    }
+
+    fn seen(activity: Activity) -> ChatSeen {
         ChatSeen {
-            activity: Activity::Idle {
-                ended,
-                usage_limit: None,
-                done: false,
-            },
+            activity,
             pull_request: None,
             on: CLAUDE,
         }
+    }
+
+    fn idle(ended: TurnEnd) -> ChatSeen {
+        seen(Activity::Idle {
+            ended,
+            usage_limit: None,
+            done: false,
+        })
+    }
+
+    fn working() -> ChatSeen {
+        seen(Activity::Working {
+            waiting_for_you: false,
+        })
+    }
+
+    /// Runs the queue's first task into the usage limit of `key`.
+    fn hit_limit(queue: &mut TaskQueue, key: LimitKey, resets_at: Option<u64>) {
+        let first = enqueue(queue, "first");
+        queue.plan(NOW, on(&[free(key)]));
+        queue.chat_started(first, Ok(ChatId(3)));
+        queue.observe(
+            ChatId(3),
+            seen(Activity::Idle {
+                ended: TurnEnd::Completed,
+                usage_limit: Some(LimitSeen {
+                    limit: "5-hour limit".to_owned(),
+                    key,
+                    resets_at,
+                }),
+                done: false,
+            }),
+        );
     }
 
     #[test]
@@ -1244,12 +1428,10 @@ mod tests {
 
     #[test]
     fn a_cancelled_start_keeps_its_chat_without_a_message() {
-        let mut queue = Queue::default();
-        let item = queue
-            .enqueue(REPOSITORY, prompt("task"), None, None)
-            .unwrap();
-        assert_eq!(queue.plan(NOW, on(&[CLAUDE])).len(), 1);
-        assert_eq!(queue.cancel(item), Ok(Cancelled::Done));
+        let mut queue = TaskQueue::default();
+        let item = enqueue(&mut queue, "task");
+        assert_eq!(queue.plan(NOW, on(&[free(CLAUDE)])).len(), 1);
+        assert_eq!(queue.cancel(item), Ok(AfterCancel::Nothing));
 
         assert_eq!(queue.chat_started(item, Ok(ChatId(3))), None);
         assert_eq!(
@@ -1261,14 +1443,12 @@ mod tests {
     }
 
     #[test]
-    fn a_limit_past_its_reset_no_longer_holds_tasks_back() {
-        let mut queue = Queue::default();
-        hit_limit(&mut queue, CLAUDE, Some(NOW + 60), Vec::new());
-        queue
-            .enqueue(REPOSITORY, prompt("second"), None, None)
-            .unwrap();
+    fn a_default_login_limit_past_its_reset_no_longer_holds_tasks_back() {
+        let mut queue = TaskQueue::default();
+        hit_limit(&mut queue, DEFAULT_LOGIN, Some(NOW + 60));
+        enqueue(&mut queue, "second");
 
-        assert_eq!(queue.plan(NOW, on(&[CLAUDE])), []);
+        assert_eq!(queue.plan(NOW, on(&[free(DEFAULT_LOGIN)])), []);
         assert_eq!(
             queue.view(REPOSITORY, NOW, false).status,
             QueueStatus::WaitingForUsageLimits {
@@ -1276,63 +1456,55 @@ mod tests {
             }
         );
         queue.wake();
-        assert_eq!(queue.plan(NOW + 60, on(&[CLAUDE])).len(), 1);
+        assert_eq!(queue.plan(NOW + 60, on(&[free(DEFAULT_LOGIN)])).len(), 1);
     }
 
     #[test]
     fn an_interchangeable_subscription_without_a_limit_lets_a_task_start() {
-        let mut queue = Queue::default();
-        hit_limit(&mut queue, CLAUDE, None, Vec::new());
-        queue
-            .enqueue(REPOSITORY, prompt("second"), None, None)
-            .unwrap();
+        let mut queue = TaskQueue::default();
+        enqueue(&mut queue, "task");
 
-        assert_eq!(queue.plan(NOW, on(&[CLAUDE, OTHER_CLAUDE])).len(), 1);
+        let starts = queue.plan(NOW, on(&[limited(CLAUDE, None), free(OTHER_CLAUDE)]));
+
+        assert_eq!(starts.len(), 1);
     }
 
     #[test]
-    fn subscriptions_the_service_knows_to_be_limited_are_not_tried() {
-        let mut queue = Queue::default();
-        hit_limit(
-            &mut queue,
-            CLAUDE,
-            None,
-            vec![(OTHER_CLAUDE, Some(NOW + 30))],
-        );
-        queue
-            .enqueue(REPOSITORY, prompt("second"), None, None)
-            .unwrap();
+    fn subscriptions_the_service_knows_to_be_limited_wait_until_the_developer_resumes() {
+        let mut queue = TaskQueue::default();
+        enqueue(&mut queue, "task");
+        let both = [limited(CLAUDE, None), limited(OTHER_CLAUDE, Some(NOW + 30))];
 
-        assert_eq!(queue.plan(NOW, on(&[CLAUDE, OTHER_CLAUDE])), []);
+        assert_eq!(queue.plan(NOW, on(&both)), []);
         assert_eq!(
             queue.view(REPOSITORY, NOW, false).status,
             QueueStatus::WaitingForUsageLimits {
                 resets_in_seconds: Some(30)
             }
         );
-        queue.resume(REPOSITORY);
-        assert_eq!(queue.plan(NOW, on(&[CLAUDE, OTHER_CLAUDE])).len(), 1);
+        queue.resume(REPOSITORY, [(CLAUDE, None), (OTHER_CLAUDE, Some(NOW + 30))]);
+        assert_eq!(queue.plan(NOW, on(&both)).len(), 1);
+    }
+
+    #[test]
+    fn a_new_limit_after_a_resume_counts_again() {
+        let mut queue = TaskQueue::default();
+        queue.resume(REPOSITORY, [(CLAUDE, Some(NOW + 30))]);
+        enqueue(&mut queue, "task");
+
+        let starts = queue.plan(NOW, on(&[limited(CLAUDE, Some(NOW + 90))]));
+
+        assert_eq!(starts, []);
     }
 
     #[test]
     fn a_task_taken_up_again_runs_and_completes() {
-        let mut queue = Queue::default();
-        let item = queue
-            .enqueue(REPOSITORY, prompt("one"), None, None)
-            .unwrap();
-        queue.plan(NOW, on(&[CLAUDE]));
+        let mut queue = TaskQueue::default();
+        let item = enqueue(&mut queue, "one");
+        queue.plan(NOW, on(&[free(CLAUDE)]));
         queue.chat_started(item, Ok(ChatId(3)));
         queue.observe(ChatId(3), idle(TurnEnd::Interrupted));
-        queue.observe(
-            ChatId(3),
-            ChatSeen {
-                activity: Activity::Working {
-                    waiting_for_you: false,
-                },
-                pull_request: None,
-                on: CLAUDE,
-            },
-        );
+        queue.observe(ChatId(3), working());
         assert!(matches!(states(&queue)[0], QueueItemState::Running { .. }));
         queue.observe(ChatId(3), idle(TurnEnd::Completed));
         assert_eq!(
@@ -1341,25 +1513,66 @@ mod tests {
         );
     }
 
-    fn ids(queue: &Queue) -> Vec<QueueItemId> {
-        queue
-            .view(REPOSITORY, NOW, false)
-            .items
-            .into_iter()
-            .map(|item| item.item)
-            .collect()
+    #[test]
+    fn a_pull_request_opened_while_the_turn_runs_frees_the_slot_once_it_ends() {
+        let mut queue = TaskQueue::default();
+        let item = enqueue(&mut queue, "one");
+        enqueue(&mut queue, "two");
+        queue.plan(NOW, on(&[free(CLAUDE)]));
+        queue.chat_started(item, Ok(ChatId(3)));
+        let pull_request = Some(OpenPullRequest {
+            number: 4,
+            url: "https://git.example.invalid/pull/4".to_owned(),
+        });
+
+        queue.observe(
+            ChatId(3),
+            ChatSeen {
+                pull_request: pull_request.clone(),
+                ..working()
+            },
+        );
+        assert_eq!(queue.plan(NOW, on(&[free(CLAUDE)])), []);
+        queue.observe(
+            ChatId(3),
+            ChatSeen {
+                pull_request,
+                ..idle(TurnEnd::Completed)
+            },
+        );
+        assert!(matches!(
+            states(&queue)[0],
+            QueueItemState::PullRequestReady { number: 4, .. }
+        ));
+        assert_eq!(queue.plan(NOW, on(&[free(CLAUDE)])).len(), 1);
+    }
+
+    #[test]
+    fn a_chat_that_stopped_without_a_turn_end_needs_attention() {
+        let mut queue = TaskQueue::default();
+        let item = enqueue(&mut queue, "one");
+        queue.plan(NOW, on(&[free(CLAUDE)]));
+        queue.chat_started(item, Ok(ChatId(3)));
+
+        queue.observe(ChatId(3), idle(TurnEnd::Unknown));
+
+        assert_eq!(
+            states(&queue),
+            [QueueItemState::NeedsAttention {
+                chat: Some(ChatId(3)),
+                reason: AttentionReason::Stopped,
+            }]
+        );
     }
 
     #[test]
     fn moving_counts_only_queued_tasks_and_a_place_past_the_end_is_last() {
-        let mut queue = Queue::default();
-        let running = queue
-            .enqueue(REPOSITORY, prompt("running"), None, None)
-            .unwrap();
-        queue.plan(NOW, on(&[CLAUDE]));
-        let a = queue.enqueue(REPOSITORY, prompt("a"), None, None).unwrap();
-        let b = queue.enqueue(REPOSITORY, prompt("b"), None, None).unwrap();
-        let c = queue.enqueue(REPOSITORY, prompt("c"), None, None).unwrap();
+        let mut queue = TaskQueue::default();
+        let running = enqueue(&mut queue, "running");
+        queue.plan(NOW, on(&[free(CLAUDE)]));
+        let a = enqueue(&mut queue, "a");
+        let b = enqueue(&mut queue, "b");
+        let c = enqueue(&mut queue, "c");
 
         queue.move_item(c, 0).unwrap();
         assert_eq!(ids(&queue), [running, c, a, b]);
@@ -1373,7 +1586,7 @@ mod tests {
 
     #[test]
     fn starting_and_running_tasks_fill_the_slots() {
-        let mut queue = Queue::default();
+        let mut queue = TaskQueue::default();
         queue
             .change_settings(
                 REPOSITORY,
@@ -1383,49 +1596,42 @@ mod tests {
                 },
             )
             .unwrap();
-        let first = queue
-            .enqueue(REPOSITORY, prompt("one"), None, None)
-            .unwrap();
-        queue
-            .enqueue(REPOSITORY, prompt("two"), None, None)
-            .unwrap();
-        queue
-            .enqueue(REPOSITORY, prompt("three"), None, None)
-            .unwrap();
+        let first = enqueue(&mut queue, "one");
+        enqueue(&mut queue, "two");
+        enqueue(&mut queue, "three");
 
-        assert_eq!(queue.plan(NOW, on(&[CLAUDE])).len(), 2);
+        assert_eq!(queue.plan(NOW, on(&[free(CLAUDE)])).len(), 2);
         queue.chat_started(first, Ok(ChatId(3)));
         queue.wake();
-        assert_eq!(queue.plan(NOW, on(&[CLAUDE])), []);
+        assert_eq!(queue.plan(NOW, on(&[free(CLAUDE)])), []);
         queue.observe(ChatId(3), idle(TurnEnd::Completed));
-        assert_eq!(queue.plan(NOW, on(&[CLAUDE])).len(), 1);
+        assert_eq!(queue.plan(NOW, on(&[free(CLAUDE)])).len(), 1);
     }
 
     #[test]
     fn a_task_that_cannot_start_needs_attention_and_the_next_one_starts() {
-        let mut queue = Queue::default();
+        let mut queue = TaskQueue::default();
         let broken = queue
             .enqueue(REPOSITORY, prompt("broken"), Some(AgentCli::Codex), None)
             .unwrap();
-        let next = queue
-            .enqueue(REPOSITORY, prompt("next"), None, None)
-            .unwrap();
+        let next = enqueue(&mut queue, "next");
+        let refused = CommandError::AgentCliNotConfigured {
+            agent_cli: AgentCli::Codex,
+        };
 
-        let starts = queue.plan(NOW, |start: &Start| match start.agent_cli {
-            Some(AgentCli::Codex) => Err("no Codex".to_owned()),
-            _ => Ok(vec![CLAUDE]),
+        let starts = queue.plan(NOW, |start: &TaskStart| match start.agent_cli {
+            Some(AgentCli::Codex) => Err(refused.clone()),
+            _ => Ok(vec![free(CLAUDE)]),
         });
 
-        assert_eq!(
-            starts.iter().map(|start| start.item).collect::<Vec<_>>(),
-            [next]
-        );
+        let started: Vec<QueueItemId> = starts.iter().map(|start| start.item).collect();
+        assert_eq!(started, [next]);
         assert_eq!(
             states(&queue)[0],
             QueueItemState::NeedsAttention {
                 chat: None,
                 reason: AttentionReason::StartFailed {
-                    reason: "no Codex".to_owned()
+                    reason: refused.to_string()
                 }
             }
         );
@@ -1434,7 +1640,7 @@ mod tests {
 
     #[test]
     fn a_task_takes_the_queues_agent_cli_and_mode_unless_it_chose_its_own() {
-        let mut queue = Queue::default();
+        let mut queue = TaskQueue::default();
         queue
             .change_settings(
                 REPOSITORY,
@@ -1445,9 +1651,7 @@ mod tests {
                 },
             )
             .unwrap();
-        queue
-            .enqueue(REPOSITORY, prompt("queue's"), None, None)
-            .unwrap();
+        enqueue(&mut queue, "queue's");
         queue
             .enqueue(
                 REPOSITORY,
@@ -1457,7 +1661,8 @@ mod tests {
             )
             .unwrap();
 
-        let starts = queue.plan(NOW, on(&[CLAUDE]));
+        let starts = queue.plan(NOW, on(&[free(CLAUDE)]));
+
         let chosen: Vec<_> = starts
             .iter()
             .map(|start| (start.agent_cli, start.permission_mode))
@@ -1475,15 +1680,7 @@ mod tests {
     fn a_stored_queue_loads_with_cut_starts_and_turns_resolved() {
         let dir = tempfile::tempdir().unwrap();
         let (store, _) = Store::open(dir.path(), AgentCli::ClaudeCode).unwrap();
-        let mut queue = Queue::default();
-        queue.pause(REPOSITORY);
-        let running = queue
-            .enqueue(REPOSITORY, prompt("running"), None, None)
-            .unwrap();
-        let starting = queue
-            .enqueue(REPOSITORY, prompt("starting"), None, None)
-            .unwrap();
-        queue.resume(REPOSITORY);
+        let mut queue = TaskQueue::default();
         queue
             .change_settings(
                 REPOSITORY,
@@ -1493,16 +1690,21 @@ mod tests {
                 },
             )
             .unwrap();
-        queue.plan(NOW, on(&[CLAUDE]));
+        let running = enqueue(&mut queue, "running");
+        let starting = queue
+            .enqueue(REPOSITORY, QueueTask::Issue { number: 12 }, None, None)
+            .unwrap();
+        queue.plan(NOW, on(&[free(CLAUDE)]));
         queue.chat_started(running, Ok(ChatId(3)));
         queue.pause(REPOSITORY);
         queue.save(&store).unwrap();
 
-        let loaded = Queue::load(&store).unwrap();
+        let loaded = TaskQueue::load(&store).unwrap();
 
         let shown = loaded.view(REPOSITORY, NOW, false);
         assert_eq!(shown.status, QueueStatus::Paused);
         assert_eq!(shown.settings.concurrency, 2);
+        assert_eq!(shown.items[1].task, QueueTask::Issue { number: 12 });
         assert_eq!(
             states(&loaded),
             [
@@ -1527,7 +1729,7 @@ mod tests {
         .unwrap();
 
         assert!(matches!(
-            Queue::load(&store),
+            TaskQueue::load(&store),
             Err(StorageError::UnsupportedVersion { found, supported })
                 if found == QUEUE_VERSION + 1 && supported == QUEUE_VERSION
         ));

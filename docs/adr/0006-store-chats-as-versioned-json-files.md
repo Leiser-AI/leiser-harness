@@ -26,3 +26,10 @@ released version from a fixture, so a breaking change cannot go unnoticed.
   removed on the next start.
 - Reading a part of a transcript reads the whole file. If transcripts grow
   too large for that, revisit this decision.
+
+Amended 2026-11-19: a file the harness service adds next to `state.json`
+whose contents an older service never reads may carry a storage version of
+its own instead of one in `state.json`, as `repo-checks/` already does. The
+task queue's `queue.json` does so: adding it needed no new version of
+`state.json`, and an older service leaves it untouched. A test loads every
+released version of such a file from a fixture, as for `state.json`.

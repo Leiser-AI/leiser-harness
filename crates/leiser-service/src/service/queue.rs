@@ -10,12 +10,12 @@ use tokio::sync::oneshot;
 
 use super::{Background, ChatPullRequest, Setup, Started, State, unix_now};
 use crate::queue::{
-    Activity, Cancelled, ChatSeen, LimitKey, LimitSeen, QueueAnswer, QueueCommand, QueueItemId,
-    Start, TurnEnd,
+    Activity, AfterCancel, Candidate, ChatSeen, KnownLimit, LimitKey, LimitSeen, OpenPullRequest,
+    QueueAnswer, QueueCommand, QueueItemId, TaskStart, TurnEnd, Watched,
 };
 use crate::repo_config::RepositoryConfig;
 use crate::{
-    AgentEvent, ChatId, ChatSettings, Checkout, CommandError, Event, Response, StartOn,
+    AgentCli, AgentEvent, ChatId, ChatSettings, Checkout, CommandError, Event, Response, StartOn,
     TranscriptEntry,
 };
 
@@ -27,7 +27,7 @@ pub(super) enum QueueWork {
     /// A task's chat exists, or could not be started.
     ChatStarted {
         item: QueueItemId,
-        result: Result<ChatId, String>,
+        result: Result<ChatId, CommandError>,
     },
 }
 
@@ -59,9 +59,7 @@ impl State {
                 permission_mode,
                 ..
             } => {
-                if let Some(agent_cli) = agent_cli {
-                    self.driver(agent_cli)?;
-                }
+                self.check_agent_cli(agent_cli)?;
                 enqueued =
                     Some(
                         self.queue
@@ -70,20 +68,18 @@ impl State {
             }
             QueueCommand::Move { item, to } => self.queue.move_item(item, to)?,
             QueueCommand::Cancel { item } => {
-                if let Cancelled::Interrupt(chat) = self.queue.cancel(item)? {
-                    // The turn may have ended meanwhile; the chat stays.
-                    if let Err(error) = self.interrupt_turn(chat).await {
-                        tracing::debug!(?chat, %error, "no turn to interrupt for a cancelled task");
-                    }
+                if let AfterCancel::StopChat(chat) = self.queue.cancel(item)? {
+                    self.stop_task_chat(chat).await;
                 }
             }
             QueueCommand::Remove { item } => self.queue.remove(item)?,
             QueueCommand::Pause { .. } => self.queue.pause(repository),
-            QueueCommand::Resume { .. } => self.queue.resume(repository),
+            QueueCommand::Resume { .. } => {
+                let known = self.known_limits();
+                self.queue.resume(repository, known);
+            }
             QueueCommand::ChangeSettings { settings, .. } => {
-                if let Some(agent_cli) = settings.agent_cli {
-                    self.driver(agent_cli)?;
-                }
+                self.check_agent_cli(settings.agent_cli)?;
                 self.queue.change_settings(repository, settings)?;
             }
         }
@@ -106,7 +102,7 @@ impl State {
     /// picks, and stores and reports what changed. While an update of the
     /// harness service waits, no task starts.
     pub(super) async fn run_queue(&mut self) {
-        for (chat, needs_end) in self.queue.watched() {
+        for Watched { chat, needs_end } in self.queue.watched() {
             if let Some(seen) = self.chat_seen(chat, needs_end) {
                 self.queue.observe(chat, seen);
             }
@@ -141,7 +137,7 @@ impl State {
                 };
                 if let Err(error) = self.send_message(chat, message).await {
                     tracing::warn!(?item, ?chat, %error, "could not send a task's first message");
-                    self.queue.message_failed(item, error.to_string());
+                    self.queue.message_failed(item, &error);
                 }
             }
         }
@@ -173,22 +169,6 @@ impl State {
                         subscription: limit.subscription,
                     },
                     resets_at: limit.resets_at,
-                    others: self
-                        .limited
-                        .iter()
-                        .filter(|(subscription, _)| {
-                            self.subscriptions.provider(**subscription) == Some(provider)
-                        })
-                        .map(|(subscription, resets_at)| {
-                            (
-                                LimitKey {
-                                    provider,
-                                    subscription: Some(*subscription),
-                                },
-                                *resets_at,
-                            )
-                        })
-                        .collect(),
                 }),
                 done: chat.done,
             }
@@ -199,7 +179,10 @@ impl State {
                 .pull_request
                 .as_ref()
                 .and_then(ChatPullRequest::opened)
-                .map(|pull_request| (pull_request.number, pull_request.url.clone())),
+                .map(|pull_request| OpenPullRequest {
+                    number: pull_request.number,
+                    url: pull_request.url.clone(),
+                }),
             on: LimitKey {
                 provider,
                 subscription: chat.subscription(),
@@ -239,16 +222,10 @@ impl State {
     /// The subscriptions a task could run on: where its chat would start
     /// and, from an interchangeable subscription, the others it would move
     /// to at a usage limit.
-    fn candidates(&self, start: &Start) -> Result<Vec<LimitKey>, String> {
-        let (_, config) = self
-            .repository_config(start.repository)
-            .map_err(|error| error.to_string())?;
-        let settings = self
-            .task_settings(&config, start)
-            .map_err(|error| error.to_string())?;
-        let chat_start = self
-            .chat_start(&config, settings)
-            .map_err(|error| error.to_string())?;
+    fn candidates(&self, start: &TaskStart) -> Result<Vec<Candidate>, CommandError> {
+        let (_, config) = self.repository_config(start.repository)?;
+        let settings = self.task_settings(&config, start)?;
+        let chat_start = self.chat_start(&config, settings)?;
         let provider = chat_start.agent_cli.provider();
         let first = chat_start.subscriptions.get(&provider).copied();
         let mut subscriptions = vec![first];
@@ -262,9 +239,15 @@ impl State {
         }
         Ok(subscriptions
             .into_iter()
-            .map(|subscription| LimitKey {
-                provider,
-                subscription,
+            .map(|subscription| Candidate {
+                key: LimitKey {
+                    provider,
+                    subscription,
+                },
+                known: match subscription.and_then(|subscription| self.limited.get(&subscription)) {
+                    Some(&resets_at) => KnownLimit::Limited { resets_at },
+                    None => KnownLimit::Free,
+                },
             })
             .collect())
     }
@@ -274,7 +257,7 @@ impl State {
     fn task_settings(
         &self,
         config: &RepositoryConfig,
-        start: &Start,
+        start: &TaskStart,
     ) -> Result<ChatSettings, CommandError> {
         let start_on = match start.agent_cli {
             Some(agent_cli) => {
@@ -294,16 +277,16 @@ impl State {
 
     /// Starts a task's chat in a new worktree; its first message goes out
     /// once the worktree exists ([`QueueWork::ChatStarted`]).
-    async fn start_task(&mut self, start: Start) {
+    async fn start_task(&mut self, start: TaskStart) {
         let item = start.item;
         if let Err(error) = self.start_task_chat(start).await {
             tracing::warn!(?item, %error, "could not start a task's chat");
             // Nothing to send: the chat does not exist.
-            let _ = self.queue.chat_started(item, Err(error.to_string()));
+            let _ = self.queue.chat_started(item, Err(error));
         }
     }
 
-    async fn start_task_chat(&mut self, start: Start) -> Result<(), CommandError> {
+    async fn start_task_chat(&mut self, start: TaskStart) -> Result<(), CommandError> {
         let (_, config) = self.repository_config(start.repository)?;
         let settings = self.task_settings(&config, &start)?;
         self.bind_host_account(start.repository).await?;
@@ -341,15 +324,56 @@ impl State {
         tokio::spawn(async move {
             let result = match answer.await {
                 Ok(Ok(Response::ChatStarted { chat })) => Ok(chat),
-                Ok(Ok(response)) => Err(format!("unexpected answer {response:?}")),
-                Ok(Err(error)) => Err(error.to_string()),
-                Err(_) => Err(CommandError::ServiceStopped.to_string()),
+                // `create_worktree` answers only with the chat it started.
+                Ok(Ok(_)) | Err(_) => Err(CommandError::ServiceStopped),
+                Ok(Err(error)) => Err(error),
             };
             // The service has stopped; the restart queues the task again.
             let _ = background
                 .send(Background::Queue(QueueWork::ChatStarted { item, result }))
                 .await;
         });
+    }
+}
+
+impl State {
+    /// Fails for an agent CLI the service has no driver for.
+    fn check_agent_cli(&self, agent_cli: Option<AgentCli>) -> Result<(), CommandError> {
+        match agent_cli {
+            Some(agent_cli) => self.driver(agent_cli).map(|_| ()),
+            None => Ok(()),
+        }
+    }
+
+    /// The subscriptions' usage limits the service knows now.
+    fn known_limits(&self) -> Vec<(LimitKey, Option<u64>)> {
+        self.limited
+            .iter()
+            .filter_map(|(&subscription, &resets_at)| {
+                let provider = self.subscriptions.provider(subscription)?;
+                let key = LimitKey {
+                    provider,
+                    subscription: Some(subscription),
+                };
+                Some((key, resets_at))
+            })
+            .collect()
+    }
+
+    /// Stops what a cancelled task's chat is about to do or does: the
+    /// first message that waits for the setup script, or the running turn.
+    /// The chat stays.
+    async fn stop_task_chat(&mut self, id: ChatId) {
+        if let Some(chat) = self.chats.get_mut(&id)
+            && let Setup::Running { queued } = &mut chat.setup
+        {
+            queued.clear();
+            return;
+        }
+        // The turn may have ended meanwhile.
+        if let Err(error) = self.interrupt_turn(id).await {
+            tracing::debug!(chat = ?id, %error, "no turn to interrupt for a cancelled task");
+        }
     }
 }
 

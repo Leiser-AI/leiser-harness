@@ -742,7 +742,7 @@ struct State {
     /// Repositories' wayfinder maps, once read.
     wayfinder: BTreeMap<RepositoryId, RepositoryMaps>,
     /// Every repository's task queue.
-    queue: crate::queue::Queue,
+    queue: crate::queue::TaskQueue,
     /// How often the task queue looks whether usage limits have reset.
     queue_interval: Duration,
     host_accounts: HostAccounts,
@@ -785,7 +785,7 @@ impl State {
         );
         let host_accounts = HostAccounts::load(stored.host_accounts, store.host_accounts_dir());
         let checkpoints = stored_checkpoints(&store, chats.keys())?;
-        let queue = crate::queue::Queue::load(&store)?;
+        let queue = crate::queue::TaskQueue::load(&store)?;
         let status_changes = chats
             .values()
             .map(|chat| chat.shown.1)

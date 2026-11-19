@@ -33,6 +33,9 @@ const FAKE_AGENT_CLI: &str = env!("CARGO_BIN_EXE_fake-agent-cli");
 const QUEUE_TIMEOUT: Duration = Duration::from_secs(20);
 const SUBSCRIPTION: &str = "Max private";
 const HOST_ACCOUNT: &str = "Work";
+/// When a test's usage limit resets, in seconds: longer than the test
+/// needs to take the limit away, as clocks count whole seconds.
+const RESETS_IN: u64 = 3;
 
 /// A harness service whose agent answers every message after `gate`
 /// opens, and a repository with a remote, added to it.
@@ -621,6 +624,109 @@ async fn subscription_home(
     }
 }
 
+/// The repository's default Anthropic subscription, whose every turn
+/// stops at a usage limit that resets after `resets_in_seconds`, while
+/// the returned file exists.
+async fn limited_subscription(
+    harness: &Harness,
+    resets_in_seconds: Option<u64>,
+) -> TestResult<(SubscriptionId, PathBuf)> {
+    let subscription = add_subscription(&harness.app, SUBSCRIPTION).await?;
+    configure(
+        &harness.repo,
+        &format!("[subscriptions]\nanthropic = {SUBSCRIPTION:?}\n"),
+    )?;
+    let limit_file = subscription_home(&harness.app, subscription)
+        .await?
+        .join(FAKE_USAGE_LIMIT_FILE);
+    std::fs::write(
+        &limit_file,
+        serde_json::to_vec(&FakeUsageLimit {
+            limit: "5-hour limit".to_owned(),
+            resets_in_seconds,
+        })?,
+    )?;
+    Ok((subscription, limit_file))
+}
+
+#[tokio::test]
+async fn the_queue_starts_again_by_itself_once_the_usage_limit_resets() -> TestResult {
+    let gate = Gate::new()?;
+    gate.open()?;
+    let harness = harness(&gated(&gate)).await?;
+    let (app, repository) = (&harness.app, harness.repository);
+    let (_, limit_file) = limited_subscription(&harness, Some(RESETS_IN)).await?;
+    let mut events = app.subscribe();
+
+    enqueue(app, repository, "first").await?;
+    let second = enqueue(app, repository, "second").await?;
+    let waiting = wait_until(app, &mut events, repository, |queue| {
+        matches!(queue.status, QueueStatus::WaitingForUsageLimits { .. })
+    })
+    .await?;
+    assert!(matches!(
+        waiting.status,
+        QueueStatus::WaitingForUsageLimits {
+            resets_in_seconds: Some(2 | 3)
+        }
+    ));
+    assert_eq!(found(&waiting, second)?, &QueueItemState::Queued);
+
+    // The limit resets; no one tells the queue.
+    std::fs::remove_file(&limit_file)?;
+    let resumed = wait_until(app, &mut events, repository, |queue| {
+        completed(state(queue, second))
+    })
+    .await?;
+    assert_eq!(resumed.status, QueueStatus::Idle);
+    Ok(())
+}
+
+#[tokio::test]
+async fn cancelling_a_task_during_its_setup_script_keeps_its_first_message_from_the_agent()
+-> TestResult {
+    let gate = Gate::new()?;
+    let Step::WaitForGate { gate: gate_file } = gate.step() else {
+        return Err("a gate waits at a file".into());
+    };
+    let harness = harness(&Script::new().turn([Step::EchoUserMessage])).await?;
+    let (app, repository) = (&harness.app, harness.repository);
+    configure(
+        &harness.repo,
+        &format!(
+            "[worktree]\nsetup_script = '''\nwhile [ ! -e \"{}\" ]; do sleep 0.01; done\n'''\n",
+            gate_file.display()
+        ),
+    )?;
+    let mut events = app.subscribe();
+    let task = enqueue(app, repository, "first").await?;
+    let started = wait_until(app, &mut events, repository, |queue| {
+        running(state(queue, task))
+    })
+    .await?;
+    let chat = chat_of(found(&started, task)?)?;
+
+    queue(app, QueueCommand::Cancel { item: task }).await?;
+    gate.open()?;
+    tokio::time::timeout(QUEUE_TIMEOUT, async {
+        loop {
+            if let Event::ScriptFinished { chat: finished, .. } = events.recv().await?
+                && finished == chat
+            {
+                return Ok::<_, Box<dyn Error>>(());
+            }
+        }
+    })
+    .await??;
+
+    assert_eq!(messages(app, chat).await?, Vec::<String>::new());
+    assert_eq!(
+        found(&read(app, repository).await?, task)?,
+        &QueueItemState::Cancelled { chat: Some(chat) }
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn the_queue_waits_while_every_subscription_is_at_a_usage_limit_and_resumes_on_request()
 -> TestResult {
@@ -628,21 +734,7 @@ async fn the_queue_waits_while_every_subscription_is_at_a_usage_limit_and_resume
     gate.open()?;
     let harness = harness(&gated(&gate)).await?;
     let (app, repository) = (&harness.app, harness.repository);
-    let subscription = add_subscription(app, SUBSCRIPTION).await?;
-    configure(
-        &harness.repo,
-        &format!("[subscriptions]\nanthropic = {SUBSCRIPTION:?}\n"),
-    )?;
-    let limit_file = subscription_home(app, subscription)
-        .await?
-        .join(FAKE_USAGE_LIMIT_FILE);
-    std::fs::write(
-        &limit_file,
-        serde_json::to_vec(&FakeUsageLimit {
-            limit: "5-hour limit".to_owned(),
-            resets_in_seconds: None,
-        })?,
-    )?;
+    let (subscription, limit_file) = limited_subscription(&harness, None).await?;
     let mut events = app.subscribe();
 
     let first = enqueue(app, repository, "first").await?;
