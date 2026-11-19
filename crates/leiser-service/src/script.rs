@@ -1,8 +1,11 @@
 //! Running a repository's setup and done scripts.
 
+use std::collections::VecDeque;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
+use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
 
 /// How much of a script's output is kept: its end, which says how it
@@ -34,27 +37,54 @@ pub(crate) async fn run(script: &str, worktree: &Path, repository: &Path) -> Fin
     };
     let mut command = Command::new(shell);
     command.arg("-c").arg(script);
-    let output = command
+    command
         .current_dir(worktree)
         .env("LEISER_WORKTREE", worktree)
         .env("LEISER_REPOSITORY", repository)
         .stdin(Stdio::null())
-        .kill_on_drop(true)
-        .output()
-        .await;
-    match output {
-        Ok(output) => {
-            let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
-            text.push_str(&String::from_utf8_lossy(&output.stderr));
-            Finished {
-                exit_code: output.status.code(),
-                output: tail(text),
-            }
-        }
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    match collect(command).await {
+        Ok(finished) => finished,
         Err(error) => Finished {
             exit_code: None,
-            output: format!("could not start the script: {error}"),
+            output: format!("could not run the script: {error}"),
         },
+    }
+}
+
+async fn collect(mut command: Command) -> io::Result<Finished> {
+    let mut child = command.spawn()?;
+    let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
+        return Err(io::Error::other("missing script output pipes"));
+    };
+    let (status, (mut text, stdout_cut), (errors, stderr_cut)) =
+        tokio::try_join!(child.wait(), read_tail(stdout), read_tail(stderr))?;
+    text.push_str(&errors);
+    Ok(Finished {
+        exit_code: status.code(),
+        output: tail(text, stdout_cut || stderr_cut),
+    })
+}
+
+/// Drain the pipe even after the budget is reached so the child can exit.
+async fn read_tail(mut pipe: impl AsyncRead + Unpin) -> io::Result<(String, bool)> {
+    let mut bytes = VecDeque::new();
+    let mut cut = false;
+    let mut buffer = vec![0_u8; 8192];
+    loop {
+        let n = pipe.read(&mut buffer).await?;
+        if n == 0 {
+            return Ok((
+                String::from_utf8_lossy(bytes.make_contiguous()).into_owned(),
+                cut,
+            ));
+        }
+        let discard = (bytes.len() + n).saturating_sub(MAX_OUTPUT_BYTES);
+        cut |= discard > 0;
+        bytes.drain(..discard);
+        bytes.extend(&buffer[..n]);
     }
 }
 
@@ -87,13 +117,41 @@ async fn shell(worktree: &Path) -> Result<PathBuf, String> {
 }
 
 /// The last [`MAX_OUTPUT_BYTES`] of `text`, at a character boundary.
-fn tail(text: String) -> String {
-    if text.len() <= MAX_OUTPUT_BYTES {
+fn tail(text: String, cut: bool) -> String {
+    const MARKER: &str = "[…]\n";
+    if !cut && text.len() <= MAX_OUTPUT_BYTES {
         return text;
     }
-    let mut start = text.len() - MAX_OUTPUT_BYTES;
+    let mut start = text.len().saturating_sub(MAX_OUTPUT_BYTES - MARKER.len());
     while !text.is_char_boundary(start) {
         start += 1;
     }
-    format!("[…]\n{}", &text[start..])
+    format!("{MARKER}{}", &text[start..])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_verbose_script_keeps_both_streams_within_its_output_budget()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        std::fs::write(
+            dir.path().join("build-output"),
+            "é".repeat(MAX_OUTPUT_BYTES),
+        )?;
+        let finished = run(
+            "cat build-output; echo finished >&2",
+            dir.path(),
+            dir.path(),
+        )
+        .await;
+        assert_eq!(finished.exit_code, Some(0));
+        assert!(finished.output.starts_with("[…]\n"));
+        assert!(finished.output.ends_with("éfinished\n"));
+        assert!(!finished.output.contains('\u{fffd}'));
+        assert!(finished.output.len() <= MAX_OUTPUT_BYTES);
+        Ok(())
+    }
 }

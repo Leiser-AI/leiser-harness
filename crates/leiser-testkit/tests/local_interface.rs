@@ -110,6 +110,46 @@ async fn the_app_runs_a_turn_over_the_local_interface() -> TestResult {
 }
 
 #[tokio::test]
+async fn a_slow_notification_consumer_can_still_execute_commands() -> TestResult {
+    let service = start_service(&Script::new())?;
+    let _interface = leiser_service::serve(service.connect(), service.data_dir()).await?;
+    let (app, mut notifications) = LocalClient::connect(service.data_dir()).await?;
+    let repo = TestRepo::new()?;
+    let chat = start_chat(&app, &repo).await?;
+    let Response::TodoAdded { todo } = app
+        .execute(Command::AddTodo {
+            chat,
+            text: "check".to_owned(),
+        })
+        .await?
+    else {
+        return Err("expected a new todo".into());
+    };
+    for index in 0..notifications.max_capacity() + 2 {
+        let reply = tokio::time::timeout(
+            TIMEOUT,
+            app.execute(Command::SetTodoDone {
+                chat,
+                todo,
+                done: index % 2 == 0,
+            }),
+        )
+        .await
+        .map_err(|_| "a full notification queue blocked a command reply")??;
+        assert_eq!(reply, Response::TodoUpdated);
+    }
+    tokio::time::timeout(TIMEOUT, async {
+        while let Some(notification) = notifications.recv().await {
+            if notification == Notification::EventsLost {
+                return Ok(());
+            }
+        }
+        Err("expected an events-lost notification".into())
+    })
+    .await?
+}
+
+#[tokio::test]
 async fn a_failed_command_arrives_as_its_error() -> TestResult {
     let service = start_service(&Script::new())?;
     let _interface = leiser_service::serve(service.connect(), service.data_dir()).await?;

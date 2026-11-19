@@ -19,6 +19,27 @@ const FAKE_AGENT_CLI: &str = env!("CARGO_BIN_EXE_fake-agent-cli");
 /// How long a test waits for something that must happen.
 const TIMEOUT: Duration = Duration::from_secs(10);
 
+#[tokio::test]
+async fn zero_poll_intervals_fail_before_the_service_starts() -> TestResult {
+    use leiser_service::{ServiceConfig, start};
+    use leiser_testkit::FakeDriver;
+    use std::sync::Arc;
+    let data = tempfile::tempdir()?;
+    let driver = Arc::new(FakeDriver::new(Path::new(FAKE_AGENT_CLI), &Script::new())?);
+    let config =
+        || ServiceConfig::new(AgentCli::ClaudeCode, driver.clone(), data.path().to_owned());
+    for config in [
+        config().with_wayfinder_poll_interval(Duration::ZERO),
+        config().with_pull_request_poll_interval(Duration::ZERO),
+    ] {
+        assert!(matches!(
+            start(config),
+            Err(leiser_service::StartError::ZeroPollInterval)
+        ));
+    }
+    Ok(())
+}
+
 fn start_service(script: &Script) -> TestResult<TestService> {
     Ok(TestService::start(Path::new(FAKE_AGENT_CLI), script)?)
 }

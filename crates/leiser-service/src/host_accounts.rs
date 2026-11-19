@@ -158,6 +158,10 @@ impl HostAccounts {
         }
     }
 
+    pub fn forget(&mut self, id: HostAccountId) {
+        self.registered.remove(&id);
+    }
+
     /// What the git host needs to act as the host account.
     pub fn access(&self, id: HostAccountId) -> Option<HostAccountAccess> {
         let account = self.registered.get(&id)?;

@@ -22,8 +22,8 @@ use crate::keychain::KeychainError;
 use crate::repo_check::{self, Outcome};
 use crate::repo_config::RepositoryConfig;
 use crate::store::{
-    AgentSessionV2, ChatSubscriptionV3, ChatV3, CheckpointsV1, HandoffV2, RepositoryV1, StateV3,
-    StorageError, Store, TurnCheckpointsV1, UsageLimitV3,
+    AccountRemoval, AgentSessionV2, ChatSubscriptionV3, ChatV3, CheckpointsV1, HandoffV2,
+    RepositoryV1, StateV3, StorageError, Store, TurnCheckpointsV1, UsageLimitV3,
 };
 use crate::subscriptions::{SubscriptionError, Subscriptions};
 use crate::todos::{TodoChange, TodoError, TodoList};
@@ -180,6 +180,8 @@ impl ServiceConfig {
 /// Why the harness service could not start.
 #[derive(Debug, thiserror::Error)]
 pub enum StartError {
+    #[error("poll intervals must be greater than zero")]
+    ZeroPollInterval,
     #[error("could not load the harness service's data: {0}")]
     Storage(#[from] StorageError),
     #[error("could not start the harness MCP server: {0}")]
@@ -194,8 +196,11 @@ pub enum StartError {
 /// # Errors
 ///
 /// Returns a [`StartError`] when the stored data cannot be read or the
-/// harness MCP server cannot listen.
+/// harness MCP server cannot listen, or when a poll interval is zero.
 pub fn start(config: ServiceConfig) -> Result<Service, StartError> {
+    if config.pull_request_poll_interval.is_zero() || config.wayfinder_poll_interval.is_zero() {
+        return Err(StartError::ZeroPollInterval);
+    }
     let (store, stored) = Store::open(&config.data_dir, config.default_agent_cli)?;
     let (commands, receiver) = mpsc::channel(COMMAND_BUFFER);
     let (events, _) = broadcast::channel(EVENT_BUFFER);
@@ -214,6 +219,11 @@ pub fn start(config: ServiceConfig) -> Result<Service, StartError> {
             background,
         },
     )?;
+    for removal in state.pending_removals.clone() {
+        if let Err(error) = state.finish_account_removal(removal) {
+            tracing::warn!(%error, "could not finish removing an account");
+        }
+    }
     state.resume_all();
     let (stop, stopped) = oneshot::channel();
     let (update, update_requests) = mpsc::channel(1);
@@ -728,6 +738,7 @@ struct State {
     /// Repositories' wayfinder maps, once read.
     wayfinder: BTreeMap<RepositoryId, RepositoryMaps>,
     host_accounts: HostAccounts,
+    pending_removals: Vec<AccountRemoval>,
     host_account_logins: BTreeMap<HostAccountId, Login>,
     next_id: u64,
     generation: u64,
@@ -766,6 +777,21 @@ impl State {
             config.keychain,
         );
         let host_accounts = HostAccounts::load(stored.host_accounts, store.host_accounts_dir());
+        let pending_removals = stored
+            .pending_removals
+            .into_iter()
+            .filter(|removal| {
+                // Never apply a stale cleanup record to a live or future ID.
+                match *removal {
+                    AccountRemoval::HostAccount(id) => {
+                        id.0 <= stored.next_id && !host_accounts.contains(id)
+                    }
+                    AccountRemoval::Subscription(id, _) => {
+                        id.0 <= stored.next_id && !subscriptions.contains(id)
+                    }
+                }
+            })
+            .collect();
         let checkpoints = stored_checkpoints(&store, chats.keys())?;
         let status_changes = chats
             .values()
@@ -795,6 +821,7 @@ impl State {
             wayfinder_poll_interval: config.wayfinder_poll_interval,
             wayfinder: BTreeMap::new(),
             host_accounts,
+            pending_removals,
             host_account_logins: BTreeMap::new(),
             next_id: stored.next_id,
             generation: 0,
@@ -2223,8 +2250,7 @@ impl State {
             .provider(subscription)
             .ok_or(CommandError::UnknownSubscription { subscription })?;
         let name = self.free_name(provider, name, Some(subscription))?;
-        self.subscriptions.rename(subscription, name);
-        self.save()?;
+        self.edit_subscription_settings(|subscriptions| subscriptions.rename(subscription, name))?;
         Ok(Response::SubscriptionRenamed)
     }
 
@@ -2232,6 +2258,12 @@ impl State {
         &mut self,
         subscription: SubscriptionId,
     ) -> Result<Response, CommandError> {
+        if let Some(removal) = self.pending_removals.iter().copied().find(
+            |removal| matches!(removal, AccountRemoval::Subscription(id, _) if *id == subscription),
+        ) {
+            self.finish_account_removal(removal)?;
+            return Ok(Response::SubscriptionRemoved);
+        }
         let provider = self
             .subscriptions
             .provider(subscription)
@@ -2249,6 +2281,12 @@ impl State {
         for &id in &users {
             self.chat_between_turns(id)?;
         }
+        let kind = self
+            .subscriptions
+            .kind(subscription)
+            .ok_or(CommandError::UnknownSubscription { subscription })?;
+        let removal = AccountRemoval::Subscription(subscription, kind);
+        self.begin_account_removal(removal)?;
         self.logins.remove(&subscription);
         for id in users {
             if let Some(chat) = self.chats.get_mut(&id) {
@@ -2256,8 +2294,7 @@ impl State {
                 chat.session = None;
             }
         }
-        self.subscriptions.remove(subscription)?;
-        self.save()?;
+        self.finish_account_removal(removal)?;
         Ok(Response::SubscriptionRemoved)
     }
 
@@ -2384,13 +2421,60 @@ impl State {
         &mut self,
         host_account: HostAccountId,
     ) -> Result<Response, CommandError> {
-        if !self.host_accounts.contains(host_account) {
-            return Err(CommandError::UnknownHostAccount { host_account });
+        let removal = AccountRemoval::HostAccount(host_account);
+        if !self.pending_removals.contains(&removal) {
+            if !self.host_accounts.contains(host_account) {
+                return Err(CommandError::UnknownHostAccount { host_account });
+            }
+            self.begin_account_removal(removal)?;
+            self.host_account_logins.remove(&host_account);
         }
-        self.host_account_logins.remove(&host_account);
-        self.host_accounts.remove(host_account);
-        self.save()?;
+        self.finish_account_removal(removal)?;
         Ok(Response::HostAccountRemoved)
+    }
+
+    /// Commit the registry change and the cleanup intent together before
+    /// ending logins or touching their files. IDs are never reused.
+    fn begin_account_removal(&mut self, removal: AccountRemoval) -> Result<(), CommandError> {
+        let mut state = self.snapshot();
+        match removal {
+            AccountRemoval::Subscription(id, _) => state.subscriptions.retain(|s| s.id != id.0),
+            AccountRemoval::HostAccount(id) => state.host_accounts.retain(|a| a.id != id.0),
+        }
+        state.pending_removals.push(removal);
+        self.store.save(&state)?;
+        self.pending_removals = state.pending_removals;
+        match removal {
+            AccountRemoval::Subscription(id, _) => self.subscriptions.forget(id),
+            AccountRemoval::HostAccount(id) => self.host_accounts.forget(id),
+        }
+        Ok(())
+    }
+
+    fn finish_account_removal(&mut self, removal: AccountRemoval) -> Result<(), CommandError> {
+        let path = match removal {
+            AccountRemoval::Subscription(id, kind) => {
+                if kind == SubscriptionKind::ApiKey {
+                    self.subscriptions.delete_key(id)?;
+                }
+                self.store.subscriptions_dir().join(id.0.to_string())
+            }
+            AccountRemoval::HostAccount(id) => {
+                self.store.host_accounts_dir().join(id.0.to_string())
+            }
+        };
+        match std::fs::remove_dir_all(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(source) => return Err(StorageError::Io { path, source }.into()),
+        }
+        self.pending_removals.retain(|pending| *pending != removal);
+        // Cleanup succeeded. A crash before the next successful save only
+        // repeats these idempotent deletions.
+        if let Err(error) = self.save() {
+            tracing::warn!(%error, "could not record completed account cleanup");
+        }
+        Ok(())
     }
 
     /// Runs the git host's login in the host account's config directory
@@ -2653,9 +2737,9 @@ impl State {
         if !self.subscriptions.contains(subscription) {
             return Err(CommandError::UnknownSubscription { subscription });
         }
-        self.subscriptions
-            .set_interchangeable(subscription, interchangeable);
-        self.save()?;
+        self.edit_subscription_settings(|subscriptions| {
+            subscriptions.set_interchangeable(subscription, interchangeable);
+        })?;
         Ok(Response::InterchangeableSet)
     }
 
@@ -3481,6 +3565,19 @@ impl State {
         Ok(Response::CheckpointRestored)
     }
 
+    fn edit_subscription_settings(
+        &mut self,
+        edit: impl FnOnce(&mut Subscriptions),
+    ) -> Result<(), CommandError> {
+        let mut next = self.subscriptions.clone();
+        edit(&mut next);
+        let mut state = self.snapshot();
+        state.subscriptions = next.snapshot();
+        self.store.save(&state)?;
+        self.subscriptions = next;
+        Ok(())
+    }
+
     fn save(&self) -> Result<(), CommandError> {
         Ok(self.store.save(&self.snapshot())?)
     }
@@ -3490,6 +3587,7 @@ impl State {
             next_id: self.next_id,
             subscriptions: self.subscriptions.snapshot(),
             host_accounts: self.host_accounts.snapshot(),
+            pending_removals: self.pending_removals.clone(),
             repositories: self
                 .repositories
                 .iter()

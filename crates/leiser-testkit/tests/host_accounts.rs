@@ -497,6 +497,75 @@ async fn host_accounts_are_kept_across_a_restart_and_need_distinct_names() -> Te
 }
 
 #[tokio::test]
+async fn a_failed_removal_keeps_the_host_account_and_its_files() -> TestResult {
+    let harness = start_service(&Script::new())?;
+    let service = harness.connect();
+    let account = add_host_account(&service).await?;
+    let before = host_accounts(&service).await?;
+    let marker = before[0].config_dir.join("settings");
+    std::fs::write(&marker, "configured")?;
+    let state = harness.data_dir().join("state.json");
+    std::fs::rename(&state, state.with_extension("backup"))?;
+    std::fs::create_dir(&state)?;
+
+    let result = service
+        .execute(Command::RemoveHostAccount {
+            host_account: account,
+        })
+        .await;
+    assert!(matches!(result, Err(CommandError::Storage { .. })));
+    assert_eq!(host_accounts(&service).await?, before);
+    assert_eq!(std::fs::read_to_string(marker)?, "configured");
+    Ok(())
+}
+
+#[tokio::test]
+async fn inconsistent_cleanup_state_cannot_delete_a_registered_account() -> TestResult {
+    let harness = start_service(&Script::new())?;
+    let service = harness.connect();
+    let account = add_host_account(&service).await?;
+    let registered = host_accounts(&service).await?;
+    let marker = registered[0].config_dir.join("settings");
+    std::fs::write(&marker, "keep")?;
+    let path = harness.data_dir().join("state.json");
+    let mut stored: serde_json::Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+    stored["pending_removals"] = serde_json::json!([{ "host_account": account }]);
+    std::fs::write(path, serde_json::to_vec(&stored)?)?;
+
+    let _harness = harness.restart().await?;
+    assert_eq!(std::fs::read_to_string(marker)?, "keep");
+    Ok(())
+}
+
+#[tokio::test]
+async fn restart_finishes_interrupted_host_account_cleanup() -> TestResult {
+    let harness = start_service(&Script::new())?;
+    let service = harness.connect();
+    let account = add_host_account(&service).await?;
+    let registered = host_accounts(&service).await?;
+    let dir = registered[0]
+        .config_dir
+        .parent()
+        .ok_or("missing account directory")?;
+    let moved = dir.with_extension("backup");
+    std::fs::rename(dir, &moved)?;
+    std::fs::write(dir, "cleanup temporarily unavailable")?;
+    let result = service
+        .execute(Command::RemoveHostAccount {
+            host_account: account,
+        })
+        .await;
+    assert!(matches!(result, Err(CommandError::Storage { .. })));
+    std::fs::remove_file(dir)?;
+    std::fs::rename(moved, dir)?;
+
+    let harness = harness.restart().await?;
+    assert!(host_accounts(&harness.connect()).await?.is_empty());
+    assert!(!dir.exists());
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_removed_host_account_no_longer_binds_its_repositories() -> TestResult {
     let harness = start_service(&committing())?;
     let service = harness.connect();

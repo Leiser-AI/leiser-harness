@@ -31,15 +31,15 @@ pub const CODEX_HOME: &str = "CODEX_HOME";
 /// The variable the Codex driver's API key provider reads its key from.
 pub const OPENAI_API_KEY: &str = "OPENAI_API_KEY";
 
-/// Variables that would sign Claude Code in with something other than the
-/// chosen subscription; they rank above a login.
-const CLAUDE_CODE_SIGN_INS: [&str; 3] = [
+/// Provider credentials that a managed login or agent session should
+/// inherit only when explicitly selected for that subscription.
+const PROVIDER_CREDENTIALS: [&str; 5] = [
     ANTHROPIC_API_KEY,
     "ANTHROPIC_AUTH_TOKEN",
     "CLAUDE_CODE_OAUTH_TOKEN",
+    OPENAI_API_KEY,
+    "CODEX_API_KEY",
 ];
-/// The same for Codex.
-const CODEX_SIGN_INS: [&str; 3] = [OPENAI_API_KEY, "CODEX_API_KEY", "OPENAI_BASE_URL"];
 
 /// The name the agent CLI must give the harness MCP server, so agents see
 /// its tools as, for example, `mcp__leiser__read_chat` in Claude Code.
@@ -95,16 +95,17 @@ impl SubscriptionAccess {
     /// inherited variables that would sign the agent CLI in otherwise.
     #[must_use]
     pub fn environment(&self, agent_cli: AgentCli) -> SubscriptionEnvironment {
-        let (home, api_key, sign_ins) = match agent_cli {
-            AgentCli::ClaudeCode => (CLAUDE_CONFIG_DIR, ANTHROPIC_API_KEY, CLAUDE_CODE_SIGN_INS),
-            AgentCli::Codex => (CODEX_HOME, OPENAI_API_KEY, CODEX_SIGN_INS),
+        let (home, api_key, base_url) = match agent_cli {
+            AgentCli::ClaudeCode => (CLAUDE_CONFIG_DIR, ANTHROPIC_API_KEY, "ANTHROPIC_BASE_URL"),
+            AgentCli::Codex => (CODEX_HOME, OPENAI_API_KEY, "OPENAI_BASE_URL"),
         };
         let mut set = vec![(home, self.home.clone().into_os_string())];
         if let Some(key) = &self.api_key {
             set.push((api_key, OsString::from(key.expose())));
         }
-        let remove = sign_ins
+        let remove = PROVIDER_CREDENTIALS
             .into_iter()
+            .chain([base_url])
             .filter(|name| !set.iter().any(|(set, _)| set == name))
             .collect();
         SubscriptionEnvironment { set, remove }

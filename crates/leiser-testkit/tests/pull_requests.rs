@@ -513,12 +513,26 @@ async fn a_removed_worktree_stays_removed_across_a_restart() -> TestResult {
 
 #[tokio::test]
 async fn a_worktree_with_uncommitted_changes_is_kept() -> TestResult {
+    keeps_untracked_work(false).await
+}
+
+#[tokio::test]
+async fn untracked_work_is_kept_when_git_status_normally_hides_it() -> TestResult {
+    keeps_untracked_work(true).await
+}
+
+async fn keeps_untracked_work(hide_untracked: bool) -> TestResult {
     let bound = bound_with_commit(None).await?;
     let worktree = worktree(&bound.service, bound.chat).await?;
     let opened = open_pull_request(&bound.service, bound.chat).await?;
     bound.harness.git_host().merge(opened.number);
     check_pull_request(&bound.service, bound.chat).await?;
     std::fs::write(worktree.join("unsaved.txt"), "not committed\n")?;
+    if hide_untracked {
+        bound
+            .repo
+            .git(&["config", "--local", "status.showUntrackedFiles", "no"])?;
+    }
 
     let removed = bound
         .service

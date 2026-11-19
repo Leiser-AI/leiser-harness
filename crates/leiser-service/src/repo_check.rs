@@ -74,14 +74,15 @@ async fn run_within(session: AgentSession, timeout: Duration) -> Outcome {
                 AgentEvent::Message { text } => messages.push(text),
                 AgentEvent::UsageLimitReached { limit, .. } => usage_limit = Some(limit),
                 AgentEvent::TurnEnded => return Ok(()),
-                AgentEvent::TurnInterrupted => return Err("repo-check was interrupted"),
+                AgentEvent::TurnFailed { reason } => return Err(reason),
+                AgentEvent::TurnInterrupted => return Err("repo-check was interrupted".to_owned()),
                 AgentEvent::SessionEnded => {
-                    return Err("the agent session ended before repo-check finished");
+                    return Err("the agent session ended before repo-check finished".to_owned());
                 }
                 _ => {}
             }
         }
-        Err("the agent session ended before repo-check finished")
+        Err("the agent session ended before repo-check finished".to_owned())
     })
     .await;
     // Ends the agent session; the skill's closing question stays unanswered.
@@ -91,7 +92,7 @@ async fn run_within(session: AgentSession, timeout: Duration) -> Outcome {
             "repo-check did not finish within {} minutes",
             timeout.as_secs() / 60
         )),
-        Ok(Err(reason)) => failed(reason),
+        Ok(Err(reason)) => Outcome::Failed { reason },
         Ok(Ok(())) => match parse_report(&messages) {
             Ok(report) => Outcome::Done { report },
             Err(error) => match usage_limit {

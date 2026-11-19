@@ -306,6 +306,39 @@ fn files(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
 }
 
 #[tokio::test]
+async fn a_failed_save_preserves_subscription_settings_and_credentials() -> TestResult {
+    let harness = claude_service(&Script::new())?;
+    let service = harness.connect();
+    let subscription = add(&service, Provider::Anthropic, "Work", api_key(API_KEY)).await?;
+    let before = overview(&service, subscription).await?;
+    let keys = harness.keychain().keys();
+    let state = harness.data_dir().join("state.json");
+    std::fs::rename(&state, state.with_extension("backup"))?;
+    std::fs::create_dir(&state)?;
+
+    for command in [
+        Command::RenameSubscription {
+            subscription,
+            name: "Other".to_owned(),
+        },
+        Command::SetInterchangeable {
+            subscription,
+            interchangeable: true,
+        },
+        Command::RemoveSubscription { subscription },
+    ] {
+        assert!(matches!(
+            service.execute(command).await,
+            Err(CommandError::Storage { .. })
+        ));
+        assert_eq!(overview(&service, subscription).await?, before);
+        assert_eq!(harness.keychain().keys(), keys);
+        assert!(before.home.is_dir());
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn subscriptions_are_added_named_and_removed_per_provider() -> TestResult {
     let harness = claude_service(&Script::new())?;
     let service = harness.connect();

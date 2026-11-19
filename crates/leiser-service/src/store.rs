@@ -119,6 +119,16 @@ pub(crate) struct StateV3 {
     #[serde(default)]
     pub host_accounts: Vec<HostAccountV3>,
     pub chats: Vec<ChatV3>,
+    /// Registrations already removed whose files or key still need cleanup.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_removals: Vec<AccountRemoval>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AccountRemoval {
+    HostAccount(crate::HostAccountId),
+    Subscription(crate::SubscriptionId, SubscriptionKind),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -497,6 +507,7 @@ impl Store {
             repositories: state.repositories,
             subscriptions: Vec::new(),
             host_accounts: Vec::new(),
+            pending_removals: Vec::new(),
             chats: state
                 .chats
                 .into_iter()
