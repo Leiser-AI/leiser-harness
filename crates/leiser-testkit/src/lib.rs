@@ -2,13 +2,15 @@
 //!
 //! Tests start the harness service in-process ([`TestService`]) with a
 //! [`FakeDriver`], which runs the scripted `fake-agent-cli` program instead
-//! of a real agent CLI, and a temporary git repository ([`TestRepo`]). No
+//! of a real agent CLI (or with [`FakeGemini`], which speaks the Gemini
+//! CLI's Agent Client Protocol to the real Gemini CLI driver), and a temporary git repository ([`TestRepo`]). No
 //! subscription and no network are needed; host accounts sign in to a
 //! [`FakeGitHost`]. API keys go to a
 //! [`MemoryKeychain`] and the shared Codex home is a temporary directory,
 //! so tests never touch the developer's real keychain or config.
 
 mod fake_driver;
+mod fake_gemini;
 mod fake_gh;
 mod fake_glab;
 mod gate;
@@ -22,6 +24,10 @@ mod turn;
 
 pub use fake_driver::{
     FAKE_LOGIN_FILE, FAKE_USAGE_LIMIT_FILE, FakeDriver, FakeLogin, FakeUsageLimit, UNSET,
+};
+pub use fake_gemini::{
+    FAKE_GEMINI_LOG_FILE, FAKE_GEMINI_OAUTH_FILE, FAKE_GEMINI_SCRIPT_FILE, FakeGemini,
+    FakeGeminiScript, FakeGeminiStep,
 };
 pub use fake_gh::{
     FAKE_GH_ANSWERS_FILE, FAKE_GH_REQUESTS_FILE, FakeGh, FakeGhAnswer, FakeGhRequest,

@@ -37,6 +37,7 @@
 //! # without one runs on the agent CLI's own default login.
 //! anthropic = "Claude Team work"
 //! openai = "Codex private"
+//! google = "Gemini private"
 //! ```
 //!
 //! Scripts run with `sh -c` in the worktree, on Windows with the `sh` of
@@ -335,17 +336,19 @@ mod tests {
 
     #[test]
     fn default_subscriptions_are_read_per_provider() -> Result<(), toml::de::Error> {
-        let config: RepositoryConfig =
-            toml::from_str("[subscriptions]\nanthropic = \"Work\"\nopenai = \"Private\"\n")?;
+        let config: RepositoryConfig = toml::from_str(
+            "[subscriptions]\nanthropic = \"Work\"\nopenai = \"Private\"\ngoogle = \"Gemini\"\n",
+        )?;
         assert_eq!(
             config.subscriptions,
             BTreeMap::from([
                 (Provider::Anthropic, "Work".to_owned()),
                 (Provider::OpenAi, "Private".to_owned()),
+                (Provider::Google, "Gemini".to_owned()),
             ])
         );
         let unknown: Result<RepositoryConfig, _> =
-            toml::from_str("[subscriptions]\ngoogle = \"x\"\n");
+            toml::from_str("[subscriptions]\nmistral = \"x\"\n");
         assert!(unknown.is_err());
         Ok(())
     }

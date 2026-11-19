@@ -1576,10 +1576,15 @@ function renderWayfinder(repository: RepositoryOverview, maps: WayfinderMap[]): 
   wayfinderView.replaceChildren(intro, legend, scroller);
 }
 
-/** How each agent CLI's prompt invokes a skill by name. */
-const SKILL_PREFIXES: Record<AgentCli, string> = {
+/**
+ * What starts a prompt that invokes a skill, before the skill's name, per
+ * agent CLI. The Gemini CLI has no syntax for it: its model activates a
+ * skill when the prompt asks for it.
+ */
+const SKILL_INVOCATIONS: Record<AgentCli, string> = {
   claude_code: "/",
   codex: "$",
+  gemini: "Use the skill ",
 };
 
 /**
@@ -1599,7 +1604,7 @@ async function startChatOnTicket(repository: RepositoryId, map: WayfinderMap, ti
 
 /** The start of a prompt that invokes the wayfinder skill, as `agentCli` takes it. */
 function wayfinderInvocation(agentCli: AgentCli): string {
-  return `${SKILL_PREFIXES[agentCli]}wayfinder `;
+  return `${SKILL_INVOCATIONS[agentCli]}wayfinder `;
 }
 
 /**

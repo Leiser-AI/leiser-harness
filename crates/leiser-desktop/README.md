@@ -28,8 +28,8 @@ running service may not know these settings yet: a new chat then starts
 with the repository's defaults, and its settings change once it has
 started.
 
-Chats start on the installed Claude Code; Codex is configured as a second
-agent CLI. The composer's agent CLI picker lists every agent CLI's
+Chats start on the installed Claude Code; Codex and the Gemini CLI are
+configured as further agent CLIs. The composer's agent CLI picker lists every agent CLI's
 default login and every subscription, grouped by provider. Choosing a
 subscription or default login of the other provider moves the chat to that
 agent CLI between turns, with a handoff. An app started from the Finder does not get the shell's `PATH`,
@@ -38,7 +38,8 @@ it starts, and the agent CLIs run with it; after a change to the shell
 profile, restart the app. The service also looks in common install
 directories and, for Claude Code, at the copy the Claude desktop app
 bundles (see `crates/leiser-service/src/installed.rs`). To run another
-program, set `LEISER_CLAUDE_CODE` or `LEISER_CODEX` to its path.
+program, set `LEISER_CLAUDE_CODE`, `LEISER_CODEX` or `LEISER_GEMINI` to its
+path.
 `repo-check` runs on Claude Code, read-only, when a repository is added and
 on demand; it needs the `repo-check` skill in `~/.claude/skills/`.
 
@@ -94,7 +95,8 @@ with entity tags through the repository's host account, so a ticket closed
 or claimed on the git host shows up by itself. Clicking a ticket opens it
 in the browser; a frontier ticket's chat button opens a new chat in a new
 worktree with the wayfinder skill invoked for the ticket in the composer
-(`/wayfinder <map> <ticket>` for Claude Code, `$wayfinder` for Codex; it
+(`/wayfinder <map> <ticket>` for Claude Code, `$wayfinder` for Codex,
+`Use the skill wayfinder` for the Gemini CLI, which has no syntax for it; it
 follows the agent CLI chosen in the composer), ready to send: sending
 starts the chat. On the fake git host, write `fake-git-host-wayfinder.json`
 into the host account's `gh` config directory, for example `{"maps":
@@ -139,7 +141,8 @@ pkill -f leiser-harness-service
 ```
 
 To try the app without a subscription, run it on the testkit's fake agent
-CLI, which plays both Claude Code and Codex and answers every message with
+CLI, which plays Claude Code, Codex and the Gemini CLI and answers every
+message with
 a tool call, its result, an echo and a todo it adds through the harness
 MCP server (refused unless the repository's `.leiser/config.toml` has
 `[agent_access] todo_list = true`).

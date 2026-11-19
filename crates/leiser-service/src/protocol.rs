@@ -67,6 +67,7 @@ pub enum Provider {
     Anthropic,
     #[serde(rename = "openai")]
     OpenAi,
+    Google,
 }
 
 impl std::fmt::Display for Provider {
@@ -74,6 +75,7 @@ impl std::fmt::Display for Provider {
         f.write_str(match self {
             Self::Anthropic => "Anthropic",
             Self::OpenAi => "OpenAI",
+            Self::Google => "Google",
         })
     }
 }
@@ -85,6 +87,7 @@ impl Provider {
         match self {
             Self::Anthropic => AgentCli::ClaudeCode,
             Self::OpenAi => AgentCli::Codex,
+            Self::Google => AgentCli::Gemini,
         }
     }
 }
@@ -174,6 +177,8 @@ impl std::fmt::Display for TodoId {
 pub enum AgentCli {
     ClaudeCode,
     Codex,
+    /// Google's Gemini CLI (`gemini`).
+    Gemini,
 }
 
 impl std::fmt::Display for AgentCli {
@@ -181,6 +186,7 @@ impl std::fmt::Display for AgentCli {
         f.write_str(match self {
             Self::ClaudeCode => "Claude Code",
             Self::Codex => "Codex",
+            Self::Gemini => "Gemini CLI",
         })
     }
 }
@@ -224,6 +230,7 @@ impl AgentCli {
         match self {
             Self::ClaudeCode => Provider::Anthropic,
             Self::Codex => Provider::OpenAi,
+            Self::Gemini => Provider::Google,
         }
     }
 }
@@ -476,8 +483,8 @@ pub enum Command {
     /// After the chat's last turn stopped at a usage limit: changes the
     /// subscription of the chat's agent CLI to `subscription`, as
     /// [`Command::ChangeSubscription`] does, and continues the chat there in
-    /// a new turn. Codex continues the same agent session; Claude Code
-    /// continues in a new agent session with a handoff. Messages queued when
+    /// a new turn. Codex continues the same agent session; Claude Code and
+    /// the Gemini CLI continue in a new agent session with a handoff. Messages queued when
     /// the limit was hit are sent after this turn. Fails when the chat's
     /// last turn did not stop at a usage limit.
     ContinueOnSubscription {

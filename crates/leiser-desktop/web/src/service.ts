@@ -81,17 +81,20 @@ export const PERMISSION_MODE_NAMES: Record<PermissionMode, string> = {
 export const AGENT_CLI_NAMES: Record<AgentCli, string> = {
   claude_code: "Claude Code",
   codex: "Codex",
+  gemini: "Gemini CLI",
 };
 
 export const PROVIDER_NAMES: Record<Provider, string> = {
   anthropic: "Anthropic",
   openai: "OpenAI",
+  google: "Google",
 };
 
 /** The provider whose subscriptions an agent CLI runs on. */
 export const AGENT_CLI_PROVIDERS: Record<AgentCli, Provider> = {
   claude_code: "anthropic",
   codex: "openai",
+  gemini: "google",
 };
 
 /** A command the service refused, with the reason it gave. */

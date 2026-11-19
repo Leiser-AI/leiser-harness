@@ -27,8 +27,8 @@ pub const FAKE_LOGIN_FILE: &str = "fake-login.json";
 pub const UNSET: &str = "<unset>";
 
 /// The file that makes the fake agent CLI report a usage limit: while the
-/// config directory it runs in (`CLAUDE_CONFIG_DIR` or `CODEX_HOME`) holds
-/// it, every turn stops at the [`FakeUsageLimit`] it contains, as a real
+/// config directory it runs in (`CLAUDE_CONFIG_DIR`, `CODEX_HOME` or
+/// `GEMINI_CLI_HOME`) holds it, every turn stops at the [`FakeUsageLimit`] it contains, as a real
 /// agent CLI does when its subscription hits a limit.
 pub const FAKE_USAGE_LIMIT_FILE: &str = "fake-usage-limit.json";
 

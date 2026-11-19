@@ -1,6 +1,7 @@
 # leiser-harness
 
-A desktop app that runs coding agents in chats: Claude Code and Codex, on
+A desktop app that runs coding agents in chats: Claude Code, Codex and the
+Gemini CLI, on
 the logins and subscriptions you already have, each chat in its own git
 worktree. Written in Rust (Tauri) for macOS, Windows and Linux.
 
@@ -30,9 +31,9 @@ Or download the installer:
 ## What it does
 
 - **Your agent CLIs, your subscriptions.** Chats run on the installed
-  Claude Code and Codex. Add several subscriptions per provider; when one
-  hits its usage limit, the chat continues on another, also across agent
-  CLIs with a handoff.
+  Claude Code, Codex and Gemini CLI. Add several subscriptions per
+  provider; when one hits its usage limit, the chat continues on another,
+  also across agent CLIs with a handoff.
 - **One worktree per chat.** Every chat works in its own git worktree (or
   the main checkout), with checkpoints per turn, a todo list and a
   terminal.
@@ -124,10 +125,11 @@ are gone by then.
 - **git**.
 - **At least one agent CLI, signed in:**
   [Claude Code](https://docs.anthropic.com/en/docs/claude-code) (`claude`)
-  or [Codex](https://github.com/openai/codex) (`codex`). The harness finds
-  them through your login shell's `PATH` and common install directories; to
-  use another program, set `LEISER_CLAUDE_CODE` or `LEISER_CODEX` to its
-  path.
+  [Codex](https://github.com/openai/codex) (`codex`) or the
+  [Gemini CLI](https://github.com/google-gemini/gemini-cli) (`gemini`,
+  0.33 or newer). The harness finds them through your login shell's `PATH`
+  and common install directories; to use another program, set
+  `LEISER_CLAUDE_CODE`, `LEISER_CODEX` or `LEISER_GEMINI` to its path.
 - **GitHub CLI** [`gh`](https://cli.github.com), for pull requests and
   Auto-fix. Optional.
 - **A `repo-check` skill** in `~/.claude/skills/repo-check/`, for the
@@ -199,7 +201,8 @@ CI runs the same checks on Linux, macOS and Windows, plus `cargo deny`
 The crates:
 
 - `leiser-service` – the harness service: chats, agent sessions, the
-  drivers for Claude Code and Codex, worktrees, pull requests, Auto-fix.
+  drivers for Claude Code, Codex and the Gemini CLI, worktrees, pull
+  requests, Auto-fix.
 - `leiser-harness-service` – the harness service as its own process.
 - `leiser-desktop` – the desktop app (Tauri, TypeScript UI in `web/`).
 - `leiser-terminal` – the terminal panel's PTY.

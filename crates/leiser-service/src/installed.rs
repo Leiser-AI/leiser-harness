@@ -5,8 +5,8 @@
 //! is on no `PATH` at all. So an installed driver looks for its agent CLI,
 //! in this order:
 //!
-//! 1. the program its variable names (`LEISER_CLAUDE_CODE`, `LEISER_CODEX`),
-//!    used as given;
+//! 1. the program its variable names (`LEISER_CLAUDE_CODE`, `LEISER_CODEX`,
+//!    `LEISER_GEMINI`), used as given;
 //! 2. `PATH`;
 //! 3. common install directories: `~/.local/bin` (the Claude Code
 //!    installer), `/opt/homebrew/bin` and `/usr/local/bin` (Homebrew, npm),
@@ -62,6 +62,7 @@ const VARIABLES: [&str; 7] = [
     "SHELL",
     CLAUDE_CODE.variable,
     CODEX.variable,
+    GEMINI.variable,
     GH.variable,
     GLAB.variable,
 ];
@@ -240,6 +241,14 @@ pub(crate) const CODEX: Install = Install {
     agent_cli: "Codex",
     program: "codex",
     variable: "LEISER_CODEX",
+    home_directories: &[],
+    bundled: None,
+};
+
+pub(crate) const GEMINI: Install = Install {
+    agent_cli: "Gemini CLI",
+    program: "gemini",
+    variable: "LEISER_GEMINI",
     home_directories: &[],
     bundled: None,
 };

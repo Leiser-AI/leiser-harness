@@ -18,30 +18,36 @@ pub(crate) const PROTECTED_BRANCHES: [&str; 2] = ["main", "development"];
 
 /// What an AI agent calls itself in commits, lower case: as a co-author's
 /// name and in "Generated with" lines.
-pub(crate) const AI_NAMES: [&str; 6] = [
+pub(crate) const AI_NAMES: [&str; 7] = [
     "claude",
     "codex",
     "chatgpt",
     "copilot",
     "openai",
     "anthropic",
+    "gemini",
 ];
 
 /// Model names an AI co-author is named by, after "claude ", lower case:
 /// `Claude Opus 4.5 <noreply@anthropic.com>`.
 const CLAUDE_MODELS: [&str; 5] = ["code", "opus", "sonnet", "haiku", "fable"];
 
+/// Email addresses AI agents commit as.
+pub(crate) const AI_EMAILS: [&str; 2] = ["noreply@anthropic.com", "noreply@openai.com"];
+
 /// Email domains of the companies behind the agent CLIs.
 const AI_EMAIL_DOMAINS: [&str; 2] = ["anthropic.com", "openai.com"];
 
 /// GitHub logins of AI agents, as in `<id>+<login>@users.noreply.github.com`.
-const AI_GITHUB_LOGINS: [&str; 6] = [
+const AI_GITHUB_LOGINS: [&str; 8] = [
     "claude",
     "claude-code",
     "codex",
     "chatgpt-codex-connector",
     "copilot",
     "copilot-swe-agent",
+    "gemini-cli",
+    "gemini-code-assist",
 ];
 
 /// Refuses a push of `branch` when it is protected.
@@ -153,6 +159,8 @@ fn is_ai(identity: &str) -> bool {
                 .any(|model| rest.split_whitespace().next() == Some(model))
         })
         || name.starts_with("gpt-")
+        // `Gemini CLI`, `Gemini 2.5 Pro`.
+        || name.starts_with("gemini ")
         || name == "github copilot"
         || name == "openai codex";
     let (local, domain) = email.split_once('@').unwrap_or_default();
