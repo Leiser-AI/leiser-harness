@@ -56,13 +56,14 @@ const VERSION_TIMEOUT: Duration = Duration::from_secs(10);
 const VERSION_POLL: Duration = Duration::from_millis(10);
 
 /// The variables an installed driver reads.
-const VARIABLES: [&str; 6] = [
+const VARIABLES: [&str; 7] = [
     "PATH",
     "HOME",
     "SHELL",
     CLAUDE_CODE.variable,
     CODEX.variable,
     GH.variable,
+    GLAB.variable,
 ];
 
 /// How long the harness service waits for the login shell's `PATH`.
@@ -248,6 +249,15 @@ pub(crate) const GH: Install = Install {
     agent_cli: "the GitHub CLI",
     program: "gh",
     variable: "LEISER_GH",
+    home_directories: &[],
+    bundled: None,
+};
+
+/// The GitLab CLI, which signs host accounts in on GitLab.
+pub(crate) const GLAB: Install = Install {
+    agent_cli: "the GitLab CLI",
+    program: "glab",
+    variable: "LEISER_GLAB",
     home_directories: &[],
     bundled: None,
 };

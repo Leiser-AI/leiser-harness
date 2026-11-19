@@ -18,6 +18,10 @@ path = "src/bin/fake-agent-cli.rs"
 name = "fake-gh"
 path = "src/bin/fake-gh.rs"
 
+[[bin]]
+name = "fake-glab"
+path = "src/bin/fake-glab.rs"
+
 [dependencies]
 leiser-service.workspace = true
 serde = { version = "1.0.229", features = ["derive"] }

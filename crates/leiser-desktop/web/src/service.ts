@@ -19,6 +19,7 @@ import type {
   Command,
   CommandError,
   CommitAuthor,
+  GitHostKind,
   HostAccountBinding,
   HostAccountId,
   HostAccountOverview,
@@ -401,11 +402,19 @@ export async function listHostAccounts(): Promise<HostAccountOverview[]> {
 
 export async function addHostAccount(
   name: string,
+  kind: GitHostKind,
   gitHost: string,
   login: string,
   author: CommitAuthor,
 ): Promise<HostAccountId> {
-  const response = await execute({ type: "add_host_account", name, git_host: gitHost, login, author });
+  const response = await execute({
+    type: "add_host_account",
+    name,
+    kind,
+    git_host: gitHost,
+    login,
+    author,
+  });
   return response.type === "host_account_added" ? response.host_account : unexpected(response);
 }
 
@@ -414,7 +423,7 @@ export async function removeHostAccount(hostAccount: HostAccountId): Promise<voi
   if (response.type !== "host_account_removed") unexpected(response);
 }
 
-/** Runs the git host's login (`gh auth login`) for the host account. */
+/** Runs the git host's login (`gh auth login` or `glab auth login`) for the host account. */
 export async function logInHostAccount(hostAccount: HostAccountId): Promise<void> {
   const response = await execute({ type: "log_in_host_account", host_account: hostAccount });
   if (response.type !== "host_account_login_started") unexpected(response);

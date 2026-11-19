@@ -9,8 +9,8 @@ use std::time::Duration;
 
 use leiser_service::{
     AgentEvent, Branch, ChatId, ChatSettings, Checkout, Command, CommandError, CommitAuthor, Event,
-    HostAccountBinding, HostAccountId, HostAccountOverview, LoginOutcome, RepositoryId, Response,
-    ServiceHandle,
+    GitHostKind, HostAccountBinding, HostAccountId, HostAccountOverview, LoginOutcome,
+    RepositoryId, Response, ServiceHandle,
 };
 use leiser_testkit::{
     FAKE_CREDENTIAL_HELPER, FAKE_GLOBAL_AUTHOR, Script, Step, TestRepo, TestService, collect_turn,
@@ -59,6 +59,7 @@ async fn add_host_account(service: &ServiceHandle) -> TestResult<HostAccountId> 
     match service
         .execute(Command::AddHostAccount {
             name: NAME.to_owned(),
+            kind: GitHostKind::GitHub,
             git_host: GIT_HOST.to_owned(),
             login: LOGIN.to_owned(),
             author: author(),
@@ -164,7 +165,7 @@ async fn top_bar(service: &ServiceHandle, chat: ChatId) -> TestResult<TopBar> {
             ..
         } => Ok(TopBar {
             branch,
-            host_account,
+            host_account: *host_account,
             commit_author,
         }),
         response => Err(format!("expected Chat, got {response:?}").into()),
@@ -294,6 +295,7 @@ async fn the_top_bar_shows_branch_host_account_and_commit_author() -> TestResult
         HostAccountBinding::Bound {
             host_account: bound.host_account,
             name: NAME.to_owned(),
+            kind: GitHostKind::GitHub,
             git_host: GIT_HOST.to_owned(),
             login: LOGIN.to_owned(),
         }

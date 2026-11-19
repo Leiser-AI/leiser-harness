@@ -13,8 +13,8 @@ use std::time::Duration;
 
 use leiser_service::{
     AutoFix, AutoFixStop, AutoFixTrigger, ChatId, ChatSettings, Checkout, Command, CommentLocation,
-    CommitAuthor, CommitId, Event, HostAccountId, LoginOutcome, PullRequest, PullRequestState,
-    RepositoryId, Response, ServiceHandle, TranscriptEntry,
+    CommitAuthor, CommitId, Event, GitHostKind, HostAccountId, LoginOutcome, PullRequest,
+    PullRequestState, RepositoryId, Response, ServiceHandle, TranscriptEntry,
 };
 use leiser_testkit::{
     DEFAULT_BRANCH, FakePoll, Gate, Script, Step, TestRepo, TestService, collect_turn,
@@ -115,6 +115,7 @@ async fn add_host_account(service: &ServiceHandle) -> TestResult<HostAccountId> 
     match service
         .execute(Command::AddHostAccount {
             name: NAME.to_owned(),
+            kind: GitHostKind::GitHub,
             git_host: GIT_HOST.to_owned(),
             login: LOGIN.to_owned(),
             author: CommitAuthor {

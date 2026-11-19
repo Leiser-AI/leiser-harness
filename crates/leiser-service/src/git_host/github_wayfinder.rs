@@ -10,21 +10,16 @@
 //! ticket says it has any.
 
 use serde::de::DeserializeOwned;
-use serde::de::IntoDeserializer;
-use serde::de::value::{Error as ValueError, StrDeserializer};
 use serde::{Deserialize, Serialize};
 
 use super::github_poll::{Fetched, Requests};
+use super::http::{MAP_LABEL, ticket_type_of_label};
 use super::{
     Blocker, GhGitHost, GitHostError, HostAccountAccess, MapIssue, PolledWayfinderMaps,
     TicketIssue, https_repository,
 };
-use crate::{IssueRef, TicketType};
+use crate::IssueRef;
 
-/// The label of a map issue.
-const MAP_LABEL: &str = "wayfinder:map";
-/// The start of a ticket's type label, such as `wayfinder:research`.
-const TYPE_LABEL: &str = "wayfinder:";
 /// The length of one page of a list.
 const PER_PAGE: usize = 100;
 
@@ -233,11 +228,4 @@ impl BlockerJson {
             open: self.state == IssueStateJson::Open,
         }
     }
-}
-
-/// The ticket type a label such as `wayfinder:research` names, by the
-/// type's own name in the protocol.
-fn ticket_type_of_label(label: &str) -> Option<TicketType> {
-    let name: StrDeserializer<'_, ValueError> = label.strip_prefix(TYPE_LABEL)?.into_deserializer();
-    TicketType::deserialize(name).ok()
 }

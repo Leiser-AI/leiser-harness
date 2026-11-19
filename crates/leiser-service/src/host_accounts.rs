@@ -1,10 +1,11 @@
 //! The registered host accounts, and how a repository is bound to one.
 //!
-//! Every host account gets its own `gh` config directory,
-//! `host-accounts/<id>/gh` in the data directory, in which the git host's
-//! login runs. A repository names its host account in its
-//! `.leiser/config.toml`; the harness service then sets the repository's
-//! local git config, never the global one (see [`bind`]):
+//! Every host account gets its own CLI config directory,
+//! `host-accounts/<id>/gh` for GitHub or `host-accounts/<id>/glab` for
+//! GitLab in the data directory, in which the git host's login runs. A
+//! repository names its host account in its `.leiser/config.toml`; the
+//! harness service then sets the repository's local git config, never the
+//! global one (see [`bind`]):
 //!
 //! - `user.name` and `user.email`: the host account's commit author, so
 //!   every commit in the repository and its worktrees carries it;
@@ -20,7 +21,7 @@ use std::path::{Path, PathBuf};
 use crate::git::{self, GitError};
 use crate::git_host::{GitHost, GitHostError, HostAccountAccess};
 use crate::store::HostAccountV3;
-use crate::{CommitAuthor, HostAccountId, HostAccountOverview};
+use crate::{CommitAuthor, GitHostKind, HostAccountId, HostAccountOverview};
 
 /// Why a host account could not be added, removed or bound.
 #[derive(Debug, thiserror::Error)]
@@ -40,6 +41,7 @@ pub(crate) enum HostAccountError {
 #[derive(Debug, Clone)]
 struct Registered {
     name: String,
+    kind: GitHostKind,
     git_host: String,
     login: String,
     author: CommitAuthor,
@@ -61,6 +63,7 @@ impl HostAccounts {
                     HostAccountId(account.id),
                     Registered {
                         name: account.name,
+                        kind: account.kind,
                         git_host: account.git_host,
                         login: account.login,
                         author: CommitAuthor {
@@ -80,6 +83,7 @@ impl HostAccounts {
             .map(|(id, account)| HostAccountV3 {
                 id: id.0,
                 name: account.name.clone(),
+                kind: account.kind,
                 git_host: account.git_host.clone(),
                 login: account.login.clone(),
                 author_name: account.author.name.clone(),
@@ -106,6 +110,10 @@ impl HostAccounts {
             .map(|account| account.name.as_str())
     }
 
+    pub fn kind(&self, id: HostAccountId) -> Option<GitHostKind> {
+        self.registered.get(&id).map(|account| account.kind)
+    }
+
     pub fn git_host(&self, id: HostAccountId) -> Option<&str> {
         self.registered
             .get(&id)
@@ -124,17 +132,19 @@ impl HostAccounts {
         &mut self,
         id: HostAccountId,
         name: String,
+        kind: GitHostKind,
         git_host: String,
         login: String,
         author: CommitAuthor,
     ) -> Result<(), HostAccountError> {
-        let dir = self.config_dir(id);
+        let dir = self.config_dir(id, kind);
         std::fs::create_dir_all(&dir)
             .map_err(|source| HostAccountError::Io { path: dir, source })?;
         self.registered.insert(
             id,
             Registered {
                 name,
+                kind,
                 git_host,
                 login,
                 author,
@@ -162,9 +172,10 @@ impl HostAccounts {
     pub fn access(&self, id: HostAccountId) -> Option<HostAccountAccess> {
         let account = self.registered.get(&id)?;
         Some(HostAccountAccess {
+            kind: account.kind,
             git_host: account.git_host.clone(),
             login: account.login.clone(),
-            config_dir: self.config_dir(id),
+            config_dir: self.config_dir(id, account.kind),
         })
     }
 
@@ -178,17 +189,22 @@ impl HostAccounts {
             .map(|(id, account)| HostAccountOverview {
                 host_account: *id,
                 name: account.name.clone(),
+                kind: account.kind,
                 git_host: account.git_host.clone(),
                 login: account.login.clone(),
                 author: account.author.clone(),
-                config_dir: self.config_dir(*id),
+                config_dir: self.config_dir(*id, account.kind),
                 logging_in: logging_in(*id),
             })
             .collect()
     }
 
-    fn config_dir(&self, id: HostAccountId) -> PathBuf {
-        self.root.join(id.0.to_string()).join("gh")
+    fn config_dir(&self, id: HostAccountId, kind: GitHostKind) -> PathBuf {
+        let subdir = match kind {
+            GitHostKind::GitHub => "gh",
+            GitHostKind::GitLab => "glab",
+        };
+        self.root.join(id.0.to_string()).join(subdir)
     }
 }
 

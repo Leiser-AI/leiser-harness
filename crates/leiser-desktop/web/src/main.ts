@@ -22,6 +22,7 @@ import type {
   Question,
   ChatStatus,
   Checkout,
+  GitHostKind,
   HostAccountBinding,
   HostAccountOverview,
   Provider,
@@ -1905,7 +1906,10 @@ function hostAccountRow(account: HostAccountOverview): HTMLElement {
   details.title = account.config_dir;
   const login = el("button", "ghost", "Log in");
   login.type = "button";
-  login.title = "Run the git host's login (gh auth login) for this account";
+  login.title =
+    account.kind === "gitlab"
+      ? "Run the git host's login (glab auth login) for this account"
+      : "Run the git host's login (gh auth login) for this account";
   login.addEventListener("click", () =>
     actInHostDialog(async () => {
       await service.logInHostAccount(account.host_account);
@@ -2403,14 +2407,31 @@ pullRequestForm.addEventListener("submit", (event) => {
   })();
 });
 
+const newHostKind = byId<HTMLSelectElement>("new-host-kind");
+const newHostGitHost = byId<HTMLInputElement>("new-host-git-host");
+newHostKind.addEventListener("change", () => {
+  if (newHostKind.value === "gitlab" && newHostGitHost.value === "github.com") {
+    newHostGitHost.value = "gitlab.com";
+  } else if (newHostKind.value === "github" && newHostGitHost.value === "gitlab.com") {
+    newHostGitHost.value = "github.com";
+  }
+});
+
 addHostAccountForm.addEventListener("submit", (event) => {
   event.preventDefault();
   void actInHostDialog(async () => {
     const value = (id: string) => byId<HTMLInputElement>(id).value;
-    await service.addHostAccount(value("new-host-name"), value("new-host-git-host"), value("new-host-login"), {
-      name: value("new-host-author-name"),
-      email: value("new-host-author-email"),
-    });
+    const kind: GitHostKind = newHostKind.value === "gitlab" ? "gitlab" : "github";
+    await service.addHostAccount(
+      value("new-host-name"),
+      kind,
+      value("new-host-git-host"),
+      value("new-host-login"),
+      {
+        name: value("new-host-author-name"),
+        email: value("new-host-author-email"),
+      },
+    );
     for (const id of ["new-host-name", "new-host-login", "new-host-author-name", "new-host-author-email"]) {
       byId<HTMLInputElement>(id).value = "";
     }

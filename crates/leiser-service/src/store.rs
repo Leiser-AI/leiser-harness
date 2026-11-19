@@ -39,8 +39,8 @@ use serde::{Deserialize, Serialize};
 use crate::git_host::CommitId;
 use crate::repo_check::Outcome;
 use crate::{
-    AgentCli, AgentEvent, AutoFix, PermissionMode, Provider, PullRequestState, SubscriptionKind,
-    TranscriptEntry, TurnCheckpoints,
+    AgentCli, AgentEvent, AutoFix, GitHostKind, PermissionMode, Provider, PullRequestState,
+    SubscriptionKind, TranscriptEntry, TurnCheckpoints,
 };
 
 /// The storage version this harness service writes.
@@ -63,7 +63,7 @@ const VERSION: u32 = 3;
 const STATE_FILE: &str = "state.json";
 const CHATS_DIR: &str = "chats";
 const SUBSCRIPTIONS_DIR: &str = "subscriptions";
-/// Holds one `gh` config directory per host account.
+/// Holds one CLI config directory per host account (`gh` or `glab`).
 const HOST_ACCOUNTS_DIR: &str = "host-accounts";
 
 const REPO_CHECKS_DIR: &str = "repo-checks";
@@ -125,6 +125,9 @@ pub(crate) struct StateV3 {
 pub(crate) struct HostAccountV3 {
     pub id: u64,
     pub name: String,
+    /// Added after version 3 was released; older accounts are GitHub.
+    #[serde(default)]
+    pub kind: GitHostKind,
     pub git_host: String,
     pub login: String,
     pub author_name: String,
