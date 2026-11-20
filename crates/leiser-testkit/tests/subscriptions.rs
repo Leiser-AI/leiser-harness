@@ -306,6 +306,37 @@ fn files(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
 }
 
 #[tokio::test]
+async fn a_failed_save_preserves_subscription_settings_and_credentials() -> TestResult {
+    let harness = claude_service(&Script::new())?;
+    let service = harness.connect();
+    let subscription = add(&service, Provider::Anthropic, "Work", api_key(API_KEY)).await?;
+    let before = overview(&service, subscription).await?;
+    let keys = harness.keychain().keys();
+    harness.block_state_saves()?;
+
+    for command in [
+        Command::RenameSubscription {
+            subscription,
+            name: "Other".to_owned(),
+        },
+        Command::SetInterchangeable {
+            subscription,
+            interchangeable: true,
+        },
+        Command::RemoveSubscription { subscription },
+    ] {
+        assert!(matches!(
+            service.execute(command).await,
+            Err(CommandError::Storage { .. })
+        ));
+        assert_eq!(overview(&service, subscription).await?, before);
+        assert_eq!(harness.keychain().keys(), keys);
+        assert!(before.home.is_dir());
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn subscriptions_are_added_named_and_removed_per_provider() -> TestResult {
     let harness = claude_service(&Script::new())?;
     let service = harness.connect();
@@ -597,6 +628,37 @@ async fn an_api_key_reaches_the_agent_session_as_an_environment_variable() -> Te
         ]
     );
     Ok(())
+}
+
+#[test]
+fn managed_subscriptions_clear_inherited_credentials_for_both_drivers() {
+    let access = leiser_service::SubscriptionAccess {
+        home: PathBuf::from("managed"),
+        api_key: None,
+    };
+    for (cli, endpoint) in [
+        (AgentCli::ClaudeCode, Some("ANTHROPIC_BASE_URL")),
+        (AgentCli::Codex, Some("OPENAI_BASE_URL")),
+        (AgentCli::Gemini, None),
+    ] {
+        let env = access.environment(cli);
+        for name in [
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_AUTH_TOKEN",
+            "CLAUDE_CODE_OAUTH_TOKEN",
+            "OPENAI_API_KEY",
+            "CODEX_API_KEY",
+            "GEMINI_API_KEY",
+            "GOOGLE_API_KEY",
+            "GOOGLE_GENAI_USE_VERTEXAI",
+            "GOOGLE_GENAI_USE_GCA",
+        ]
+        .into_iter()
+        .chain(endpoint)
+        {
+            assert!(env.remove.contains(&name), "{cli:?} inherited {name}");
+        }
+    }
 }
 
 #[tokio::test]
@@ -1037,6 +1099,32 @@ async fn repo_check_runs_on_the_repository_default_anthropic_subscription() -> T
         output,
         format!("{}\n\n{API_KEY}", home(&service, work).await?.display())
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_running_repo_check_keeps_its_subscription() -> TestResult {
+    let gate = Gate::new()?;
+    let harness = repo_check_service(&Script::new().turn([gate.step()]))?;
+    let service = harness.connect();
+    let work = add(&service, Provider::Anthropic, "Work", api_key(API_KEY)).await?;
+    let repo = TestRepo::new()?;
+    set_defaults(&repo, "[subscriptions]\nanthropic = \"Work\"\n")?;
+    let Response::RepositoryAdded { repository } = service
+        .execute(Command::AddRepository {
+            path: repo.path().to_path_buf(),
+        })
+        .await?
+    else {
+        return Err("expected RepositoryAdded".into());
+    };
+    assert_eq!(read_check(&service, repository).await?, RepoCheck::Running);
+    let removal = service
+        .execute(Command::RemoveSubscription { subscription: work })
+        .await;
+    gate.open()?;
+    assert_eq!(removal, Err(CommandError::RepoCheckRunning { repository }));
+    assert_eq!(overview(&service, work).await?.name, "Work");
     Ok(())
 }
 

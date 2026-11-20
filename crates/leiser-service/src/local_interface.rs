@@ -206,16 +206,23 @@ fn new_token() -> Result<String, ServeError> {
 /// Writes the endpoint file so that it never appears half-written and only
 /// the developer can read it.
 fn write_endpoint(path: &Path, endpoint: &Endpoint) -> io::Result<()> {
-    let temporary = path.with_extension("json.tmp");
+    let nonce = getrandom::u64().map_err(|error| io::Error::other(error.to_string()))?;
+    let temporary = path.with_extension(format!("{nonce:016x}.tmp"));
     let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
+    options.write(true).create_new(true);
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
     let mut file = options.open(&temporary)?;
-    std::io::Write::write_all(&mut file, &serde_json::to_vec(endpoint)?)?;
-    file.sync_all()?;
-    drop(file);
-    std::fs::rename(&temporary, path)
+    let result = (|| {
+        std::io::Write::write_all(&mut file, &serde_json::to_vec(endpoint)?)?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&temporary, path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(temporary);
+    }
+    result
 }
 
 /// Compares in time independent of where the texts differ.
@@ -268,7 +275,7 @@ async fn connection(stream: TcpStream, service: ServiceHandle, token: Arc<str>) 
     tokio::join!(write_frames(write, outgoing), senders);
 }
 
-async fn write_frames(mut write: OwnedWriteHalf, mut frames: mpsc::Receiver<ServiceFrame>) {
+async fn write_frames<T: Serialize>(mut write: OwnedWriteHalf, mut frames: mpsc::Receiver<T>) {
     while let Some(frame) = frames.recv().await {
         if write_frame(&mut write, &frame).await.is_err() {
             return;
@@ -469,11 +476,27 @@ pub enum Notification {
 
 type Pending = HashMap<u64, oneshot::Sender<Result<Response, CommandError>>>;
 
+/// Unregisters the waiter even when its caller drops the execute future.
+struct PendingReply<'a> {
+    pending: &'a Mutex<Option<Pending>>,
+    id: u64,
+}
+
+impl Drop for PendingReply<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut pending) = self.pending.lock()
+            && let Some(pending) = pending.as_mut()
+        {
+            pending.remove(&self.id);
+        }
+    }
+}
+
 /// A connection to a harness service in another process. Cheap to clone;
 /// all clones share one connection.
 #[derive(Debug, Clone)]
 pub struct LocalClient {
-    write: Arc<tokio::sync::Mutex<OwnedWriteHalf>>,
+    outgoing: mpsc::Sender<ClientFrame>,
     /// Commands waiting for their reply; `None` once the connection closed.
     pending: Arc<Mutex<Option<Pending>>>,
     next_id: Arc<std::sync::atomic::AtomicU64>,
@@ -545,10 +568,23 @@ impl LocalClient {
         }
         let pending = Arc::new(Mutex::new(Some(Pending::new())));
         let (notifications, receiver) = mpsc::channel(NOTIFICATION_BUFFER);
-        tokio::spawn(read_frames(lines, pending.clone(), notifications));
+        let (outgoing, frames) = mpsc::channel(FRAME_BUFFER);
+        let waiting = pending.clone();
+        tokio::spawn(async move {
+            // A caller may cancel after queueing a frame. Only this task
+            // owns the writer, so it always finishes the frame or closes
+            // the connection before another frame is sent.
+            tokio::select! {
+                () = read_frames(lines, &waiting, notifications) => {}
+                () = write_frames(write, frames) => {}
+            }
+            if let Ok(mut pending) = waiting.lock() {
+                pending.take();
+            }
+        });
         Ok((
             Self {
-                write: Arc::new(tokio::sync::Mutex::new(write)),
+                outgoing,
                 pending,
                 next_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
                 service_version: service_version.into(),
@@ -565,6 +601,11 @@ impl LocalClient {
     /// Returns why the command failed, or [`CommandError::ServiceStopped`]
     /// when the connection to the service is gone.
     pub async fn execute(&self, command: Command) -> Result<Response, CommandError> {
+        let writer = self
+            .outgoing
+            .reserve()
+            .await
+            .map_err(|_| CommandError::ServiceStopped)?;
         let id = self
             .next_id
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -577,16 +618,11 @@ impl LocalClient {
             let pending = pending.as_mut().ok_or(CommandError::ServiceStopped)?;
             pending.insert(id, reply);
         }
-        let frame = ClientFrame::Execute { id, command };
-        let written = write_frame(&mut *self.write.lock().await, &frame).await;
-        if written.is_err() {
-            if let Ok(mut pending) = self.pending.lock()
-                && let Some(pending) = pending.as_mut()
-            {
-                pending.remove(&id);
-            }
-            return Err(CommandError::ServiceStopped);
-        }
+        let _waiting = PendingReply {
+            pending: &self.pending,
+            id,
+        };
+        writer.send(ClientFrame::Execute { id, command });
         answer.await.map_err(|_| CommandError::ServiceStopped)?
     }
 
@@ -605,7 +641,7 @@ impl LocalClient {
 
 async fn read_frames(
     mut lines: Lines,
-    pending: Arc<Mutex<Option<Pending>>>,
+    pending: &Mutex<Option<Pending>>,
     notifications: mpsc::Sender<Notification>,
 ) {
     while let Some(frame) = next_frame::<ServiceFrame>(&mut lines).await {
@@ -627,11 +663,66 @@ async fn read_frames(
             ServiceFrame::EventsLost => Notification::EventsLost,
             ServiceFrame::Hello { .. } => continue,
         };
-        // Nobody listens any more; replies still matter.
-        let _ = notifications.send(notification).await;
+        // This is the only sender. Fill the last slot with a request to
+        // refresh, so a full queue always ends in EventsLost. Keep reading
+        // replies even while the notification consumer is catching up.
+        let notification = if notifications.capacity() <= 1 {
+            Notification::EventsLost
+        } else {
+            notification
+        };
+        let _ = notifications.try_send(notification);
     }
-    // Fails every waiting command with `ServiceStopped`, and every later one.
-    if let Ok(mut pending) = pending.lock() {
-        pending.take();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn cancelling_a_request_releases_its_reply_slot_without_a_service_reply()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let data = tempfile::tempdir()?;
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+        write_endpoint(
+            &data.path().join(ENDPOINT_FILE),
+            &Endpoint {
+                version: LOCAL_INTERFACE_VERSION,
+                port: listener.local_addr()?.port(),
+                token: String::new(),
+            },
+        )?;
+        let peer = async {
+            let (stream, _) = listener.accept().await?;
+            let (read, mut write) = stream.into_split();
+            let mut lines = Lines::new(read, MAX_CLIENT_FRAME_BYTES);
+            assert!(matches!(
+                next_frame::<ClientFrame>(&mut lines).await,
+                Some(ClientFrame::Hello { .. })
+            ));
+            write_frame(
+                &mut write,
+                &ServiceFrame::Hello {
+                    protocol: LOCAL_INTERFACE_VERSION,
+                    service_version: "test".to_owned(),
+                    pid: 1,
+                },
+            )
+            .await?;
+            Ok::<_, io::Error>((lines, write))
+        };
+        let (connected, peer) = tokio::join!(LocalClient::connect(data.path()), peer);
+        let (client, _events) = connected?;
+        let (mut lines, _write) = peer?;
+        let requesting = client.clone();
+        let request = tokio::spawn(async move { requesting.execute(Command::ListChats).await });
+        assert!(matches!(
+            next_frame::<ClientFrame>(&mut lines).await,
+            Some(ClientFrame::Execute { .. })
+        ));
+        request.abort();
+        assert!(request.await.is_err_and(|error| error.is_cancelled()));
+        assert!(client.pending.lock().unwrap().as_ref().unwrap().is_empty());
+        Ok(())
     }
 }

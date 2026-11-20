@@ -1717,11 +1717,18 @@ mod tests {
             vec![
                 ("ANTHROPIC_API_KEY".to_owned(), None),
                 ("ANTHROPIC_AUTH_TOKEN".to_owned(), None),
+                ("ANTHROPIC_BASE_URL".to_owned(), None),
                 ("CLAUDE_CODE_OAUTH_TOKEN".to_owned(), None),
                 (
                     "CLAUDE_CONFIG_DIR".to_owned(),
                     Some("/data/subscriptions/1/claude".to_owned())
                 ),
+                ("CODEX_API_KEY".to_owned(), None),
+                ("GEMINI_API_KEY".to_owned(), None),
+                ("GOOGLE_API_KEY".to_owned(), None),
+                ("GOOGLE_GENAI_USE_GCA".to_owned(), None),
+                ("GOOGLE_GENAI_USE_VERTEXAI".to_owned(), None),
+                ("OPENAI_API_KEY".to_owned(), None),
             ]
         );
     }

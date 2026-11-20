@@ -143,6 +143,52 @@ async fn harness_mcp_answers(url: String) -> TestResult<bool> {
 }
 
 #[tokio::test]
+async fn stopping_the_service_closes_its_mcp_connections_and_listener() -> TestResult {
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::TcpStream;
+
+    let script = Script::new().turn([Step::ReportHarnessMcpUrl]);
+    let harness = start_service(&script, &script)?;
+    let service = harness.connect();
+    let repo = TestRepo::new()?;
+    let chat = start_chat(&service, &repo).await?;
+    let url = answer(&service, &mut service.subscribe(), chat, "where").await?;
+    let address = url
+        .strip_prefix("http://")
+        .and_then(|url| url.split('/').next())
+        .ok_or("expected an HTTP address")?;
+    let mut connection = BufReader::new(TcpStream::connect(address).await?);
+    connection
+        .get_mut()
+        .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .await?;
+    let mut header = String::new();
+    connection.read_line(&mut header).await?;
+    assert!(header.starts_with("HTTP/1.1 404"));
+    loop {
+        header.clear();
+        if connection.read_line(&mut header).await? == 0 {
+            return Err("unexpected EOF".into());
+        }
+        if header == "\r\n" {
+            break;
+        }
+    }
+
+    drop(harness);
+    service.stopped().await;
+    let read = tokio::time::timeout(Duration::from_secs(2), connection.read_u8())
+        .await
+        .map_err(|_| "an idle MCP connection survived service shutdown")?;
+    assert!(read.is_err());
+    assert!(
+        TcpStream::connect(address).await.is_err(),
+        "the MCP listener survived shutdown"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn an_ended_agent_session_loses_its_harness_mcp_address() -> TestResult {
     let script = Script::new().turn([Step::ReportHarnessMcpUrl]);
     let harness = start_service(&script, &script)?;

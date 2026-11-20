@@ -203,3 +203,25 @@ async fn sending_to_an_unknown_chat_fails() -> TestResult {
     assert_eq!(result, Err(CommandError::UnknownChat { chat: unknown }));
     Ok(())
 }
+
+#[test]
+fn a_session_id_must_be_one_file_name() -> Result<(), Box<dyn std::error::Error>> {
+    let data = tempfile::tempdir()?;
+    let script = data.path().join("script.json");
+    std::fs::write(&script, serde_json::to_vec(&Script::new())?)?;
+    std::fs::create_dir(data.path().join("group"))?;
+    for flag in ["--session-id", "--resume"] {
+        for id in ["group/session", "group\\session"] {
+            let run = std::process::Command::new(env!("CARGO_BIN_EXE_fake-agent-cli"))
+                .arg("--script")
+                .arg(&script)
+                .arg("--sessions")
+                .arg(data.path())
+                .args([flag, id])
+                .output()?;
+            assert!(!run.status.success());
+            assert!(String::from_utf8(run.stderr)?.contains("usage:"));
+        }
+    }
+    Ok(())
+}

@@ -462,6 +462,74 @@ async fn the_main_checkouts_branch_is_not_the_agents_to_name() -> TestResult {
     Ok(())
 }
 
+/// Invoked as a foreground child of the setup shell. Holding a file lock
+/// gives the parent an OS-level witness that works on Windows and Unix.
+#[test]
+fn setup_script_worker() -> TestResult {
+    let Some(repo) = std::env::var_os("LEISER_TEST_SETUP_LOCK_DIR") else {
+        return Ok(());
+    };
+    let repo = Path::new(&repo);
+    let lock = std::fs::File::create(repo.join("worker.lock"))?;
+    lock.lock()?;
+    std::fs::write(repo.join("worker.ready"), [])?;
+    std::thread::sleep(std::time::Duration::from_secs(30));
+    Ok(())
+}
+
+#[tokio::test]
+async fn stopping_the_service_ends_a_running_setup_script() -> TestResult {
+    use std::time::Duration;
+    let harness = start_service(&Script::new())?;
+    let service = harness.connect();
+    let repo = TestRepo::with_remote()?;
+    let worker = format!("setup-worker{}", std::env::consts::EXE_SUFFIX);
+    std::fs::copy(std::env::current_exe()?, repo.path().join(&worker))?;
+    configure(
+        &repo,
+        &format!(
+            r#"[worktree]
+setup_script = '''
+LEISER_TEST_SETUP_LOCK_DIR="$LEISER_REPOSITORY" "$LEISER_REPOSITORY/{worker}" --exact setup_script_worker
+echo finished
+'''
+"#
+        ),
+    )?;
+    let repository = add_repository(&service, &repo).await?;
+    start_chat(&service, repository, Checkout::NewWorktree).await?;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !repo.path().join("worker.ready").exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await?;
+    let lock = std::fs::File::options()
+        .read(true)
+        .write(true)
+        .open(repo.path().join("worker.lock"))?;
+    assert!(matches!(
+        lock.try_lock(),
+        Err(std::fs::TryLockError::WouldBlock)
+    ));
+    drop(harness);
+    service.stopped().await;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            match lock.try_lock() {
+                Ok(()) => return Ok(()),
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                Err(std::fs::TryLockError::Error(error)) => return Err(error),
+            }
+        }
+    })
+    .await
+    .map_err(|_| "setup worker survived service shutdown")??;
+    Ok(())
+}
+
 #[tokio::test]
 async fn the_setup_script_runs_after_the_worktree_is_created_and_before_the_agent_starts()
 -> TestResult {
@@ -763,5 +831,30 @@ async fn a_chat_keeps_its_worktree_and_done_status_after_a_restart() -> TestResu
             name: "feat/kept".to_owned()
         }
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_verbose_script_keeps_both_streams_within_its_output_budget() -> TestResult {
+    const BUDGET: usize = 64 * 1024;
+    let harness = start_service(&Script::new())?;
+    let service = harness.connect();
+    let repo = TestRepo::with_remote()?;
+    std::fs::write(repo.path().join("build-output"), "é".repeat(BUDGET))?;
+    configure(
+        &repo,
+        r#"[worktree]
+setup_script = 'cat "$LEISER_REPOSITORY/build-output"; echo finished >&2'
+"#,
+    )?;
+    let repository = add_repository(&service, &repo).await?;
+    let mut events = service.subscribe();
+    let chat = start_chat(&service, repository, Checkout::NewWorktree).await?;
+    let (status, output) = script_finished(&mut events, chat, RepositoryScript::Setup).await?;
+    assert_eq!(status, Some(0));
+    assert!(output.starts_with("[…]\n"));
+    assert!(output.ends_with("éfinished\n"));
+    assert!(!output.contains(char::REPLACEMENT_CHARACTER));
+    assert!(output.len() <= BUDGET);
     Ok(())
 }

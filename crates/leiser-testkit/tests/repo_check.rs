@@ -146,6 +146,30 @@ fn git_status(repo: &TestRepo) -> TestResult<String> {
 }
 
 #[tokio::test]
+async fn a_failed_repo_check_turn_releases_the_session_and_reports_its_reason() -> TestResult {
+    let gate = Gate::new()?;
+    let reason = "the agent could not complete the report";
+    let script = Script::new().turn([
+        Step::Emit {
+            event: leiser_service::AgentEvent::TurnFailed {
+                reason: reason.to_owned(),
+            },
+        },
+        gate.step(),
+    ]);
+    let harness = start_service(&script)?;
+    let repo = TestRepo::new()?;
+    let (service, repository) = add_and_check(&harness, &repo).await?;
+    assert_eq!(
+        read_check(&service, repository).await?,
+        RepoCheck::Failed {
+            reason: reason.to_owned()
+        }
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn adding_a_repository_runs_repo_check_and_groups_its_findings_as_must_and_should()
 -> TestResult {
     let harness = start_service(&reporting())?;

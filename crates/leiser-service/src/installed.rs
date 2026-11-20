@@ -56,7 +56,7 @@ const VERSION_TIMEOUT: Duration = Duration::from_secs(10);
 const VERSION_POLL: Duration = Duration::from_millis(10);
 
 /// The variables an installed driver reads.
-const VARIABLES: [&str; 7] = [
+const VARIABLES: [&str; 8] = [
     "PATH",
     "HOME",
     "SHELL",

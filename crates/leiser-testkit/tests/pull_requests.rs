@@ -514,12 +514,26 @@ async fn a_removed_worktree_stays_removed_across_a_restart() -> TestResult {
 
 #[tokio::test]
 async fn a_worktree_with_uncommitted_changes_is_kept() -> TestResult {
+    keeps_untracked_work(false).await
+}
+
+#[tokio::test]
+async fn untracked_work_is_kept_when_git_status_normally_hides_it() -> TestResult {
+    keeps_untracked_work(true).await
+}
+
+async fn keeps_untracked_work(hide_untracked: bool) -> TestResult {
     let bound = bound_with_commit(None).await?;
     let worktree = worktree(&bound.service, bound.chat).await?;
     let opened = open_pull_request(&bound.service, bound.chat).await?;
     bound.harness.git_host().merge(opened.number);
     check_pull_request(&bound.service, bound.chat).await?;
     std::fs::write(worktree.join("unsaved.txt"), "not committed\n")?;
+    if hide_untracked {
+        bound
+            .repo
+            .git(&["config", "--local", "status.showUntrackedFiles", "no"])?;
+    }
 
     let removed = bound
         .service
@@ -535,6 +549,43 @@ async fn a_worktree_with_uncommitted_changes_is_kept() -> TestResult {
         read_chat(&bound.service, bound.chat).await?.place,
         ChatPlace::Worktree
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_worktree_with_hidden_submodule_changes_is_kept() -> TestResult {
+    let bound = bound_with_commit(None).await?;
+    let worktree = worktree(&bound.service, bound.chat).await?;
+    let module = TestRepo::with_remote()?;
+    git(
+        &worktree,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            module.path().to_str().ok_or("non-UTF-8 fixture path")?,
+            "module",
+        ],
+    )?;
+    assert!(worktree.join("module/README.md").is_file());
+    commit_in_turn(&bound.service, bound.chat).await?;
+    let opened = open_pull_request(&bound.service, bound.chat).await?;
+    bound.harness.git_host().merge(opened.number);
+    check_pull_request(&bound.service, bound.chat).await?;
+    git(&worktree, &["config", "submodule.module.ignore", "all"])?;
+    let file = worktree.join("module/README.md");
+    std::fs::write(&file, "uncommitted module change")?;
+
+    let removed = bound
+        .service
+        .execute(Command::RemoveWorktree { chat: bound.chat })
+        .await;
+    assert_eq!(
+        removed,
+        Err(CommandError::WorktreeHasChanges { chat: bound.chat })
+    );
+    assert_eq!(std::fs::read_to_string(file)?, "uncommitted module change");
     Ok(())
 }
 

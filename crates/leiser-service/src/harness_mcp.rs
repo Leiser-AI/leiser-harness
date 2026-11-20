@@ -28,6 +28,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot};
+use tokio::task::{JoinHandle, JoinSet};
 
 use crate::handoff::{self, ReadError};
 use crate::todos::TodoChange;
@@ -126,6 +127,13 @@ type Chats = Arc<Shared>;
 pub(crate) struct HarnessMcp {
     address: SocketAddr,
     chats: Chats,
+    task: JoinHandle<()>,
+}
+
+impl Drop for HarnessMcp {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
 }
 
 impl HarnessMcp {
@@ -144,8 +152,12 @@ impl HarnessMcp {
             chats: Mutex::default(),
             calls,
         });
-        tokio::spawn(accept(listener, chats.clone()));
-        Ok(Self { address, chats })
+        let task = tokio::spawn(accept(listener, chats.clone()));
+        Ok(Self {
+            address,
+            chats,
+            task,
+        })
     }
 
     /// Gives an agent session its own address, through which it reads
@@ -204,13 +216,18 @@ impl Drop for Registration {
 }
 
 async fn accept(listener: TcpListener, chats: Chats) {
+    let mut connections = JoinSet::new();
     loop {
-        let Ok((stream, _)) = listener.accept().await else {
+        let accepted = tokio::select! {
+            accepted = listener.accept() => accepted,
+            Some(_) = connections.join_next() => continue,
+        };
+        let Ok((stream, _)) = accepted else {
             tokio::time::sleep(ACCEPT_RETRY).await;
             continue;
         };
         let chats = chats.clone();
-        tokio::spawn(async move {
+        connections.spawn(async move {
             let service = hyper::service::service_fn(move |request| {
                 let chats = chats.clone();
                 async move { Ok::<_, Infallible>(handle(request, &chats).await) }

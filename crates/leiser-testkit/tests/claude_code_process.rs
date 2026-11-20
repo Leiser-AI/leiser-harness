@@ -74,6 +74,51 @@ fn scripts() -> TestResult<&'static Scripts> {
 }
 
 #[tokio::test]
+async fn a_completed_login_reports_its_outcome_before_output_is_drained() -> TestResult {
+    let mut command = tokio::process::Command::new("sh");
+    command.args([
+        "-c",
+        "i=0; while [ $i -lt 100 ]; do echo line; i=$((i+1)); done",
+    ]);
+    let login = leiser_service::LoginProcess::spawn(command)?;
+    let outcome = tokio::time::timeout(Duration::from_secs(2), login.outcome).await??;
+    assert_eq!(outcome, leiser_service::LoginOutcome::SignedIn);
+    Ok(())
+}
+
+#[tokio::test]
+async fn login_output_stays_open_until_the_cancelled_child_is_reaped() -> TestResult {
+    let mut command = tokio::process::Command::new("sh");
+    command.args(["-c", "echo $$; exec 1>&- 2>&-; exec sleep 30"]);
+    let mut login = leiser_service::LoginProcess::spawn(command)?;
+    let pid: u32 = login
+        .output
+        .recv()
+        .await
+        .ok_or("missing child PID")?
+        .parse()?;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(250), login.output.recv())
+            .await
+            .is_err(),
+        "the login reported closure while its child still ran"
+    );
+    login.outcome.close();
+    assert_eq!(
+        tokio::time::timeout(DEADLINE, login.output.recv()).await?,
+        None
+    );
+    assert!(
+        !std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .output()?
+            .status
+            .success()
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_dropped_agent_session_ends_claude_code_even_while_it_waits_for_approval() -> TestResult {
     let scripts = scripts()?;
     let repo = TestRepo::new()?;

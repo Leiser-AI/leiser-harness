@@ -106,9 +106,24 @@ struct SessionState {
     turns_played: usize,
 }
 
+struct SessionId(String);
+
+impl SessionId {
+    fn parse(id: String) -> Result<Self, FakeError> {
+        if id.is_empty() || id == "." || id == ".." || id.contains(['/', '\\', ':']) {
+            return Err(FakeError::Usage);
+        }
+        Ok(Self(id))
+    }
+
+    fn path(&self, sessions: &Path) -> PathBuf {
+        sessions.join(format!("{}.json", self.0))
+    }
+}
+
 enum SessionArg {
-    New(String),
-    Resume(String),
+    New(SessionId),
+    Resume(SessionId),
 }
 
 struct Args {
@@ -134,8 +149,8 @@ fn parse_args() -> Result<Args, FakeError> {
         match flag.to_str() {
             Some("--script") => script = Some(PathBuf::from(&value)),
             Some("--sessions") => sessions = Some(PathBuf::from(&value)),
-            Some("--session-id") => session = Some(SessionArg::New(text()?)),
-            Some("--resume") => session = Some(SessionArg::Resume(text()?)),
+            Some("--session-id") => session = Some(SessionArg::New(SessionId::parse(text()?)?)),
+            Some("--resume") => session = Some(SessionArg::Resume(SessionId::parse(text()?)?)),
             Some("--harness-mcp") => harness_mcp = Some(text()?),
             Some("--permission-mode") => {
                 permission_mode = serde_json::from_value(serde_json::Value::String(text()?))
@@ -166,25 +181,20 @@ struct SessionFile {
 
 impl SessionFile {
     fn open(sessions: &Path, session: SessionArg) -> Result<Self, FakeError> {
-        let file = |id: &str| {
-            let mut name = OsString::from(id);
-            name.push(".json");
-            sessions.join(name)
-        };
         let session = match session {
             SessionArg::New(id) => Self {
-                path: file(&id),
+                path: id.path(sessions),
                 state: SessionState::default(),
             },
             SessionArg::Resume(id) => {
-                let path = file(&id);
+                let path = id.path(sessions);
                 match std::fs::read(&path) {
                     Ok(bytes) => Self {
                         path,
                         state: serde_json::from_slice(&bytes)?,
                     },
                     Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                        return Err(FakeError::UnknownSession(id));
+                        return Err(FakeError::UnknownSession(id.0));
                     }
                     Err(error) => return Err(error.into()),
                 }

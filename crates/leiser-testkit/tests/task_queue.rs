@@ -15,10 +15,10 @@ use std::time::Duration;
 
 use leiser_service::{
     AgentCli, Answer, AttentionReason, ChatId, Command, CommandError, CommitAuthor, Event,
-    LoginOutcome, MAX_CONCURRENCY, PermissionMode, Provider, QueueAnswer, QueueCommand, QueueError,
-    QueueItem, QueueItemId, QueueItemState, QueueSettings, QueueStatus, QueueTask, RepositoryId,
-    RepositoryQueue, Response, ServiceConfig, ServiceHandle, SignIn, SubscriptionId,
-    TranscriptEntry,
+    GitHostKind, LoginOutcome, MAX_CONCURRENCY, PermissionMode, Provider, QueueAnswer,
+    QueueCommand, QueueError, QueueItem, QueueItemId, QueueItemState, QueueSettings, QueueStatus,
+    QueueTask, RepositoryId, RepositoryQueue, Response, ServiceConfig, ServiceHandle, SignIn,
+    SubscriptionId, TranscriptEntry,
 };
 use leiser_testkit::{
     FAKE_USAGE_LIMIT_FILE, FakeDriver, FakeGitHost, FakeUsageLimit, Gate, Script, Step, TestRepo,
@@ -790,6 +790,7 @@ async fn a_task_whose_chat_opens_its_pull_request_is_ready_for_review() -> TestR
     let Response::HostAccountAdded { host_account } = app
         .execute(Command::AddHostAccount {
             name: HOST_ACCOUNT.to_owned(),
+            kind: GitHostKind::GitHub,
             git_host: "git.example.invalid".to_owned(),
             login: "work-account".to_owned(),
             author: CommitAuthor {

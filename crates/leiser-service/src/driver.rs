@@ -36,18 +36,14 @@ pub const GEMINI_CLI_HOME: &str = "GEMINI_CLI_HOME";
 /// The Gemini CLI's API key for the Gemini API.
 pub const GEMINI_API_KEY: &str = "GEMINI_API_KEY";
 
-/// Variables that would sign Claude Code in with something other than the
-/// chosen subscription; they rank above a login.
-const CLAUDE_CODE_SIGN_INS: [&str; 3] = [
+/// Provider credentials that a managed login or agent session should
+/// inherit only when explicitly selected for that subscription.
+const PROVIDER_CREDENTIALS: [&str; 9] = [
     ANTHROPIC_API_KEY,
     "ANTHROPIC_AUTH_TOKEN",
     "CLAUDE_CODE_OAUTH_TOKEN",
-];
-/// The same for Codex.
-const CODEX_SIGN_INS: [&str; 3] = [OPENAI_API_KEY, "CODEX_API_KEY", "OPENAI_BASE_URL"];
-/// The same for the Gemini CLI: other keys, and the switches to Vertex AI
-/// and Code Assist that rank above a login.
-const GEMINI_SIGN_INS: [&str; 4] = [
+    OPENAI_API_KEY,
+    "CODEX_API_KEY",
     GEMINI_API_KEY,
     "GOOGLE_API_KEY",
     "GOOGLE_GENAI_USE_VERTEXAI",
@@ -111,18 +107,22 @@ impl SubscriptionAccess {
     /// inherited variables that would sign the agent CLI in otherwise.
     #[must_use]
     pub fn environment(&self, agent_cli: AgentCli) -> SubscriptionEnvironment {
-        let (home, api_key, sign_ins): (_, _, &[&'static str]) = match agent_cli {
-            AgentCli::ClaudeCode => (CLAUDE_CONFIG_DIR, ANTHROPIC_API_KEY, &CLAUDE_CODE_SIGN_INS),
-            AgentCli::Codex => (CODEX_HOME, OPENAI_API_KEY, &CODEX_SIGN_INS),
-            AgentCli::Gemini => (GEMINI_CLI_HOME, GEMINI_API_KEY, &GEMINI_SIGN_INS),
+        let (home, api_key, base_url) = match agent_cli {
+            AgentCli::ClaudeCode => (
+                CLAUDE_CONFIG_DIR,
+                ANTHROPIC_API_KEY,
+                Some("ANTHROPIC_BASE_URL"),
+            ),
+            AgentCli::Codex => (CODEX_HOME, OPENAI_API_KEY, Some("OPENAI_BASE_URL")),
+            AgentCli::Gemini => (GEMINI_CLI_HOME, GEMINI_API_KEY, None),
         };
         let mut set = vec![(home, self.home.clone().into_os_string())];
         if let Some(key) = &self.api_key {
             set.push((api_key, OsString::from(key.expose())));
         }
-        let remove = sign_ins
-            .iter()
-            .copied()
+        let remove = PROVIDER_CREDENTIALS
+            .into_iter()
+            .chain(base_url)
             .filter(|name| !set.iter().any(|(set, _)| set == name))
             .collect();
         SubscriptionEnvironment { set, remove }
@@ -182,7 +182,7 @@ pub struct LoginProcess {
     /// asks for after the developer signed in in the browser.
     pub input: mpsc::Sender<String>,
     /// Resolves when the login has ended. Its output closes when the
-    /// login's output does, usually before.
+    /// login exits and both output streams finish.
     pub outcome: oneshot::Receiver<LoginOutcome>,
 }
 
@@ -212,9 +212,12 @@ impl LoginProcess {
         let (input, answers) = mpsc::channel(LOGIN_OUTPUT_BUFFER);
         tokio::spawn(write_lines(stdin, answers));
         let (mut finished, outcome) = oneshot::channel();
-        tokio::spawn(forward_lines(stdout, lines.clone()));
-        tokio::spawn(forward_lines(stderr, lines));
+        let mut readers = tokio::task::JoinSet::new();
+        readers.spawn(forward_lines(stdout, lines.clone()));
+        readers.spawn(forward_lines(stderr, lines.clone()));
         tokio::spawn(async move {
+            // Closing the output tells the service it is safe to remove
+            // the login directory. Keep its sender until the child exits.
             let status = tokio::select! {
                 status = child.wait() => status,
                 // The login was dropped: stop it.
@@ -232,7 +235,12 @@ impl LoginProcess {
                     reason: format!("could not wait for the login: {error}"),
                 },
             };
-            let _ = finished.send(outcome);
+            if finished.send(outcome).is_ok() {
+                tokio::select! {
+                    () = async { while readers.join_next().await.is_some() {} } => {}
+                    () = lines.closed() => {}
+                }
+            }
         });
         Ok(Self {
             output,

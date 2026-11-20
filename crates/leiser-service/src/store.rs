@@ -65,6 +65,8 @@ use crate::{
 ///   shape is version 3's, so version 3 data reads as it is; the number
 ///   makes an older harness service refuse data that may name them.
 const VERSION: u32 = 4;
+/// An older service must refuse a snapshot while cleanup is outstanding.
+const CLEANUP_VERSION: u32 = 5;
 
 const STATE_FILE: &str = "state.json";
 const CHATS_DIR: &str = "chats";
@@ -125,6 +127,16 @@ pub(crate) struct StateV3 {
     #[serde(default)]
     pub host_accounts: Vec<HostAccountV3>,
     pub chats: Vec<ChatV3>,
+    /// Registrations already removed whose files or key still need cleanup.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_removals: Vec<PendingRemoval>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum PendingRemoval {
+    HostAccount(crate::HostAccountId),
+    Subscription(crate::SubscriptionId, SubscriptionKind),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -506,6 +518,7 @@ impl Store {
             repositories: state.repositories,
             subscriptions: Vec::new(),
             host_accounts: Vec::new(),
+            pending_removals: Vec::new(),
             chats: state
                 .chats
                 .into_iter()
@@ -605,7 +618,11 @@ impl Store {
     pub fn save(&self, state: &StateV3) -> Result<(), StorageError> {
         let path = self.dir.join(STATE_FILE);
         let mut bytes = serde_json::to_vec_pretty(&VersionedRef {
-            version: VERSION,
+            version: if state.pending_removals.is_empty() {
+                VERSION
+            } else {
+                CLEANUP_VERSION
+            },
             state,
         })
         .map_err(|source| StorageError::Io {
@@ -900,15 +917,15 @@ fn parse_state(path: &Path, bytes: &[u8]) -> Result<Stored, StorageError> {
                 .map_err(corrupt)?
                 .state,
         )),
-        // Version 4 has version 3's shape.
-        3 | 4 => Ok(Stored::V3(
+        // Versions 3, 4 and 5 (pending cleanup) all share `VersionedV3`'s shape.
+        3 | VERSION | CLEANUP_VERSION => Ok(Stored::V3(
             serde_json::from_slice::<VersionedV3>(bytes)
                 .map_err(corrupt)?
                 .state,
         )),
         found => Err(StorageError::UnsupportedVersion {
             found,
-            supported: VERSION,
+            supported: CLEANUP_VERSION,
         }),
     }
 }

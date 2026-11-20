@@ -211,6 +211,17 @@ impl TestService {
         })
     }
 
+    /// Makes replacing the state file fail until this test service is dropped.
+    ///
+    /// # Errors
+    ///
+    /// Returns the filesystem error if the state file cannot be moved aside.
+    pub fn block_state_saves(&self) -> io::Result<()> {
+        let path = self.data_dir().join("state.json");
+        std::fs::rename(&path, path.with_extension("backup"))?;
+        std::fs::create_dir(path)
+    }
+
     /// The harness service's data directory.
     #[must_use]
     pub fn data_dir(&self) -> &Path {

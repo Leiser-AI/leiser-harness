@@ -82,6 +82,7 @@ pub(crate) enum SubscriptionError {
     Keychain(#[from] KeychainError),
 }
 
+#[derive(Clone)]
 struct Registered {
     provider: Provider,
     name: String,
@@ -90,6 +91,7 @@ struct Registered {
 }
 
 /// The registered subscriptions.
+#[derive(Clone)]
 pub(crate) struct Subscriptions {
     registered: BTreeMap<SubscriptionId, Registered>,
     /// Holds one directory per subscription.
@@ -236,17 +238,12 @@ impl Subscriptions {
         }
     }
 
-    /// Forgets a subscription and deletes its config directory and key.
-    pub fn remove(&mut self, id: SubscriptionId) -> Result<(), SubscriptionError> {
-        let Some(registered) = self.registered.get(&id) else {
-            return Ok(());
-        };
-        if registered.kind == SubscriptionKind::ApiKey {
-            self.keychain.delete(&keychain::account(id.0))?;
-        }
+    pub fn forget(&mut self, id: SubscriptionId) {
         self.registered.remove(&id);
-        self.remove_dir(id);
-        Ok(())
+    }
+
+    pub fn delete_key(&self, id: SubscriptionId) -> Result<(), KeychainError> {
+        self.keychain.delete(&keychain::account(id.0))
     }
 
     /// What the agent CLI needs to run on the subscription, with its

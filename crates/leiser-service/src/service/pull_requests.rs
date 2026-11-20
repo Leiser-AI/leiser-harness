@@ -457,9 +457,17 @@ async fn base_branch(repository: &Path) -> Result<String, CommandError> {
 /// Fails when the worktree at `working_directory` has uncommitted changes
 /// or commits on no remote.
 async fn check_removable(working_directory: &Path, id: ChatId) -> Result<(), CommandError> {
-    let changes = crate::git::run(working_directory, &["status", "--porcelain"])
-        .await
-        .map_err(|error| failed(&error))?;
+    let changes = crate::git::run(
+        working_directory,
+        &[
+            "status",
+            "--porcelain",
+            "--untracked-files=normal",
+            "--ignore-submodules=none",
+        ],
+    )
+    .await
+    .map_err(|error| failed(&error))?;
     if !changes.is_empty() {
         return Err(CommandError::WorktreeHasChanges { chat: id });
     }
